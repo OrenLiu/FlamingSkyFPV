@@ -33,10 +33,9 @@ class MainMenuScreen(Screen):
         if imgui.button("设置", 220, 50):
             from .settings import SettingsScreen
             self.app.switch(SettingsScreen())
-        # [Task 9] 无人机参数界面实现后解开此块
-        # if imgui.button("无人机参数", 220, 50):
-        #     from .drone_params import DroneParamsScreen
-        #     self.app.switch(DroneParamsScreen())
+        if imgui.button("无人机参数", 220, 50):
+            from .drone_params import DroneParamsScreen
+            self.app.switch(DroneParamsScreen())
         # [Task 10] 遥控配置界面实现后解开此块
         # if imgui.button("遥控通道设置", 220, 50):
         #     from .rc_setup import RCSetupScreen
