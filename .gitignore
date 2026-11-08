@@ -4,6 +4,7 @@ todo.md
 
 # 用户文件
 scene/*
+config/
 
 # 环境文件
 .venv/
