@@ -26,10 +26,9 @@ class MainMenuScreen(Screen):
 
         imgui.set_cursor_pos((w * 0.08, h * 0.42))  # 选项居左
         imgui.begin_group()
-        # [Task 12] 飞行界面实现后解开此块
-        # if imgui.button("开始飞行", 220, 50):
-        #     from .flight import FlightScreen   # 延迟导入避免循环依赖
-        #     self.app.switch(FlightScreen())
+        if imgui.button("开始飞行", 220, 50):
+            from .flight import FlightScreen   # 延迟导入避免循环依赖
+            self.app.switch(FlightScreen())
         if imgui.button("设置", 220, 50):
             from .settings import SettingsScreen
             self.app.switch(SettingsScreen())
