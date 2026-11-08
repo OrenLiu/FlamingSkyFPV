@@ -27,7 +27,8 @@ def load_cjk_font():
         if os.path.exists(path):
             try:
                 return io.fonts.add_font_from_file_ttf(
-                    path, 24, glyph_ranges=io.fonts.get_glyph_ranges_chinese())
+                    path, 24,
+                    glyph_ranges=io.fonts.get_glyph_ranges_chinese_full())
             except Exception:
                 continue
     return None
