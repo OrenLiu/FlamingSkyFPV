@@ -34,13 +34,14 @@ def quat_bullet_to_render(q) -> glm.quat:
 
 def parse_obj_collision(obj_path: str, scale: float = 1.0):
     """解析 OBJ（仅 v/f 行，三角扇剖分），Y-up→Z-up，返回 (vertices, indices)。
-    用于 bullet 静态碰撞网格；渲染模型由 soup3D.open_obj 另行加载。"""
+    用于 bullet 静态碰撞网格；渲染模型由 soup3D.open_obj 另行加载。
+    映射为 bullet→render 正变换 (x,z,-y) 的逆：(x,y,z) → (x,-z,y)，OBJ 的 +Y(上) → bullet +Z(上)。"""
     verts, faces = [], []
     with open(obj_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             if line.startswith("v "):
                 x, y, z = (float(t) for t in line.split()[1:4])
-                verts.append((x * scale, z * scale, -y * scale))  # Y-up→Z-up
+                verts.append((x * scale, -z * scale, y * scale))  # Y-up→Z-up（逆向基变换）
             elif line.startswith("f "):
                 idx = [int(t.split("/")[0]) - 1 for t in line.split()[1:]]
                 for k in range(1, len(idx) - 1):   # 三角扇
@@ -75,9 +76,12 @@ class FlightWorld:
         return [self._params.weight_g / 1000.0 * 9.81 / 4.0] * 4
 
     def step(self, motor_thrusts_N: list, dt: float):
-        """施加电机推力（机体 +Z 向上、作用于臂位置）+ 桨反扭矩 + 阻力，推进 SUBSTEPS 子步"""
+        """施加电机推力（机体 +Z 向上、作用于臂位置）+ 桨反扭矩 + 阻力，推进 SUBSTEPS 子步。
+        每子步长 = dt/SUBSTEPS（需显式 setTimeStep：pybullet 默认 fixedTimeStep
+        固定 1/240，不随 dt 变化，模拟时间会与真实时间脱钩）"""
         h = dt / SUBSTEPS
         for _ in range(SUBSTEPS):
+            p.setTimeStep(h, physicsClientId=self._cid)
             pos, quat = p.getBasePositionAndOrientation(
                 self._body, physicsClientId=self._cid)
             rot = glm.quat(quat[3], quat[0], quat[1], quat[2])  # bullet (x,y,z,w)→glm(w,x,y,z)
