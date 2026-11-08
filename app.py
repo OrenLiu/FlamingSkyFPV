@@ -72,8 +72,14 @@ class App:
         """设置变更后的热重建：重开窗口 + soup3D 重初始化 + 字体/界面资源重载。
         GL 上下文重建失败时置 restart_needed=True（UI 提示重启生效）——Task 8 接线。"""
         try:
+            # OPENGL 窗口 set_mode 同 flag 不改尺寸（pygame 2.6.1 实测）：
+            # 先关窗销毁旧 GL 上下文，再按新尺寸/模式重开（__init__ 首开无需此步）
+            pygame.display.set_mode((0, 0))
             self._open_window()
             self.font = load_cjk_font()
+            # 与 __init__ 对称：新字体加载后必须重烘焙图集，否则下一帧 imgui 断言崩溃
+            if self.font:
+                self._impl.refresh_font_texture()
             if self.screen:
                 self.screen.reload()
             self.restart_needed = False
@@ -115,6 +121,13 @@ class App:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return
+                if event.type == pygame.VIDEORESIZE:
+                    # 不透传 pyimgui 集成层：其 VIDEORESIZE 分支会再 set_mode，
+                    # 全屏切换的中间态尺寸可越界致 OverflowError；窗口尺寸与
+                    # 字体图集已由 rebuild_window 自管，这里只同步 display_size
+                    if event.w > 0 and event.h > 0:
+                        imgui.get_io().display_size = (event.w, event.h)
+                    continue
                 self._impl.process_event(event)
                 self.screen.handle_event(event)
 
