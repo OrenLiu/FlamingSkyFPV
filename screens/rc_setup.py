@@ -3,6 +3,7 @@ import imgui
 import pygame
 from .base import Screen
 from config_store import AxisBinding
+from input.wizard import AxisCapture, MODE_STICKS
 
 CHANNELS = ["throttle", "yaw", "roll", "pitch"]
 CHANNEL_CN = {"throttle": "油门", "yaw": "偏航", "roll": "横滚", "pitch": "俯仰"}
@@ -32,6 +33,7 @@ class RCSetupScreen(Screen):
         self._dev_index = 0
         self._msg = ""
         self._dt = 0.0   # 最近一帧时长（update 缓存，预览条用）
+        self._wizard = None   # 向导状态机（非 None 时 render_ui 改渲染向导界面）
 
     def update(self, dt: float):
         self._dt = dt   # 主循环在 render_ui 之前调用，同帧预览条可拿到真实 dt
@@ -45,6 +47,9 @@ class RCSetupScreen(Screen):
         self.app.switch(MainMenuScreen())
 
     def render_ui(self):
+        if self._wizard is not None:   # 向导激活：改渲染向导弹窗（模态）
+            self._render_wizard()
+            return
         imgui.set_next_window_position(30, 30)
         imgui.set_next_window_size(560, 0)
         imgui.begin("遥控通道设置", flags=imgui.WINDOW_NO_COLLAPSE)
@@ -58,7 +63,8 @@ class RCSetupScreen(Screen):
         devs = joystick_devices()
         if not devs:
             imgui.text("未检测到手柄（插入后自动出现）")
-            imgui.button("启动配置向导", 180, 40)  # 无手柄时不可用（Task 11 接线）
+            # 无手柄：向导按钮保持不可用（裸按钮，无点击分支）
+            imgui.button("启动配置向导", 180, 40)
         else:
             labels = [f"{i}: {name}" for i, name in devs]
             _, self._dev_index = imgui.combo("设备", self._dev_index, labels,
@@ -80,7 +86,9 @@ class RCSetupScreen(Screen):
                 self.app.rc_input = self._make_joystick_input()
                 self._msg = "已应用手柄绑定"
             imgui.same_line()
-            imgui.button("启动配置向导", 180, 40)   # Task 11 接线
+            if imgui.button("启动配置向导", 180, 40):   # _dev_index 已由设备下拉框写好
+                self._wizard = {"stage": "mode", "capture": None,
+                                "bound": {}, "mode": None}
 
         imgui.separator()
         imgui.text("通道实时预览")
@@ -100,3 +108,59 @@ class RCSetupScreen(Screen):
         joy = pygame.joystick.Joystick(self._dev_index)
         joy.init()
         return JoystickInput(joy.get_axis, self.app.rc_config.mappings)
+
+    def _render_wizard(self):
+        wz = self._wizard
+        imgui.begin("配置向导", flags=imgui.WINDOW_NO_COLLAPSE)
+        joy = pygame.joystick.Joystick(self._dev_index)
+        joy.init()
+        n_axis = joy.get_numaxes()
+
+        if wz["stage"] == "mode":   # 第一步：遥控类型
+            imgui.text("你的遥控是哪种模式？")
+            for m in MODE_STICKS:
+                if imgui.button(m, 200, 40):
+                    wz["mode"] = m
+                    wz["stage"] = "capture"
+                    wz["order"] = ["throttle", "yaw", "roll", "pitch"]
+                    wz["bound"] = {}
+                    wz["capture"] = None
+        elif wz["stage"] == "capture":   # 第二步：逐通道捕获
+            ch_name = wz["order"][len(wz["bound"])]
+            stick = MODE_STICKS[wz["mode"]][ch_name]
+            if wz["capture"] is None:
+                imgui.text(f"请反复打满 {CHANNEL_CN[ch_name]}（{stick}）")
+                if imgui.button("开始识别", 180, 40):
+                    wz["capture"] = AxisCapture(
+                        threshold=0.25, exclude=set(wz["bound"].values()))
+            else:
+                wz["capture"].feed([joy.get_axis(i) for i in range(n_axis)])
+                imgui.text(f"识别中…（{CHANNEL_CN[ch_name]} / {stick}）")
+                found = wz["capture"].result(n_axis)
+                if found is not None:
+                    wz["bound"][ch_name] = found
+                    wz["capture"] = None
+                    if len(wz["bound"]) == 4:
+                        wz["stage"] = "verify"
+                else:
+                    imgui.text("等待更大的杆量…")
+        elif wz["stage"] == "verify":   # 第三步：验证
+            imgui.text("验证：推动各通道，确认预览方向正确")
+            t, y, r, p = _preview_channels(self.app, self._dt)
+            _bar("油门", t, 0, 1); _bar("偏航", y, -1, 1)
+            _bar("横滚", r, -1, 1); _bar("俯仰", p, -1, 1)
+            if imgui.button("完成并保存", 200, 40):
+                for c, axis in wz["bound"].items():
+                    self.app.rc_config.mappings[c] = AxisBinding(axis=axis)
+                self.app.rc_config.mode = "joystick"
+                self.app.rc_config.device_name = joy.get_name()
+                self.app.store.save("rc", self.app.rc_config)
+                self.app.rc_input = self._make_joystick_input()
+                self._wizard = None
+            imgui.same_line()
+            if imgui.button("重来", 120, 40):
+                self._wizard = {"stage": "mode", "capture": None,
+                                "bound": {}, "mode": None}
+        if imgui.button("取消向导", 140, 30):
+            self._wizard = None
+        imgui.end()
