@@ -30,10 +30,9 @@ class MainMenuScreen(Screen):
         # if imgui.button("开始飞行", 220, 50):
         #     from .flight import FlightScreen   # 延迟导入避免循环依赖
         #     self.app.switch(FlightScreen())
-        # [Task 8] 设置界面实现后解开此块
-        # if imgui.button("设置", 220, 50):
-        #     from .settings import SettingsScreen
-        #     self.app.switch(SettingsScreen())
+        if imgui.button("设置", 220, 50):
+            from .settings import SettingsScreen
+            self.app.switch(SettingsScreen())
         # [Task 9] 无人机参数界面实现后解开此块
         # if imgui.button("无人机参数", 220, 50):
         #     from .drone_params import DroneParamsScreen
