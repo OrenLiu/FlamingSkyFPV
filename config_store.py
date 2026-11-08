@@ -18,6 +18,10 @@ class PIDGains:
     i: float = 0.0
     d: float = 0.0
 
+# PID 参数 schema 版本：2 = 现行物理标定量级（roll/pitch 临界 P≈9e-4）；
+# 缺失/更早版本的存档为旧量级（P≈45），加载时整体重置（见 ConfigStore.load）
+PID_SCHEMA = 2
+
 @dataclass
 class DroneParams:
     """无人机全参数——参数页编辑对象，飞控仿真消费对象"""
@@ -38,6 +42,7 @@ class DroneParams:
         "pitch": PIDGains(0.0004, 0.0004, 0.000004),
         "yaw": PIDGains(0.004, 0.001, 0.0),
     })
+    pid_schema: int = PID_SCHEMA       # PID 参数版本：不匹配的存档加载时重置 pid
 
 @dataclass
 class AxisBinding:
@@ -95,10 +100,19 @@ class ConfigStore:
             return cls()  # 无文件 → 默认值（首启动自动生成的效果由后续 save 达成）
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return _rebuild(cls, json.load(f))
+                data = json.load(f)
+            obj = _rebuild(cls, data)
         except (json.JSONDecodeError, TypeError, KeyError):
             shutil.copy2(path, path + ".bak")  # 备份损坏文件
             return cls()
+        # PID 版本迁移：旧 schema（无 pid_schema 键或值≠2）量级与现行物理不符——
+        # 加载即 bang-bang 且参数页滑条超限。pid 整体重置为新默认，其余字段保留。
+        # 注意须查原始 JSON：_rebuild 对缺失键会补 dataclass 默认值 2，查对象会漏掉旧档
+        if cls is DroneParams and isinstance(data, dict) \
+                and data.get("pid_schema") != PID_SCHEMA:
+            obj.pid = default_drone_params().pid
+            obj.pid_schema = PID_SCHEMA
+        return obj
 
     def save(self, name: str, obj):
         os.makedirs(self.config_dir, exist_ok=True)

@@ -3,6 +3,7 @@ import imgui
 import pygame
 from .base import Screen
 from config_store import AxisBinding
+from input.joystick import JoystickInput
 from input.wizard import AxisCapture, MODE_STICKS
 
 CHANNELS = ["throttle", "yaw", "roll", "pitch"]
@@ -15,7 +16,7 @@ def joystick_devices():
             for i in range(pygame.joystick.get_count())]
 
 def _preview_channels(app, dt: float = 0.0) -> tuple:
-    """读当前 RCInput 四通道值（预览条与向导验证页共用）；dt 推进键盘油门积分器"""
+    """读当前 RCInput 四通道值（主界面预览条用）；dt 推进键盘油门积分器"""
     ch = app.rc_input.read(dt)
     return (ch.throttle, ch.yaw, ch.roll, ch.pitch)
 
@@ -61,7 +62,11 @@ class RCSetupScreen(Screen):
 
         imgui.separator()
         devs = joystick_devices()
-        if not devs:
+        if devs:
+            # 拔柄/重排后陈旧索引越界钳位（台账 T10 minor）
+            self._dev_index = min(self._dev_index, len(devs) - 1)
+        joy = self._safe_joystick()
+        if joy is None:
             imgui.text("未检测到手柄（插入后自动出现）")
             # 无手柄：向导按钮保持不可用（裸按钮，无点击分支）
             imgui.button("启动配置向导", 180, 40)
@@ -71,8 +76,6 @@ class RCSetupScreen(Screen):
                                              0 if len(labels) < 15 else len(labels))
             imgui.separator()
             imgui.text("手动绑定（轴 0 ~ N，-1 未绑定）")
-            joy = pygame.joystick.Joystick(self._dev_index)
-            joy.init()
             axis_count = joy.get_numaxes()
             for c in CHANNELS:
                 b = self.app.rc_config.mappings[c]
@@ -103,17 +106,34 @@ class RCSetupScreen(Screen):
             self._back()
         imgui.end()
 
+    def _safe_joystick(self):
+        """取当前设备手柄；断开/索引越界/构造异常返回 None（裸取会抛 pygame.error）"""
+        if self._dev_index >= pygame.joystick.get_count():
+            return None
+        try:
+            joy = pygame.joystick.Joystick(self._dev_index)
+            joy.init()
+            return joy
+        except pygame.error:
+            return None
+
     def _make_joystick_input(self):
-        from input.joystick import JoystickInput
-        joy = pygame.joystick.Joystick(self._dev_index)
-        joy.init()
+        joy = self._safe_joystick()
+        if joy is None:
+            # 同帧拔柄的极小概率兜底：回落键盘，避免 rc_input 悬空（同 App 层策略）
+            from input.keyboard import KeyboardInput
+            return KeyboardInput()
         return JoystickInput(joy.get_axis, self.app.rc_config.mappings)
 
     def _render_wizard(self):
         wz = self._wizard
+        joy = self._safe_joystick()
+        if joy is None:
+            # 向导中手柄丢失：取消向导回落主界面（每帧裸取手柄会崩，须先于 begin 返回）
+            self._wizard = None
+            self._msg = "手柄已断开，向导已取消"
+            return
         imgui.begin("配置向导", flags=imgui.WINDOW_NO_COLLAPSE)
-        joy = pygame.joystick.Joystick(self._dev_index)
-        joy.init()
         n_axis = joy.get_numaxes()
 
         if wz["stage"] == "mode":   # 第一步：遥控类型
@@ -146,9 +166,12 @@ class RCSetupScreen(Screen):
                     imgui.text("等待更大的杆量…")
         elif wz["stage"] == "verify":   # 第三步：验证
             imgui.text("验证：推动各通道，确认预览方向正确")
-            t, y, r, p = _preview_channels(self.app, self._dt)
-            _bar("油门", t, 0, 1); _bar("偏航", y, -1, 1)
-            _bar("横滚", r, -1, 1); _bar("俯仰", p, -1, 1)
+            # 预览用向导新绑定构造的临时输入源——app.rc_input 仍是旧配置，验证不了新绑定
+            tmp = JoystickInput(joy.get_axis,
+                                {c: AxisBinding(axis=a) for c, a in wz["bound"].items()})
+            ch = tmp.read(self._dt)
+            _bar("油门", ch.throttle, 0, 1); _bar("偏航", ch.yaw, -1, 1)
+            _bar("横滚", ch.roll, -1, 1); _bar("俯仰", ch.pitch, -1, 1)
             if imgui.button("完成并保存", 200, 40):
                 for c, axis in wz["bound"].items():
                     self.app.rc_config.mappings[c] = AxisBinding(axis=axis)
