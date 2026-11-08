@@ -16,7 +16,7 @@ FlamingSkyFPV 是开源 FPV 穿越机模拟器，核心特色：一切皆可自�
 | 渲染 | soup3D 7.0.0（已装） | 自研 OpenGL 引擎，pygame 承载窗口与事件 |
 | 窗口/事件 | pygame 2.6.1（已装） | 唯一主循环载体 |
 | UI | pyimgui 2.0.0（已装） | PygameRenderer 集成，所有界面含主菜单 |
-| 物理 | PyBullet（**待安装**） | `pip install pybullet` |
+| 物理 | PyBullet（**开发环境待装**：`pip install pybullet`） | 运行时不做依赖自检，发布时环境随包分发 |
 | Python | 系统 pyenv 3.10.6 | 用户选定，不建项目 venv |
 
 引擎 API 参考文档：`/home/oren/project/codes/python/#tools/soup3D/docs/`（路径含 `#`，shell 中需引号）。
@@ -117,7 +117,6 @@ weight=550g、motor_kv=1750、thrust_ratio=8、camera_angle=20°、rate=betaflig
 
 | 情形 | 行为 |
 |---|---|
-| pybullet 未安装 | 启动即报安装指引并退出 |
 | 场景 config.json 缺失/非法 | 场景列表跳过该项并标注"无效" |
 | OBJ/贴图加载失败 | 提示后返回场景选择 |
 | 无手柄 / 运行中拔出 | 切键盘模式并 UI 明示 |
