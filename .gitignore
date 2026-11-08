@@ -1,0 +1,19 @@
+# 测试目录
+test/
+todo.md
+
+# 用户文件
+scene/*
+
+# 环境文件
+.venv/
+.idea/
+__pycache__/
+
+# claude
+rules/
+CLAUDE.md
+.claude
+.omc
+.superpowers
+superpowers
