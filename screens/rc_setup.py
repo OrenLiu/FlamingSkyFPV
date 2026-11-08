@@ -13,9 +13,9 @@ def joystick_devices():
     return [(i, pygame.joystick.Joystick(i).get_name())
             for i in range(pygame.joystick.get_count())]
 
-def _preview_channels(app) -> tuple:
-    """读当前 RCInput 四通道值（预览条与向导验证页共用）"""
-    ch = app.rc_input.read(0.0)
+def _preview_channels(app, dt: float = 0.0) -> tuple:
+    """读当前 RCInput 四通道值（预览条与向导验证页共用）；dt 推进键盘油门积分器"""
+    ch = app.rc_input.read(dt)
     return (ch.throttle, ch.yaw, ch.roll, ch.pitch)
 
 def _bar(label, value, lo, hi):
@@ -31,6 +31,10 @@ class RCSetupScreen(Screen):
         self.app = app
         self._dev_index = 0
         self._msg = ""
+        self._dt = 0.0   # 最近一帧时长（update 缓存，预览条用）
+
+    def update(self, dt: float):
+        self._dt = dt   # 主循环在 render_ui 之前调用，同帧预览条可拿到真实 dt
 
     def handle_event(self, event):
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
@@ -80,7 +84,7 @@ class RCSetupScreen(Screen):
 
         imgui.separator()
         imgui.text("通道实时预览")
-        t, y, r, p = _preview_channels(self.app)
+        t, y, r, p = _preview_channels(self.app, self._dt)
         _bar("油门", t, 0, 1)
         _bar("偏航", y, -1, 1)
         _bar("横滚", r, -1, 1)
