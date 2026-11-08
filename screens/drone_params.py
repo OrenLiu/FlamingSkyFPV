@@ -47,11 +47,14 @@ class DroneParamsScreen(Screen):
         imgui.separator()
 
         imgui.text("PID（三轴独立）")
+        # 量纲为 °/s 误差 → 电机单位（默认 ~4e-4 量级，见 config_store 标定注释），
+        # 范围取标定值 10 倍余量；%.4g 自适应小数位
         for ax in AXES:
             g = p.pid[ax]
-            g.p = _slider(f"{ax} P", g.p, 0, 200, "%.0f")
-            g.i = _slider(f"{ax} I", g.i, 0, 200, "%.0f")
-            g.d = _slider(f"{ax} D", g.d, 0, 100, "%.0f")
+            lim = 0.002 if ax != "yaw" else 0.02       # yaw 开环增益低一个量级
+            g.p = _slider(f"{ax} P", g.p, 0, lim, "%.4g")
+            g.i = _slider(f"{ax} I", g.i, 0, lim, "%.4g")
+            g.d = _slider(f"{ax} D", g.d, 0, lim / 100, "%.4g")
         imgui.separator()
 
         imgui.text("机体")

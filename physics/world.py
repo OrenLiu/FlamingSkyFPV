@@ -61,6 +61,11 @@ class FlightWorld:
         mass = params.weight_g / 1000.0
         self._body = p.createMultiBody(mass, col, basePosition=(0, 0, 2),
                                        physicsClientId=self._cid)
+        # 标定实测：bullet 默认 linearDamping/angularDamping=0.04 是隐藏阻尼（零外力
+        # 20m/s 滑行 0.5s 衰减至 14m/s，不在 getDynamicsInfo 返回中），使 DRAG_K 失真
+        # ~23% → 显式清零，线性/角阻尼全部由下方 DRAG_K/ANG_DAMP 显式承担
+        p.changeDynamics(self._body, -1, linearDamping=0.0, angularDamping=0.0,
+                         physicsClientId=self._cid)
 
     def load_scene_mesh(self, obj_path: str, scale: float = 1.0):
         """场景 OBJ → 静态三角网格碰撞体（mass=0 → BVH 三角网格）"""
