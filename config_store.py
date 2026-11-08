@@ -30,10 +30,13 @@ class DroneParams:
     super_rate: float = 0.70
     expo: float = 0.32
     linear_rate_max_deg: float = 360.0  # linear 模式满杆角速度 °/s
+    # PID 量纲：误差 °/s → 电机油门单位。开环增益实测 roll/pitch ≈ 6.8e4、yaw ≈ 6.7e3
+    # °/s²/单位输出，帧长 1/30 时临界 P：roll/pitch ≈ 9e-4、yaw ≈ 9e-3（test/manual/
+    # calibrate.py 无头闭环标定，双 dt 稳定、阶跃无过冲、悬停零饱和）
     pid: dict = field(default_factory=lambda: {
-        "roll": PIDGains(45, 80, 35),
-        "pitch": PIDGains(50, 90, 38),
-        "yaw": PIDGains(60, 90, 0),
+        "roll": PIDGains(0.0004, 0.0004, 0.000004),
+        "pitch": PIDGains(0.0004, 0.0004, 0.000004),
+        "yaw": PIDGains(0.004, 0.001, 0.0),
     })
 
 @dataclass

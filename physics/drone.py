@@ -47,12 +47,14 @@ class PIDController:
 def mix_quad_x(throttle: float, yaw_cmd: float, roll_cmd: float,
                pitch_cmd: float) -> list:
     """quad-X 混控。cmd 为 PID 输出（杆义：yaw右+ roll右+ pitch抬头+）。
-    物理推导见计划「坐标系与符号约定」；方向最终由 test_world 闭环测试裁判。"""
+    pitch 抬头 = 前端上翘 → 前电机加力（标定实测：旧版后电机加产生低头，
+    pitch 开环增益为负 → 闭环正反馈；test_mixer_pitch_front_motors_up 裁判）。
+    roll/yaw 方向由 test_world 闭环测试裁判。"""
     motors = (
-        throttle - pitch_cmd + roll_cmd + yaw_cmd,  # FL
-        throttle - pitch_cmd - roll_cmd - yaw_cmd,  # FR
-        throttle + pitch_cmd + roll_cmd - yaw_cmd,  # BL
-        throttle + pitch_cmd - roll_cmd + yaw_cmd,  # BR
+        throttle + pitch_cmd + roll_cmd + yaw_cmd,  # FL
+        throttle + pitch_cmd - roll_cmd - yaw_cmd,  # FR
+        throttle - pitch_cmd + roll_cmd - yaw_cmd,  # BL
+        throttle - pitch_cmd - roll_cmd + yaw_cmd,  # BR
     )
     return [_clamp(m, 0.0, 1.0) for m in motors]
 
