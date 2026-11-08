@@ -134,6 +134,8 @@ class App:
             if self.font:
                 imgui.pop_font()
             imgui.render()                # 再画 UI
+            # pyimgui 2.0：render() 只终结帧并生成绘制数据，集成层才真正上屏
+            self._impl.render(imgui.get_draw_data())
 
             pygame.display.flip()
 
