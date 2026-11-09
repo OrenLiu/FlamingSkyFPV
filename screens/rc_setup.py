@@ -4,7 +4,7 @@ import pygame
 from .base import Screen
 from config_store import AxisBinding
 from input.joystick import JoystickInput
-from input.wizard import AxisCapture, MODE_STICKS
+from input.wizard import AxisCapture, MODE_STICKS, DIRECTION
 
 CHANNELS = ["throttle", "yaw", "roll", "pitch"]
 CHANNEL_CN = {"throttle": "油门", "yaw": "偏航", "roll": "横滚", "pitch": "俯仰"}
@@ -91,7 +91,7 @@ class RCSetupScreen(Screen):
             imgui.same_line()
             if imgui.button("启动配置向导", 180, 40):   # _dev_index 已由设备下拉框写好
                 self._wizard = {"stage": "mode", "capture": None,
-                                "bound": {}, "mode": None}
+                                "bound": {}, "inverted": {}, "mode": None}
 
         imgui.separator()
         imgui.text("通道实时预览")
@@ -133,6 +133,10 @@ class RCSetupScreen(Screen):
             self._wizard = None
             self._msg = "手柄已断开，向导已取消"
             return
+        # 固定尺寸：方向文案（如「请将偏航向右打满（左杆左右）」16 全角字
+        # ≈ 24px×16）超出默认自动收缩宽度会右缘截断；高度须容纳 verify 阶段
+        # 全部预览条与按钮（高度 0 实测不再按内容自适应，会下缘裁切按钮）
+        imgui.set_next_window_size(480, 300)
         imgui.begin("配置向导", flags=imgui.WINDOW_NO_COLLAPSE)
         n_axis = joy.get_numaxes()
 
@@ -144,21 +148,26 @@ class RCSetupScreen(Screen):
                     wz["stage"] = "capture"
                     wz["order"] = ["throttle", "yaw", "roll", "pitch"]
                     wz["bound"] = {}
+                    wz["inverted"] = {}
                     wz["capture"] = None
         elif wz["stage"] == "capture":   # 第二步：逐通道捕获
             ch_name = wz["order"][len(wz["bound"])]
             stick = MODE_STICKS[wz["mode"]][ch_name]
             if wz["capture"] is None:
-                imgui.text(f"请反复打满 {CHANNEL_CN[ch_name]}（{stick}）")
+                imgui.text(f"请将{CHANNEL_CN[ch_name]}{DIRECTION[ch_name]}打满（{stick}）")
                 if imgui.button("开始识别", 180, 40):
                     wz["capture"] = AxisCapture(
                         threshold=0.25, exclude=set(wz["bound"].values()))
+                    # 按下当帧采样基线（杆静止位；油门不回中也成立）
+                    wz["capture"].begin([joy.get_axis(i) for i in range(n_axis)])
             else:
                 wz["capture"].feed([joy.get_axis(i) for i in range(n_axis)])
                 imgui.text(f"识别中…（{CHANNEL_CN[ch_name]} / {stick}）")
                 found = wz["capture"].result(n_axis)
                 if found is not None:
-                    wz["bound"][ch_name] = found
+                    axis, inverted = found
+                    wz["bound"][ch_name] = axis
+                    wz["inverted"][ch_name] = inverted
                     wz["capture"] = None
                     if len(wz["bound"]) == 4:
                         wz["stage"] = "verify"
@@ -168,13 +177,15 @@ class RCSetupScreen(Screen):
             imgui.text("验证：推动各通道，确认预览方向正确")
             # 预览用向导新绑定构造的临时输入源——app.rc_input 仍是旧配置，验证不了新绑定
             tmp = JoystickInput(joy.get_axis,
-                                {c: AxisBinding(axis=a) for c, a in wz["bound"].items()})
+                                {c: AxisBinding(axis=a, inverted=wz["inverted"][c])
+                                 for c, a in wz["bound"].items()})
             ch = tmp.read(self._dt)
             _bar("油门", ch.throttle, 0, 1); _bar("偏航", ch.yaw, -1, 1)
             _bar("横滚", ch.roll, -1, 1); _bar("俯仰", ch.pitch, -1, 1)
             if imgui.button("完成并保存", 200, 40):
                 for c, axis in wz["bound"].items():
-                    self.app.rc_config.mappings[c] = AxisBinding(axis=axis)
+                    self.app.rc_config.mappings[c] = AxisBinding(
+                        axis=axis, inverted=wz["inverted"][c])
                 self.app.rc_config.mode = "joystick"
                 self.app.rc_config.device_name = joy.get_name()
                 self.app.store.save("rc", self.app.rc_config)
@@ -183,7 +194,7 @@ class RCSetupScreen(Screen):
             imgui.same_line()
             if imgui.button("重来", 120, 40):
                 self._wizard = {"stage": "mode", "capture": None,
-                                "bound": {}, "mode": None}
+                                "bound": {}, "inverted": {}, "mode": None}
         if imgui.button("取消向导", 140, 30):
             self._wizard = None
         imgui.end()
