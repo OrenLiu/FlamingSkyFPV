@@ -120,7 +120,10 @@ class FlightScreen(Screen):
 
     def render_scene(self):
         """逐帧直渲场景模型（spike：显示列表路径失效；open_obj 按材质分面，
-        bando 约 15 个 Face → 每帧约 15 次 draw call，性能可行）"""
+        bando 约 15 个 Face → 每帧约 15 次 draw call）。
+        用 rend_cached（VENDORED 引擎缓存机制）：静态地图的顶点拆分与
+        VAO/VBO 仅首次建立，逐帧只 bind + 绘制（剖析 44ms → 0.3ms）；
+        use/unuse 与 is_dirty→update 保持每帧执行（uniform/矩阵仍需刷新）"""
         if self.stage != "flying" or self._model is None:
             return
         for face in self._model.faces:
@@ -128,7 +131,7 @@ class FlightScreen(Screen):
             if surface.is_dirty():
                 surface.update()
             surface.use()
-            surface.rend(face.mode, face.vertex)
+            surface.rend_cached(face.mode, face.vertex)
             surface.unuse()
 
     # ---- UI ----
