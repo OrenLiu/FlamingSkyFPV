@@ -20,12 +20,19 @@ def rate_setpoint(rc: float, rate: RateParams, rate_type: str) -> float:
     super_factor = 1.0 / max(1.0 - a * super_rate, 0.01)
     return 200.0 * rate.rc_rate * rc * super_factor
 
+# PID 增益刻度换算（类比 Betaflight PID_MIXER_SCALING）：增益入参/存档为 BF 量级
+# 刻度（P≈40 量级，二期地面站 MSP 协议同单位），控制器内部换算到电机油门域
+PID_MIX_SCALING = 1e5
+
 class PIDController:
-    """单轴 PID：D on measurement（无 setpoint 阶跃踢），积分限幅抗饱和
-    （output_limit 限定 I 项幅值：积分器直接累积 i*error*dt 并钳位 ±output_limit；
-    P/D 项不受限——纯 P 输出可远超限幅值，方向由混控末端钳位兜底）"""
+    """单轴 PID：增益为 Betaflight 量级刻度（P≈40 量级），内部换算到电机油门域。
+    D on measurement（无 setpoint 阶跃踢），积分限幅抗饱和
+    （output_limit 限定 I 项幅值：电机域限幅，积分器直接累积 i*error*dt 并
+    钳位 ±output_limit；P/D 项不受限——纯 P 输出可远超限幅值，方向由混控末端钳位兜底）"""
     def __init__(self, p: float, i: float, d: float, output_limit: float = 1.0):
-        self.p, self.i, self.d = p, i, d
+        # BF 刻度 → 电机域：与存档/参数页展示同一刻度，update() 数学在电机域自洽
+        self.p, self.i, self.d = (p / PID_MIX_SCALING, i / PID_MIX_SCALING,
+                                  d / PID_MIX_SCALING)
         self.output_limit = output_limit
         self._integral = 0.0
         self._prev_measurement = None

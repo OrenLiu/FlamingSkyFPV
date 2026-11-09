@@ -60,15 +60,15 @@ class DroneParamsScreen(Screen):
         imgui.separator()
 
         imgui.text("PID（三轴独立）")
-        # 量纲为 °/s 误差 → 电机单位（默认 ~4e-4 量级，见 config_store 标定注释），
-        # 数值输入 step=1e-5；%.5g 自适应小数位（4e-4 显示为 0.0004）
+        # 增益为 BF 量级刻度（默认 roll/pitch 40/40/0.4、yaw 400/100/0，内部
+        # ÷PID_MIX_SCALING 换算到电机域，见 physics.drone）；P/I step=1、D step=0.1
         for ax in AXES:
             g = p.pid[ax]
             imgui.push_id(ax)
             imgui.text(AXIS_CN[ax])
-            g.p = _input("P", g.p, 1e-5)
-            g.i = _input("I", g.i, 1e-5)
-            g.d = _input("D", g.d, 1e-5)
+            g.p = _input("P", g.p, 1.0)
+            g.i = _input("I", g.i, 1.0)
+            g.d = _input("D", g.d, 0.1)
             imgui.pop_id()
         imgui.separator()
 

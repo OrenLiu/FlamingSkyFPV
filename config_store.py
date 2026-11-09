@@ -26,10 +26,10 @@ class RateParams:
     expo: float = 0.32
     linear_max_deg: float = 360.0      # linear 模式满杆角速度 °/s
 
-# 参数 schema 版本：3 = 现行物理标定 PID 量级（roll/pitch 临界 P≈9e-4）+ rate 三轴独立；
-# 缺失/更早版本的存档（旧量级 PID 或全局单份 rate 标量）加载时 pid 与 rate 整体重置
-# （见 ConfigStore.load）
-PARAMS_SCHEMA = 3
+# 参数 schema 版本：4 = PID 刻度对齐 Betaflight 量级（P≈40，见 physics.drone.
+# PID_MIX_SCALING）。3 = 三轴 rate + 小刻度 PID（仅 pid 过时）；缺失/更早 = 旧量级
+# PID 或全局单份 rate。加载时按版本重置（见 ConfigStore.load）
+PARAMS_SCHEMA = 4
 
 @dataclass
 class DroneParams:
@@ -43,12 +43,15 @@ class DroneParams:
     rate: dict = field(default_factory=lambda: {
         k: RateParams() for k in ("roll", "pitch", "yaw")})
     # PID 量纲：误差 °/s → 电机油门单位。开环增益实测 roll/pitch ≈ 6.8e4、yaw ≈ 6.7e3
-    # °/s²/单位输出，帧长 1/30 时临界 P：roll/pitch ≈ 9e-4、yaw ≈ 9e-3（test/manual/
-    # calibrate.py 无头闭环标定，双 dt 稳定、阶跃无过冲、悬停零饱和）
+    # °/s²/单位输出，帧长 1/30 时临界 P（电机域）：roll/pitch ≈ 9e-4、yaw ≈ 9e-3（test/
+    # manual/calibrate.py 无头闭环标定，双 dt 稳定、阶跃无过冲、悬停零饱和）。
+    # 存档/展示为 BF 量级刻度（PIDController 内 ÷PID_MIX_SCALING=1e5 换算）：
+    # 由电机域标定值 4e-4/4e-4/4e-6（roll/pitch）与 4e-3/1e-3/0（yaw）×1e5 换算而来；
+    # yaw P 偏大是桨反扭矩权限弱的诚实物理结果
     pid: dict = field(default_factory=lambda: {
-        "roll": PIDGains(0.0004, 0.0004, 0.000004),
-        "pitch": PIDGains(0.0004, 0.0004, 0.000004),
-        "yaw": PIDGains(0.004, 0.001, 0.0),
+        "roll": PIDGains(40.0, 40.0, 0.4),
+        "pitch": PIDGains(40.0, 40.0, 0.4),
+        "yaw": PIDGains(400.0, 100.0, 0.0),
     })
     params_schema: int = PARAMS_SCHEMA  # 参数版本：不匹配的存档加载时重置 pid+rate
 
@@ -113,15 +116,16 @@ class ConfigStore:
         except (json.JSONDecodeError, TypeError, KeyError):
             shutil.copy2(path, path + ".bak")  # 备份损坏文件
             return cls()
-        # 参数版本迁移：旧 schema（无 params_schema 键或值≠3）量级/结构与现行不符——
-        # PID 旧量级加载即 bang-bang；旧档 rate 为全局单份标量（无三轴嵌套）。
-        # pid 与 rate 整体重置为新默认，其余字段保留。
-        # 注意须查原始 JSON：_rebuild 对缺失键会补 dataclass 默认值 3，查对象会漏掉旧档
+        # 参数版本迁移：v3 档仅 PID 小刻度过时（rate 语义未变）→ 只重置 pid；
+        # 缺失/更早版本量级/结构与现行不符（PID 旧量级加载即 bang-bang、rate 为
+        # 全局单份标量）→ pid 与 rate 整体重置。其余字段均保留。
+        # 注意须查原始 JSON：_rebuild 对缺失键会补 dataclass 默认值，查对象会漏掉旧档
         if cls is DroneParams and isinstance(data, dict) \
                 and data.get("params_schema") != PARAMS_SCHEMA:
             d = default_drone_params()
             obj.pid = d.pid
-            obj.rate = d.rate
+            if data.get("params_schema") != 3:
+                obj.rate = d.rate
             obj.params_schema = PARAMS_SCHEMA
         return obj
 
