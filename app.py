@@ -70,6 +70,32 @@ class App:
         pygame.display.set_caption("FlamingSkyFPV")
         pygame.display.set_mode((w, h), flags)
         soup3D.init(w, h, 75, (0.55, 0.75, 0.95), 0.1, 2048)
+        # 垂直同步：两层生效路径——设置保存 → rebuild_window → _open_window
+        # 重跑 → 交换间隔随新 GL 上下文重设（vsync 热生效，重建失败回落
+        # restart_needed 重启生效）；tick 数字档变更由 run() 每帧读 settings
+        # 即时生效。soup3D 引擎默认不限速，零改动
+        self._set_swap_interval(1 if self.settings.fps_mode == "vsync" else 0)
+
+    @staticmethod
+    def _set_swap_interval(interval: int) -> bool:
+        """当前 GL 上下文设交换间隔（垂直同步，set_mode 建上下文后调用）。
+        实测注记：pygame 2.6.1 的 gl_set_attribute(GL_SWAP_CONTROL) 常量值为 0，
+        实际撞 SDL_GL_RED_SIZE（SDL2 已移除该属性）→ 静默无效；pygame 静态链接
+        SDL，ctypes 直调系统 libSDL2 的 SDL_GL_SetSwapInterval 也只打到另一实例
+        （报 Video subsystem has not been initialized）。改走 GLX 扩展：作用于
+        进程当前上下文（pygame 所建），MESA 扩展优先、SGI 回退（覆盖 Mesa/
+        Intel/AMD/NVIDIA）；无 libGL/glX 符号（非 X11 平台）时静默跳过，
+        vsync 档回落无限制行为。返回是否成功。"""
+        try:
+            import ctypes
+            gl = ctypes.CDLL("libGL.so.1")
+            for fname in ("glXSwapIntervalMESA", "glXSwapIntervalSGI"):
+                fn = getattr(gl, fname, None)
+                if fn is not None and fn(interval) == 0:
+                    return True
+        except OSError:
+            pass
+        return False
 
     def rebuild_window(self):
         """设置变更后的热重建：重开窗口 + soup3D 重初始化 + 字体/界面资源重载。
@@ -120,7 +146,10 @@ class App:
         self.switch(MainMenuScreen())
         self._frames_left = max_frames
         while True:
-            dt = self.clock.tick(60) / 1000.0
+            # 帧率控制：垂直同步/无限制不限速（vsync 由交换间隔阻塞在 GPU 侧限帧），
+            # 数字模式时钟限速（每帧读取 settings，设置页改动即时生效）
+            dt = self.clock.tick(0 if self.settings.fps_mode in ("vsync", "unlimited")
+                                 else int(self.settings.fps_mode)) / 1000.0
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return
