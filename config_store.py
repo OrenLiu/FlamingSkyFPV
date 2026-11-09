@@ -61,6 +61,10 @@ class DroneParams:
     # 不升 schema
     tpa_percent: float = 65.0          # 满油门衰减 %
     tpa_breakpoint: float = 0.30       # 断点油门比例（断点以下不衰减）
+    # 线性空气阻力 N·s/m（阻力 = drag_k×速度，physics.world.step 消费）。默认 1.2 =
+    # T13 标定值——默认机（550g/推重比 7）俯冲极速 ~30m/s；轻量高推机（如 240g/8.6）
+    # 按手感调低（0.4~0.6 → 极速 33~50m/s），0 = 无阻力。additive 字段不升 schema
+    drag_k: float = 1.2
     params_schema: int = PARAMS_SCHEMA  # 参数版本：不匹配的存档加载时重置 pid+rate
 
 @dataclass
