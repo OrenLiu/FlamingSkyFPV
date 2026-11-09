@@ -43,6 +43,7 @@ class App:
         self.rc_config = self.store.load("rc", RCConfig)
         self.scenes = list_scenes("scene")
         self.restart_needed = False   # 热重建失败的降级标记
+        self._pending_rebuild = False  # 延后到帧边界执行的重建标记（见 run()）
         self.debug_overlay = False    # F3 调试覆盖层开关（FPS + 相机坐标）
         self.screen = None
         self._frames_left = None
@@ -105,13 +106,17 @@ class App:
             # 先关窗销毁旧 GL 上下文，再按新尺寸/模式重开（__init__ 首开无需此步）
             pygame.display.set_mode((0, 0))
             self._open_window()
-            self.font = load_cjk_font()
-            # 与 __init__ 对称：新字体加载后必须重烘焙图集，否则下一帧 imgui 断言崩溃
-            if self.font:
+            # 字体重载失败不置 None：旧字体对象结构完好（纹理最多次过期待下次
+            # 重建），置 None 反而令主循环 push/pop 失衡 → render 断言崩溃；
+            # 失败路径提示重启生效
+            new_font = load_cjk_font()
+            if new_font:
+                self.font = new_font
+                # 与 __init__ 对称：新字体加载后必须重烘焙图集，否则下一帧 imgui 断言崩溃
                 self._impl.refresh_font_texture()
             if self.screen:
                 self.screen.reload()
-            self.restart_needed = False
+            self.restart_needed = new_font is None  # 字体重载失败 → 提示重启生效
         except Exception:
             self.restart_needed = True
 
@@ -150,6 +155,12 @@ class App:
             # 数字模式时钟限速（每帧读取 settings，设置页改动即时生效）
             dt = self.clock.tick(0 if self.settings.fps_mode in ("vsync", "unlimited")
                                  else int(self.settings.fps_mode)) / 1000.0
+            if self._pending_rebuild:
+                # 帧边界执行重建：imgui 帧中禁止字体图集操作（add_font 在帧中
+                # 失败被吞 → font 置 None → push/pop 失衡 → render 断言崩溃，
+                # 用户实飞「保存并应用」触发过；故 UI 处理器只置标记，此处执行）
+                self._pending_rebuild = False
+                self.rebuild_window()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return
@@ -175,11 +186,14 @@ class App:
             soup3D.update()               # 先渲 3D（spike 验证的顺序）
             self.screen.render_scene()    # 3D 直渲钩子（显示列表失效，见 base.py）
             imgui.new_frame()
-            if self.font:
+            # push 前捕获：render_ui 处理器可能触发重建改动 self.font（帧中禁字体
+            # 图集操作），pop 条件若再读 self.font 会与 push 时不一致 → 栈失衡
+            pushed = self.font is not None
+            if pushed:
                 imgui.push_font(self.font)
             self.screen.render_ui()
             self._render_debug_overlay()  # 仍在 push_font 作用域内，中文标签可显示
-            if self.font:
+            if pushed:
                 imgui.pop_font()
             imgui.render()                # 再画 UI
             # pyimgui 2.0：render() 只终结帧并生成绘制数据，集成层才真正上屏

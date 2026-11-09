@@ -54,7 +54,11 @@ class SettingsScreen(Screen):
             self.app.settings.fullscreen = self._full
             self.app.settings.fps_mode = self._fps
             self.app.store.save("settings", self.app.settings)
-            self.app.rebuild_window()   # 热重建；失败内部置 restart_needed
+            # 不在此处直接 rebuild_window()：此刻处于 imgui 帧中间，字体图集操作
+            # （load_cjk_font → add_font）帧中失败被吞 → font 置 None → 主循环
+            # push/pop 失衡 → render 断言崩溃（用户实飞触发过）。只置标记，
+            # run() 在帧边界（下一帧 tick 后）执行重建
+            self.app._pending_rebuild = True
         imgui.same_line()
         if imgui.button("返回", 200, 40):
             self.app.switch(_main_menu())
