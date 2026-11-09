@@ -85,6 +85,8 @@ class DroneParamsScreen(Screen):
         suggested = p.motor_kv / 250.0
         imgui.text(f"KV 建议推重比: {suggested:.1f}")
         p.thrust_ratio = _input("推重比", p.thrust_ratio, 0.1)
+        # 电池电压 V：推力按 (V/14.8)² 缩放（参考 4S 标称；满电 4S=16.8、3S=11.1）
+        p.battery_voltage = _input("电池电压 (V)", p.battery_voltage, 0.1)
         # 线性空气阻力 N·s/m：默认 1.2 为默认机标定值，轻量高推机按手感调低
         p.drag_k = _input("空气阻力", p.drag_k, 0.1)
         p.camera_angle_deg = _input("摄像头角度 (°)", p.camera_angle_deg, 1.0)
