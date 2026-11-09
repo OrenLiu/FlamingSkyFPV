@@ -10,6 +10,11 @@ class Settings:
     """应用设置（设计文档：分辨率、全屏）"""
     resolution: tuple = (1280, 720)   # (宽, 高)
     fullscreen: bool = False
+    # 最大帧率模式："vsync"（垂直同步）/ "unlimited"（无限制）/ 具体数值字符串
+    # （"30"~"240"）。app.py 双机制生效：vsync 走 GL_SWAP_CONTROL（重开窗口），
+    # 数字走 clock.tick 限速（即时生效）。additive 字段：旧档缺失键加载时补默认
+    # "60"（保持一期硬锁 60 行为），不升 schema
+    fps_mode: str = "60"
 
 @dataclass
 class PIDGains:
