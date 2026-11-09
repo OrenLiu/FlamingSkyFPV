@@ -1,5 +1,6 @@
 """App：pygame 主循环 + Screen 状态机 + AppContext（设计文档第 3 节）"""
 import os
+import time
 import pygame
 import imgui
 from imgui.integrations.pygame import PygameRenderer
@@ -45,6 +46,12 @@ class App:
         self.restart_needed = False   # 热重建失败的降级标记
         self._pending_rebuild = False  # 延后到帧边界执行的重建标记（见 run()）
         self.debug_overlay = False    # F3 调试覆盖层开关（FPS + 相机坐标）
+        # 自测窗口平均帧率：io.framerate = 1/io.delta_time，但主循环只调
+        # process_event 从不调集成层的 process_inputs() → delta_time 恒为
+        # 初始 0.01667 → framerate 恒 60 不可用（统计见 run() 的窗口计数）
+        self._fps_avg = 0.0        # 窗口平均帧率（0.5s 窗口；io.framerate 因 delta_time 无人维护恒 60，不可用）
+        self._fps_frames = 0       # 当前窗口帧计数
+        self._fps_window_start = 0.0
         self.screen = None
         self._frames_left = None
 
@@ -155,6 +162,18 @@ class App:
             # 数字模式时钟限速（每帧读取 settings，设置页改动即时生效）
             dt = self.clock.tick(0 if self.settings.fps_mode in ("vsync", "unlimited")
                                  else int(self.settings.fps_mode)) / 1000.0
+            # 帧率统计：0.5s 真实时间窗口计数（perf_counter 浮点精度，不受
+            # clock.tick 整数毫秒量化影响——高帧率下 tick 可返回 0ms，
+            # 倒数成百万 fps 毛刺污染 EMA）
+            self._fps_frames += 1
+            now = time.perf_counter()
+            if self._fps_window_start == 0.0:
+                self._fps_window_start = now
+            elapsed = now - self._fps_window_start
+            if elapsed >= 0.5:
+                self._fps_avg = self._fps_frames / elapsed
+                self._fps_frames = 0
+                self._fps_window_start = now
             if self._pending_rebuild:
                 # 帧边界执行重建：imgui 帧中禁止字体图集操作（add_font 在帧中
                 # 失败被吞 → font 置 None → push/pop 失衡 → render 断言崩溃，
@@ -221,7 +240,7 @@ class App:
                  imgui.WINDOW_NO_MOVE)
         imgui.push_style_color(imgui.COLOR_WINDOW_BACKGROUND, 0, 0, 0, 0.5)  # 半透明底
         imgui.begin("##debug_overlay", flags=flags)
-        imgui.text(f"FPS: {io.framerate:.1f}")
+        imgui.text(f"FPS: {self._fps_avg:.0f}")  # 0.5s 窗口平均（io.framerate 恒 60 不可用）
         imgui.text(f"相机: {soup3D.camera.X:.2f}, {soup3D.camera.Y:.2f}, {soup3D.camera.Z:.2f}")
         imgui.end()
         imgui.pop_style_color(1)
