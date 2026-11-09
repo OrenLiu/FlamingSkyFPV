@@ -1,12 +1,11 @@
 """飞行界面：场景选择 → 花式飞行（相机由 PyBullet 位姿驱动）+ HUD + Esc 菜单"""
 import math
-import glm
 import imgui
 import pygame
 import soup3D
 from .base import Screen
 from physics.drone import FlightController
-from physics.world import FlightWorld, bullet_to_render, quat_bullet_to_render
+from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
 
 class FlightScreen(Screen):
     # 内部子状态：选场景 → 加载 → 飞行
@@ -110,9 +109,9 @@ class FlightScreen(Screen):
         ch = self.app.rc_input.read(dt)
         motors = self._fc.update(ch, self._world.gyro_dps, dt)
         self._world.step(self._fc.motor_thrusts(motors), dt)
-        # 相机同步：位姿 + 摄像头仰角合成（设计文档「坐标系与符号约定」）
-        cam = quat_bullet_to_render(self._world.quat) * \
-            glm.quat(math.radians(self.app.drone_params.camera_angle_deg), (1, 0, 0))
+        # 相机同步：位姿 + 机头对齐 + 摄像头仰角合成（纯函数在 physics.world）
+        cam = compose_camera_quat(self._world.quat,
+                                  self.app.drone_params.camera_angle_deg)
         px, py, pz = bullet_to_render(self._world.pos)
         soup3D.camera.goto(px, py, pz)
         soup3D.camera.turn_quat(cam)

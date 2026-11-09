@@ -32,6 +32,17 @@ def quat_bullet_to_render(q) -> glm.quat:
     gq = q if isinstance(q, glm.quat) else glm.quat(q[0], q[1], q[2], q[3])
     return _C * gq * _C_INV
 
+def compose_camera_quat(q_bullet, camera_angle_deg: float) -> glm.quat:
+    """FPV 相机姿态合成：bullet 机体系 → soup3D 相机系。
+    相机约定前向 q·(0,0,-1)、上向 q·(0,1,0)；机头在渲染系为 +X。
+    R_ALIGN 把相机 -Z 转到机头 +X（绕 Y 转 -90°），再叠摄像头仰角
+    （绕 X 正旋=上仰）。勿用 glm.quat(angle, axis)——那是 (w,x,y,z) 构造，
+    产出非单位四元数（人工验收曾致悬停画面颠倒）。"""
+    q_r = quat_bullet_to_render(q_bullet)
+    R_ALIGN = glm.angleAxis(glm.radians(-90.0), glm.vec3(0, 1, 0))
+    pitch = glm.angleAxis(glm.radians(camera_angle_deg), glm.vec3(1, 0, 0))
+    return q_r * R_ALIGN * pitch
+
 def parse_obj_collision(obj_path: str, scale: float = 1.0):
     """解析 OBJ（仅 v/f 行，三角扇剖分），Y-up→Z-up，返回 (vertices, indices)。
     用于 bullet 静态碰撞网格；渲染模型由 soup3D.open_obj 另行加载。
