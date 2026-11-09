@@ -5,8 +5,12 @@ import pybullet as p
 
 ARM = 0.115          # 电机臂长（米，5 寸机）
 SUBSTEPS = 4         # 每帧物理子步（60fps × 4 = 240Hz）
-DRAG_K = 1.2         # 线性阻力 N·s/m（标定：8:1 推重比满杆极速 ~35m/s）
-ANG_DAMP = 0.01      # 角阻尼 N·m·s（桨气动阻尼，防 PID 振荡）
+# 线性阻力默认值 N·s/m（T13 标定：默认机 550g/推重比 7 极速 ~30m/s）——仅作文档
+# 参照与 DroneParams.drag_k 的出厂默认；运行时消费点在 step()，读 self._params.drag_k
+# （用户可在参数页按机型手感调整，轻量高推机建议调低，见 config_store.DroneParams）
+DRAG_K = 1.2
+ANG_DAMP = 0.01      # 角阻尼 N·m·s（桨气动阻尼，防 PID 振荡；与线性阻力是两回事，
+                     # 作用对象是角速度、维持 rate 跟踪稳定，不做用户可调）
 REACT_K = 0.02       # 桨反扭矩系数 N·m/N（5寸桨动量理论悬停 Q/T≈0.013，取整偏稳）
 
 # 电机臂位置（机体系：+X 前 / +Y 左 / +Z 上），顺序 [FL, FR, BL, BR]
@@ -94,8 +98,12 @@ class FlightWorld:
     def step(self, motor_thrusts_N: list, dt: float):
         """施加电机推力（机体 +Z 向上、作用于臂位置）+ 桨反扭矩 + 阻力，推进 SUBSTEPS 子步。
         每子步长 = dt/SUBSTEPS（需显式 setTimeStep：pybullet 默认 fixedTimeStep
-        固定 1/240，不随 dt 变化，模拟时间会与真实时间脱钩）"""
+        固定 1/240，不随 dt 变化，模拟时间会与真实时间脱钩）。
+        线性空气阻力 N = drag_k × v（drag_k 单位 N·s/m，来源 self._params.drag_k，
+        默认 1.2 = T13 标定值，用户可在参数页按机型调整）；角阻尼 ANG_DAMP 与线性
+        阻力是两回事（作用角速度、保 rate 跟踪稳定），不可调"""
         h = dt / SUBSTEPS
+        drag_k = self._params.drag_k
         for _ in range(SUBSTEPS):
             p.setTimeStep(h, physicsClientId=self._cid)
             pos, quat = p.getBasePositionAndOrientation(
@@ -112,10 +120,10 @@ class FlightWorld:
                 p.applyExternalTorque(self._body, -1,
                                       (up.x * tq, up.y * tq, up.z * tq),
                                       p.WORLD_FRAME, physicsClientId=self._cid)
-            # 线性阻力 + 角阻尼
+            # 线性阻力（drag_k 用户可调，N·s/m）+ 角阻尼（定值）
             (lv, av) = p.getBaseVelocity(self._body, physicsClientId=self._cid)
             p.applyExternalForce(self._body, -1,
-                                 (-DRAG_K * lv[0], -DRAG_K * lv[1], -DRAG_K * lv[2]),
+                                 (-drag_k * lv[0], -drag_k * lv[1], -drag_k * lv[2]),
                                  pos, p.WORLD_FRAME, physicsClientId=self._cid)
             p.applyExternalTorque(self._body, -1,
                                   (-ANG_DAMP * av[0], -ANG_DAMP * av[1], -ANG_DAMP * av[2]),
