@@ -1,6 +1,5 @@
 """无人机参数界面：全部飞行参数可调（设计文档第 6 节），保存即时生效。
-用户裁定：PID 与 rate 三轴独立 + 数值输入框（量级跨度大，滑条精度不足）；
-机体参数保持滑条。"""
+用户裁定：PID 与 rate 三轴独立 + 全参数数值输入框（量级跨度大，滑条精度不足）。"""
 import imgui
 import pygame
 from .base import Screen
@@ -9,11 +8,6 @@ from config_store import DroneParams, PIDGains, RateParams, default_drone_params
 RATE_TYPES = ["betaflight_actual", "linear"]
 AXES = ["roll", "pitch", "yaw"]
 AXIS_CN = {"roll": "横滚", "pitch": "俯仰", "yaw": "偏航"}
-
-def _slider(label, v, lo, hi, fmt="%.2f"):
-    """统一滑条+数值联动的局部助手"""
-    _, nv = imgui.slider_float(label, v, lo, hi, fmt)
-    return nv
 
 def _input(label, v, step, fmt="%.5g"):
     """数值输入框助手：pyimgui 2.0 返回 (changed, value)，changed=False 时回写幂等"""
@@ -79,15 +73,15 @@ class DroneParamsScreen(Screen):
         imgui.separator()
 
         imgui.text("机体")
-        p.weight_g = _slider("重量 (g)", p.weight_g, 100, 2000, "%.0f")
-        # pyimgui 2.0 返回 (changed, value)：按 (changed, value) 解包，否则 KV 恒为 0
-        kv_changed, p.motor_kv = imgui.slider_int("电机 KV", int(p.motor_kv),
-                                                  500, 3000)
+        p.weight_g = _input("重量 (g)", p.weight_g, 10.0)
+        # input_int 返回 (changed, int)，与 input_float 同模式；step=50、快进 500
+        kv_changed, p.motor_kv = imgui.input_int("电机 KV", int(p.motor_kv),
+                                                 50, 500)
         p.motor_kv = int(p.motor_kv)
         suggested = p.motor_kv / 250.0
         imgui.text(f"KV 建议推重比: {suggested:.1f}")
-        p.thrust_ratio = _slider("推重比", p.thrust_ratio, 1.0, 15.0, "%.1f")
-        p.camera_angle_deg = _slider("摄像头角度 (°)", p.camera_angle_deg, 0, 60, "%.0f")
+        p.thrust_ratio = _input("推重比", p.thrust_ratio, 0.1)
+        p.camera_angle_deg = _input("摄像头角度 (°)", p.camera_angle_deg, 1.0)
         imgui.separator()
 
         if imgui.button("保存", 180, 40):
