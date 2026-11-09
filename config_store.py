@@ -53,6 +53,14 @@ class DroneParams:
         "pitch": PIDGains(40.0, 40.0, 0.4),
         "yaw": PIDGains(400.0, 100.0, 0.0),
     })
+    # TPA（Throttle PID Attenuation，油门 PID 衰减）：推力∝油门² → 控制权限随油门
+    # 线性上升（满油门 ≈ 2.9× 悬停值），悬停标定的 PID 在高油门越过稳定边界——高油门
+    # 段按此参数衰减 PID 增益（Betaflight 同名机制）。默认 65%/0.30 为无头闭环标定
+    # 定稿（双机型双 dt 全油门段去趋势峰峰 <5°/s 的最小衰减，见 physics/drone.py 与
+    # test/test_world.py 集成回归）。additive 字段：v4 旧档缺失键加载时补此默认值，
+    # 不升 schema
+    tpa_percent: float = 65.0          # 满油门衰减 %
+    tpa_breakpoint: float = 0.30       # 断点油门比例（断点以下不衰减）
     params_schema: int = PARAMS_SCHEMA  # 参数版本：不匹配的存档加载时重置 pid+rate
 
 @dataclass

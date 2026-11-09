@@ -24,6 +24,17 @@ def rate_setpoint(rc: float, rate: RateParams, rate_type: str) -> float:
 # 刻度（P≈40 量级，二期地面站 MSP 协议同单位），控制器内部换算到电机油门域
 PID_MIX_SCALING = 1e5
 
+def tpa_factor(throttle: float, percent: float, breakpoint: float) -> float:
+    """TPA 衰减因子（Throttle PID Attenuation）：油门断点以下 1.0（悬停区不动）；
+    以上线性衰减，满油门 = 1 - percent/100；断点 ≥1 时油门永远够不到衰减区 → 恒 1.0
+    （clamp 保护）。油门钳位 [0,1]，超界不外推。"""
+    if breakpoint >= 1.0:
+        return 1.0
+    t = _clamp(throttle, 0.0, 1.0)
+    if t <= breakpoint:
+        return 1.0
+    return 1.0 - (percent / 100.0) * (t - breakpoint) / (1.0 - breakpoint)
+
 class PIDController:
     """单轴 PID：增益为 Betaflight 量级刻度（P≈40 量级），内部换算到电机油门域。
     D on measurement（无 setpoint 阶跃踢），积分限幅抗饱和
@@ -66,7 +77,7 @@ def mix_quad_x(throttle: float, yaw_cmd: float, roll_cmd: float,
     return [_clamp(m, 0.0, 1.0) for m in motors]
 
 class FlightController:
-    """组合：三轴 rate 目标 → PID(实测杆义角速度) → 混控 → 电机油门"""
+    """组合：三轴 rate 目标 → PID(实测杆义角速度) → TPA 衰减 → 混控 → 电机油门"""
     def __init__(self, params: DroneParams):
         self.set_params(params)
 
@@ -78,6 +89,9 @@ class FlightController:
             "pitch": PIDController(g["pitch"].p, g["pitch"].i, g["pitch"].d),
             "yaw": PIDController(g["yaw"].p, g["yaw"].i, g["yaw"].d),
         }
+        # TPA 油门记忆初值：悬停近似（1/sqrt(7)≈0.38，取 0.35）；首帧后即被
+        # 实际电机均值覆盖。set_params 重建（换机体/参数页保存），不复用旧值
+        self._tpa_throttle = 0.35
 
     def update(self, ch: Channels, gyro_dps: tuple, dt: float) -> list:
         """gyro_dps = (roll右, pitch抬头, yaw右) 杆义角速度 °/s → 四电机油门 [0,1]"""
@@ -85,10 +99,18 @@ class FlightController:
         targets = (rate_setpoint(ch.roll, self._params.rate["roll"], rt),
                    rate_setpoint(ch.pitch, self._params.rate["pitch"], rt),
                    rate_setpoint(ch.yaw, self._params.rate["yaw"], rt))
-        outs = (self._pid["roll"].update(targets[0], gyro_dps[0], dt),
-                self._pid["pitch"].update(targets[1], gyro_dps[1], dt),
-                self._pid["yaw"].update(targets[2], gyro_dps[2], dt))
-        return mix_quad_x(ch.throttle, outs[2], outs[0], outs[1])
+        # TPA：衰减因子乘到三轴 PID 输出后进混控。油门取上一帧四电机均值——比杆量
+        # 多含饱和信息（饱和时均值≠杆量），且用历史值无代数环。真实 BF 只衰减 P/I
+        # （真机 D 项重滤波、噪声主导，衰减反放大噪声）；本仿真 gyro 干净、D 无滤波，
+        # D 增益同样随油门放大并越离散稳定边界（D×K 天花板），故 P/I/D 三项全衰减
+        f = tpa_factor(self._tpa_throttle, self._params.tpa_percent,
+                       self._params.tpa_breakpoint)
+        outs = (self._pid["roll"].update(targets[0], gyro_dps[0], dt) * f,
+                self._pid["pitch"].update(targets[1], gyro_dps[1], dt) * f,
+                self._pid["yaw"].update(targets[2], gyro_dps[2], dt) * f)
+        motors = mix_quad_x(ch.throttle, outs[2], outs[0], outs[1])
+        self._tpa_throttle = sum(motors) / len(motors)
+        return motors
 
     def motor_thrusts(self, motors: list) -> list:
         """单电机最大推力 = 推重比×重量/4；实际 = T_max×motor²"""

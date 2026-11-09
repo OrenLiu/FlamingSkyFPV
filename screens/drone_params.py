@@ -70,6 +70,10 @@ class DroneParamsScreen(Screen):
             g.i = _input("I", g.i, 1.0)
             g.d = _input("D", g.d, 0.1)
             imgui.pop_id()
+        # TPA：油门 PID 衰减（高油门控制权限随推力²上升，补偿悬停标定 PID 越界，
+        # 见 physics.drone.tpa_factor）；衰减 % step=1、断点 step=0.05
+        p.tpa_percent = _input("TPA 衰减 %", p.tpa_percent, 1.0)
+        p.tpa_breakpoint = _input("TPA 断点", p.tpa_breakpoint, 0.05)
         imgui.separator()
 
         imgui.text("机体")
