@@ -1,24 +1,24 @@
 """飞控仿真：rate 映射 → PID 角速度闭环 → quad-X 混控 → 推力（设计文档第 4 节）
 纯计算模块：不依赖 PyBullet/渲染，gyro 数据由 world.py 提供（杆义角速度）。"""
 from input.channels import Channels
-from config_store import DroneParams
+from config_store import DroneParams, RateParams
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
-def rate_setpoint(rc: float, params: DroneParams) -> float:
-    """rc∈[-1,1] → 目标角速度 °/s。
+def rate_setpoint(rc: float, rate: RateParams, rate_type: str) -> float:
+    """rc∈[-1,1] + 单轴 rate 参数 → 目标角速度 °/s（纯函数，三轴各自调用）。
     betaflight_actual：expo 混合 + superRate 超线性（BF 4.x Actual Rates 公式）；
     linear：线性比例。"""
     rc = _clamp(rc, -1.0, 1.0)
     a = abs(rc)
-    if params.rate_type == "linear":
-        return rc * params.linear_rate_max_deg
+    if rate_type == "linear":
+        return rc * rate.linear_max_deg
     # expo：中位柔化（对 ±1 无效：1³×expo + 1×(1-expo) = 1）
-    rc = rc * (a * a * a) * params.expo + rc * (1.0 - params.expo)
-    super_rate = min(params.super_rate, 0.99)
+    rc = rc * (a * a * a) * rate.expo + rc * (1.0 - rate.expo)
+    super_rate = min(rate.super_rate, 0.99)
     super_factor = 1.0 / max(1.0 - a * super_rate, 0.01)
-    return 200.0 * params.rc_rate * rc * super_factor
+    return 200.0 * rate.rc_rate * rc * super_factor
 
 class PIDController:
     """单轴 PID：D on measurement（无 setpoint 阶跃踢），积分限幅抗饱和
@@ -74,9 +74,10 @@ class FlightController:
 
     def update(self, ch: Channels, gyro_dps: tuple, dt: float) -> list:
         """gyro_dps = (roll右, pitch抬头, yaw右) 杆义角速度 °/s → 四电机油门 [0,1]"""
-        targets = (rate_setpoint(ch.roll, self._params),
-                   rate_setpoint(ch.pitch, self._params),
-                   rate_setpoint(ch.yaw, self._params))
+        rt = self._params.rate_type
+        targets = (rate_setpoint(ch.roll, self._params.rate["roll"], rt),
+                   rate_setpoint(ch.pitch, self._params.rate["pitch"], rt),
+                   rate_setpoint(ch.yaw, self._params.rate["yaw"], rt))
         outs = (self._pid["roll"].update(targets[0], gyro_dps[0], dt),
                 self._pid["pitch"].update(targets[1], gyro_dps[1], dt),
                 self._pid["yaw"].update(targets[2], gyro_dps[2], dt))

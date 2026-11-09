@@ -18,9 +18,18 @@ class PIDGains:
     i: float = 0.0
     d: float = 0.0
 
-# PID 参数 schema 版本：2 = 现行物理标定量级（roll/pitch 临界 P≈9e-4）；
-# 缺失/更早版本的存档为旧量级（P≈45），加载时整体重置（见 ConfigStore.load）
-PID_SCHEMA = 2
+@dataclass
+class RateParams:
+    """单轴 rate 曲线参数（rate_type 全局共用，曲线参数三轴独立）"""
+    rc_rate: float = 1.0
+    super_rate: float = 0.70
+    expo: float = 0.32
+    linear_max_deg: float = 360.0      # linear 模式满杆角速度 °/s
+
+# 参数 schema 版本：3 = 现行物理标定 PID 量级（roll/pitch 临界 P≈9e-4）+ rate 三轴独立；
+# 缺失/更早版本的存档（旧量级 PID 或全局单份 rate 标量）加载时 pid 与 rate 整体重置
+# （见 ConfigStore.load）
+PARAMS_SCHEMA = 3
 
 @dataclass
 class DroneParams:
@@ -30,10 +39,9 @@ class DroneParams:
     thrust_ratio: float = 7.0         # 推重比（默认 kv/250，可覆盖）
     camera_angle_deg: float = 20.0    # 摄像头仰角
     rate_type: str = "betaflight_actual"  # "betaflight_actual" | "linear"
-    rc_rate: float = 1.0
-    super_rate: float = 0.70
-    expo: float = 0.32
-    linear_rate_max_deg: float = 360.0  # linear 模式满杆角速度 °/s
+    # rate 曲线三轴独立（用户裁定）：横滚/俯仰/偏航各自可调
+    rate: dict = field(default_factory=lambda: {
+        k: RateParams() for k in ("roll", "pitch", "yaw")})
     # PID 量纲：误差 °/s → 电机油门单位。开环增益实测 roll/pitch ≈ 6.8e4、yaw ≈ 6.7e3
     # °/s²/单位输出，帧长 1/30 时临界 P：roll/pitch ≈ 9e-4、yaw ≈ 9e-3（test/manual/
     # calibrate.py 无头闭环标定，双 dt 稳定、阶跃无过冲、悬停零饱和）
@@ -42,7 +50,7 @@ class DroneParams:
         "pitch": PIDGains(0.0004, 0.0004, 0.000004),
         "yaw": PIDGains(0.004, 0.001, 0.0),
     })
-    pid_schema: int = PID_SCHEMA       # PID 参数版本：不匹配的存档加载时重置 pid
+    params_schema: int = PARAMS_SCHEMA  # 参数版本：不匹配的存档加载时重置 pid+rate
 
 @dataclass
 class AxisBinding:
@@ -66,7 +74,7 @@ def default_rc_config() -> RCConfig:
     return RCConfig()
 
 # dataclass 字段名 → 嵌套 dataclass 类型表（重建用）
-_NESTED = {"pid": PIDGains, "mappings": AxisBinding}
+_NESTED = {"pid": PIDGains, "rate": RateParams, "mappings": AxisBinding}
 
 def _rebuild(cls, data: dict):
     """dict → dataclass 实例，递归重建嵌套 dict[str, dataclass] 字段（缺失键用默认值补齐）"""
@@ -105,13 +113,16 @@ class ConfigStore:
         except (json.JSONDecodeError, TypeError, KeyError):
             shutil.copy2(path, path + ".bak")  # 备份损坏文件
             return cls()
-        # PID 版本迁移：旧 schema（无 pid_schema 键或值≠2）量级与现行物理不符——
-        # 加载即 bang-bang 且参数页滑条超限。pid 整体重置为新默认，其余字段保留。
-        # 注意须查原始 JSON：_rebuild 对缺失键会补 dataclass 默认值 2，查对象会漏掉旧档
+        # 参数版本迁移：旧 schema（无 params_schema 键或值≠3）量级/结构与现行不符——
+        # PID 旧量级加载即 bang-bang；旧档 rate 为全局单份标量（无三轴嵌套）。
+        # pid 与 rate 整体重置为新默认，其余字段保留。
+        # 注意须查原始 JSON：_rebuild 对缺失键会补 dataclass 默认值 3，查对象会漏掉旧档
         if cls is DroneParams and isinstance(data, dict) \
-                and data.get("pid_schema") != PID_SCHEMA:
-            obj.pid = default_drone_params().pid
-            obj.pid_schema = PID_SCHEMA
+                and data.get("params_schema") != PARAMS_SCHEMA:
+            d = default_drone_params()
+            obj.pid = d.pid
+            obj.rate = d.rate
+            obj.params_schema = PARAMS_SCHEMA
         return obj
 
     def save(self, name: str, obj):
