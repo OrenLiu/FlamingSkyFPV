@@ -42,6 +42,7 @@ class App:
         self.rc_config = self.store.load("rc", RCConfig)
         self.scenes = list_scenes("scene")
         self.restart_needed = False   # 热重建失败的降级标记
+        self.debug_overlay = False    # F3 调试覆盖层开关（FPS + 相机坐标）
         self.screen = None
         self._frames_left = None
 
@@ -122,6 +123,8 @@ class App:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
+                    self.debug_overlay = not self.debug_overlay  # 全局热键，任意界面可用
                 if event.type == pygame.VIDEORESIZE:
                     # 不透传 pyimgui 集成层：其 VIDEORESIZE 分支会再 set_mode，
                     # 全屏切换的中间态尺寸可越界致 OverflowError；窗口尺寸与
@@ -145,6 +148,7 @@ class App:
             if self.font:
                 imgui.push_font(self.font)
             self.screen.render_ui()
+            self._render_debug_overlay()  # 仍在 push_font 作用域内，中文标签可显示
             if self.font:
                 imgui.pop_font()
             imgui.render()                # 再画 UI
@@ -157,6 +161,22 @@ class App:
                 self._frames_left -= 1
                 if self._frames_left <= 0:
                     return
+
+    def _render_debug_overlay(self):
+        """F3 调试覆盖层：右上角无装饰小窗，显示 FPS 与相机坐标（渲染系，米）"""
+        if not self.debug_overlay:
+            return
+        io = imgui.get_io()
+        w, h = io.display_size
+        imgui.set_next_window_position(w - 240, 8)  # 固定右上角（宽 240 预留）
+        flags = (imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_ALWAYS_AUTO_RESIZE |
+                 imgui.WINDOW_NO_MOVE)
+        imgui.push_style_color(imgui.COLOR_WINDOW_BACKGROUND, 0, 0, 0, 0.5)  # 半透明底
+        imgui.begin("##debug_overlay", flags=flags)
+        imgui.text(f"FPS: {io.framerate:.1f}")
+        imgui.text(f"相机: {soup3D.camera.X:.2f}, {soup3D.camera.Y:.2f}, {soup3D.camera.Z:.2f}")
+        imgui.end()
+        imgui.pop_style_color(1)
 
     def save_all(self):
         self.store.save("settings", self.settings)
