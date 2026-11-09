@@ -3,6 +3,7 @@ import os
 import pygame
 import imgui
 from imgui.integrations.pygame import PygameRenderer
+from OpenGL.GL import glActiveTexture, GL_TEXTURE0
 import soup3D
 
 from config_store import (ConfigStore, Settings, DroneParams, RCConfig,
@@ -153,6 +154,10 @@ class App:
                 imgui.pop_font()
             imgui.render()                # 再画 UI
             # pyimgui 2.0：render() 只终结帧并生成绘制数据，集成层才真正上屏
+            # 兜底：引擎 3D 绘制若遗留活动纹理单元非 0（soup3D rend_cached 已在
+            # 引擎侧归位，此处防御其他泄漏路径），pyimgui 的字体绑定会落在错误
+            # 单元上导致 UI 整体隐形（飞行界面 UI 消失之谜的根因）
+            glActiveTexture(GL_TEXTURE0)
             self._impl.render(imgui.get_draw_data())
 
             pygame.display.flip()

@@ -797,6 +797,10 @@ class ShaderProgram:
         glBindVertexArray(self._cached_vao)
         glDrawArrays(mode, 0, self._cached_vertex_count)
         glBindVertexArray(0)
+        # 状态卫生：纹理绑定循环把活动纹理单元遗留在最后一个引擎纹理的单元上
+        # （如 GL_TEXTURE3），不归位会令下游基于固定管线/默认单元的渲染方
+        # （如 pyimgui 的字体绑定）落在错误单元上而整体不可见
+        glActiveTexture(GL_TEXTURE0)
 
     def unuse(self):
         """
