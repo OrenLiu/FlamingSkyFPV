@@ -65,6 +65,10 @@ class DroneParams:
     # T13 标定值——默认机（550g/推重比 7）俯冲极速 ~30m/s；轻量高推机（如 240g/8.6）
     # 按手感调低（0.4~0.6 → 极速 33~50m/s），0 = 无阻力。additive 字段不升 schema
     drag_k: float = 1.2
+    # 当前电池电压 V：电机转速 ∝ KV×V、推力 ∝ 转速² → 推力按 (V/14.8)² 缩放
+    # （physics.drone.REF_VOLTAGE）。默认 14.8（4S 标称）保持既有行为；参考：满电
+    # 4S = 16.8（推力 ×1.288）、3S = 11.1（×0.563）。additive 字段不升 schema
+    battery_voltage: float = 14.8
     params_schema: int = PARAMS_SCHEMA  # 参数版本：不匹配的存档加载时重置 pid+rate
 
 @dataclass

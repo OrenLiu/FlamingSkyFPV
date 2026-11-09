@@ -24,6 +24,11 @@ def rate_setpoint(rc: float, rate: RateParams, rate_type: str) -> float:
 # 刻度（P≈40 量级，二期地面站 MSP 协议同单位），控制器内部换算到电机油门域
 PID_MIX_SCALING = 1e5
 
+# 推力电压缩放参考电压（4S 标称 14.8V）。物理依据：电机空载转速 ∝ KV×V，推力
+# ∝ 转速² → 满油门推力 = 参考值 × (battery_voltage/REF_VOLTAGE)²。thrust_ratio
+# 语义 = 本参考电压下的推重比（DroneParams 注释同）
+REF_VOLTAGE = 14.8
+
 def tpa_factor(throttle: float, percent: float, breakpoint: float) -> float:
     """TPA 衰减因子（Throttle PID Attenuation）：油门断点以下 1.0（悬停区不动）；
     以上线性衰减，满油门 = 1 - percent/100；断点 ≥1 时油门永远够不到衰减区 → 恒 1.0
@@ -113,7 +118,10 @@ class FlightController:
         return motors
 
     def motor_thrusts(self, motors: list) -> list:
-        """单电机最大推力 = 推重比×重量/4；实际 = T_max×motor²"""
+        """单电机最大推力 = 推重比(参考电压下)×重量/4 × (V/REF_VOLTAGE)²；实际 = T_max×motor²。
+        电池电压越高推力越大（满电 4S 16.8V → ×1.288、3S 11.1V → ×0.563），
+        悬停油门相应降低"""
         weight_kg = self._params.weight_g / 1000.0
-        t_max = weight_kg * 9.81 * self._params.thrust_ratio / 4.0
+        v_scale = (self._params.battery_voltage / REF_VOLTAGE) ** 2
+        t_max = weight_kg * 9.81 * self._params.thrust_ratio * v_scale / 4.0
         return [t_max * m * m for m in motors]
