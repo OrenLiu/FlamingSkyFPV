@@ -38,8 +38,22 @@ SHADOW_NEAR = 0.1                # 阴影相机近平面
 SHADOW_FAR = 300.0               # 阴影相机远平面
 SHADOW_EYE_DIST = 120.0          # 太阳相机沿指向光源方向的后撤距离（米）
 SHADOW_TEX_UNIT = 2              # shadowMap 纹理单元（空闲单元，避开 0/1/3 引擎约定）
-DEFAULT_ROUGHNESS = 0.8         # MTL 的 Pr 未提供时的默认粗糙度（spec 5.6）
+DEFAULT_ROUGHNESS = 0.8         # MTL 的 Pr/Ns 均未提供时的默认粗糙度（spec 5.6）
 DEFAULT_METALLIC = 0.0          # MTL 的 Pm 未提供时的默认金属度（spec 5.6）
+
+
+def roughness_from_shininess(ns):
+    """MTL 传统 Ns(shininess) → GGX roughness 经典换算：r = sqrt(2/(Ns+2))。
+
+    多数建模工具的 OBJ/MTL 导出不带 PBR 扩展关键字（Pr/Pm），只带传统
+    Ns——本换算让既有模型的 Ns 直接驱动 PBR 粗糙度与 SSR 反射差异化。
+    :param ns: MTL 的 Ns 值（如水面 1000≈镜面 0.045、碎石 2.5≈漫反射 0.667）；
+               None（MTL 无 Ns）回落 DEFAULT_ROUGHNESS
+    :return:   GGX 粗糙度 [0, 1]
+    """
+    if ns is None:
+        return DEFAULT_ROUGHNESS
+    return (2.0 / (float(ns) + 2.0)) ** 0.5
 EXPOSURE = 0.65                 # 合成曝光（合成无 gamma：材质/灯光为显示参考值，
                                 # 0.65 使中间调与性能优先对齐，ACES 仅做高光滚降）
 SSR_STEPS = 24                 # SSR 光线步进次数（性能预算超限时减小/置 0 关闭反射）
@@ -370,7 +384,12 @@ class PBRSurface(_ShadowSurfaceBase):
 
     def __init__(self, base_color, normal=(0.5, 0.5, 1), emission=(0, 0, 0),
                  double_side=True, max_light_count=8,
-                 roughness=DEFAULT_ROUGHNESS, metallic=DEFAULT_METALLIC):
+                 roughness=None, metallic=DEFAULT_METALLIC, shininess=None):
+        # 粗糙度回退链：显式 Pr(roughness) > Ns(shininess) 换算 > 类默认。
+        # 引擎 open_mtl 把 Pr 读进 roughness、Ns 读进 shininess，均仅在文件
+        # 提供时传入（make_surface 内省过滤）——两者皆缺即默认哑光
+        if roughness is None:
+            roughness = roughness_from_shininess(shininess)
         self.roughness = float(roughness)
         self.metallic = float(metallic)
         self._last_cam = None
