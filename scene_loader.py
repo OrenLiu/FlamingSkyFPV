@@ -9,6 +9,7 @@ class SceneInfo:
     dir: Path = None
     name: str = ""
     model: str = ""
+    cover: str = ""   # 封面图（可选，相对场景目录；仅展示用，缺失不判无效）
     scale: float = 1.0
     spawn: tuple = (0.0, 0.0, 2.0)
     valid: bool = True
@@ -31,6 +32,8 @@ def list_scenes(scene_root: str = "scene") -> list:
             info.model = str(data["model"])
             if not (d / info.model).exists():
                 raise FileNotFoundError(f"模型文件不存在: {info.model}")
+            cover = data.get("cover")   # 可选装饰字段：类型不对仅影响显示
+            info.cover = str(cover) if cover is not None else ""
             info.scale = float(data.get("scale", 1.0))
             spawn = data.get("spawn", [0, 0, 2])
             info.spawn = tuple(float(v) for v in spawn)

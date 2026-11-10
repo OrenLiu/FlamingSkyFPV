@@ -6,13 +6,19 @@ import soup3D
 from .base import Screen
 from physics.drone import FlightController
 from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
+from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
+                         COVER_BOX_W, COVER_BOX_H)
 
 class FlightScreen(Screen):
+    # 网格卡片布局：卡片宽/封面高复用 cover_cache.COVER_BOX_W/H，只留两个
+    CARD_NAME_H = 36     # 卡片标题条高（含文字垂直居中）
+    CARD_GAP = 16        # 卡片间距
     # 内部子状态：选场景 → 加载 → 飞行
     def enter(self, app):
         self.app = app
         self.stage = "select"       # select | loading | flying
         self.error = ""
+        self._covers = {}           # 场景目录 → (tex_id, w, h) | None（含失败缓存）
         self._scene = None          # SceneInfo
         self._model = None          # soup3D.Model
         self._sun = None
@@ -23,12 +29,21 @@ class FlightScreen(Screen):
 
     def exit(self):
         self._teardown_scene()      # 离开飞行必须清理 GL 与物理资源
+        self._release_covers()      # 封面纹理同属 GL 资源：FlightScreen 每次进入都新建实例，不释放会泄漏
 
     def reload(self):
-        """窗口重建后重载场景模型"""
+        """窗口重建后重载：新 GL 上下文 → 封面纹理句柄全部失效，必须释放重载"""
+        self._release_covers()
         if self.stage == "flying" and self._scene is not None:
             self._teardown_scene()
             self.stage = "loading"
+
+    def _release_covers(self):
+        """释放全部封面纹理（GL 句柄不跨 GL 上下文复用；窗口重建/退出时调用）"""
+        for entry in self._covers.values():
+            if entry:
+                free_cover_texture(entry[0])
+        self._covers.clear()
 
     # ---- 场景选择 ----
     def render_select(self):
@@ -39,19 +54,68 @@ class FlightScreen(Screen):
         imgui.text("花式飞行——选择场景")
         imgui.text("( 竞速飞行将在二期开放 )")
         imgui.separator()
+        # 网格卡片：封面缩略图 + 名称按钮，按窗口宽度自动折行
+        valid = [s for s in self.app.scenes if s.valid]
+        avail = imgui.get_content_region_available_width()
+        cols = max(1, int((avail + self.CARD_GAP) // (COVER_BOX_W + self.CARD_GAP)))
+        for i, s in enumerate(valid):
+            self._scene_card(s)
+            if (i + 1) % cols and i + 1 < len(valid):
+                imgui.same_line()
+        # 无效场景保留文字行
         for s in self.app.scenes:
             if not s.valid:
-                imgui.text(f"{s.name}（无效：{s.error}）")
-                imgui.same_line()
-                imgui.text("已跳过")
-                continue
-            if imgui.button(f"{s.name}", 320, 44):
-                self._scene = s
-                self.stage = "loading"
+                imgui.text(f"{s.name}（无效：{s.error}）已跳过")
         imgui.separator()
         if imgui.button("返回主菜单", 200, 40):
             self._back()
         imgui.end()
+
+    def _scene_card(self, s):
+        # 单卡片：invisible_button 承接整卡点击/悬停，draw list 直绘封面与标题
+        card_h = COVER_BOX_H + self.CARD_NAME_H
+        clicked = imgui.invisible_button(f"##card_{s.dir.name}", COVER_BOX_W, card_h)
+        hovered = imgui.is_item_hovered()
+        p = imgui.get_item_rect_min()
+        e = imgui.get_item_rect_max()
+        dl = imgui.get_window_draw_list()
+        col_text = imgui.get_color_u32_rgba(0.92, 0.92, 0.95, 1.0)
+        col_dim = imgui.get_color_u32_rgba(0.55, 0.55, 0.58, 1.0)
+        col_bg = imgui.get_color_u32_rgba(0.10, 0.10, 0.12, 1.0)
+        col_border = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.7 if hovered else 0.25)
+        dl.add_rect_filled(p.x, p.y, e.x, e.y, col_bg)
+        strip_top = p.y + COVER_BOX_H
+        cover = self._get_cover(s)
+        if cover:
+            tid, w, h = cover
+            uv = cover_uv_crop(w, h, COVER_BOX_W, COVER_BOX_H)
+            dl.add_image(tid, (p.x, p.y), (p.x + COVER_BOX_W, strip_top),
+                         uv[:2], uv[2:])
+        else:
+            dl.add_rect_filled(p.x, p.y, p.x + COVER_BOX_W, strip_top,
+                               imgui.get_color_u32_rgba(0.16, 0.16, 0.18, 1.0))
+            self._draw_centered_text(dl, p.x, p.y, COVER_BOX_W, COVER_BOX_H,
+                                     col_dim, "无封面")
+        self._draw_centered_text(dl, p.x, strip_top, COVER_BOX_W,
+                                 self.CARD_NAME_H, col_text, s.name)
+        dl.add_rect(p.x, p.y, e.x, e.y, col_border)
+        if clicked:
+            self._scene = s
+            self.stage = "loading"
+
+    @staticmethod
+    def _draw_centered_text(dl, x, y, w, h, col, text):
+        # 矩形区域内水平垂直居中绘制文本（draw list 直绘，不产生 imgui item）
+        size = imgui.calc_text_size(text)
+        dl.add_text(x + (w - size.x) / 2, y + (h - size.y) / 2, col, text)
+
+    def _get_cover(self, s):
+        # 封面纹理懒加载缓存：失败也缓存 None，避免逐帧重试
+        if not s.cover:
+            return None
+        if s.dir not in self._covers:
+            self._covers[s.dir] = load_cover_texture(s.dir / s.cover)
+        return self._covers[s.dir]
 
     # ---- 场景加载/卸载 ----
     def _load_scene(self):
@@ -71,10 +135,15 @@ class FlightScreen(Screen):
         self.stage = "flying"
 
     def _teardown_scene(self):
+        # 灯光必须 destroy()：Direct.__init__ 自登记进引擎全局 light_queue（强引用），
+        # 弃引用不会注销——旧灯保持点亮，每次进场景叠加一盏方向光（场景越来越亮）。
+        # 置 None 防双重 destroy（加载失败路径可能 teardown 两次，destroy 已删键再删会 KeyError）
+        if self._sun is not None:
+            self._sun.destroy()
+            self._sun = None
         # 未调 show()，模型未进引擎队列，弃引用即可
         # （hide() 对未 show 的模型会 KeyError，勿调用）
         self._model = None
-        self._sun = None
         if self._world is not None:
             self._world.close()
             self._world = None
