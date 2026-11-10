@@ -60,8 +60,10 @@ SSR_STEPS = 24                 # SSR 光线步进次数（性能预算超限时�
 SSR_REFINE = 4                 # 命中后二分细化次数
 SSR_THICKNESS = 0.5            # 命中判定厚度（米，视图空间）
 SSR_MAX_DIST = 120.0           # 最大步进距离（米）
-SSR_STRENGTH = 0.35            # SSR 全局反射强度系数（叠加菲涅尔与粗糙度调制后
-                               # 的总闸，目检可调）
+SSR_STRENGTH = 0.35            # SSR 掠射反射强度系数（菲涅尔项的闸，目检可调）
+SSR_BASE = 0.25                # SSR 正对角反射底座（视觉驱动，非物理：菲涅尔在正对
+                               # 角仅 ~4%，会把一切非掠射反射压到不可见；积水/光滑面的
+                               # 「处处可辨镜面感」需要底座。粗糙度衰减×模糊仍按物理）
 SSR_BLUR_RADIUS = 0.02         # SSR 反射模糊最大半径（UV，随反射点粗糙度线性缩放）
 
 # 合成通道片段着色器（SSR + 背景直通 + 曝光 → ACES，一个全屏通道直绘默认帧缓冲）。
@@ -74,6 +76,7 @@ _COMPOSITE_FS = """
 #define SSR_STEPS %d
 #define SSR_REFINE %d
 #define SSR_STRENGTH %.2f
+#define SSR_BASE %.2f
 #define SSR_THICKNESS %.1f
 #define SSR_MAX_DIST %.1f
 #define SSR_BLUR_RADIUS %.3f
@@ -161,19 +164,21 @@ void main()
                 }
             }
             if (found > 0.5) {
-                // 屏幕边缘淡出 + 菲涅尔/粗糙度加权混合；反射色按粗糙度多点采样
-                // 模糊（物理驱动 = 反射点自身粗糙度：微面元越粗糙反射越弱越散）
+                // 屏幕边缘淡出 + 反射加权混合：混合系数 = 光滑度 ×
+                // (SSR_BASE 正对底座 + 菲涅尔 × SSR_STRENGTH)——纯菲涅尔在正对
+                // 角仅约百分之四，会把差异化粗糙度全部压到不可见；反射色按粗糙度
+                // 多点采样模糊（物理驱动 = 反射点自身粗糙度：越粗糙越弱越散）
                 vec2 border = min(hitUV, 1.0 - hitUV);
                 float edge = clamp(min(border.x, border.y) * 8.0, 0.0, 1.0);
-                float roughSelf = texture(roughTex, UV).r;
+                float smoothness = 1.0 - texture(roughTex, UV).r;
                 vec3 refl = texture(hdrColor, hitUV).rgb;
-                float r = roughSelf * SSR_BLUR_RADIUS;
+                float r = (1.0 - smoothness) * SSR_BLUR_RADIUS;
                 refl += texture(hdrColor, hitUV + vec2( r,  r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2( r, -r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2(-r,  r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2(-r, -r)).rgb;
                 color = mix(color, refl * 0.2,
-                            fresnel * edge * SSR_STRENGTH * (1.0 - roughSelf));
+                            smoothness * (SSR_BASE + fresnel * SSR_STRENGTH) * edge);
             }
         }
     }
@@ -631,7 +636,7 @@ class QualityFrameRenderer:
         self._composite_pass = api.FullScreenPass()
         self._composite_prog = _compile_program(
             api.FULLSCREEN_VS,
-            _COMPOSITE_FS % (SSR_STEPS, SSR_REFINE, SSR_STRENGTH,
+            _COMPOSITE_FS % (SSR_STEPS, SSR_REFINE, SSR_STRENGTH, SSR_BASE,
                              SSR_THICKNESS, SSR_MAX_DIST, SSR_BLUR_RADIUS))
 
     def render_frame(self, draw_scene):
