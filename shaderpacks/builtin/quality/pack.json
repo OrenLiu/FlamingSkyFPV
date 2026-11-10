@@ -1,0 +1,6 @@
+{
+  "name": "画面优先",
+  "description": "PBR 材质 + 太阳软阴影 + SSR 反射 + HDR/ACES 色调映射",
+  "author": "FlamingSkyFPV",
+  "version": "1.0"
+}

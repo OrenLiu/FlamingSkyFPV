@@ -1,0 +1,6 @@
+{
+  "name": "性能优先",
+  "description": "默认渲染管线（AutoSP 表面），与出厂画面一致，性能最好",
+  "author": "FlamingSkyFPV",
+  "version": "1.0"
+}
