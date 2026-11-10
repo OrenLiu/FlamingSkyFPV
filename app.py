@@ -1,6 +1,7 @@
 """App：pygame 主循环 + Screen 状态机 + AppContext（设计文档第 3 节）"""
 import os
 import time
+import traceback
 import pygame
 import imgui
 from imgui.integrations.pygame import PygameRenderer
@@ -10,6 +11,9 @@ import soup3D
 from config_store import (ConfigStore, Settings, DroneParams, RCConfig,
                           default_drone_params, default_rc_config)
 from scene_loader import list_scenes
+from shaderpacks import runtime
+from shaderpacks.loader import load_pack
+from shaderpacks.registry import list_packs
 from input.keyboard import KeyboardInput
 from input.joystick import JoystickInput
 
@@ -45,6 +49,12 @@ class App:
         self.scenes = list_scenes("scene")
         self.restart_needed = False   # 热重建失败的降级标记
         self._pending_rebuild = False  # 延后到帧边界执行的重建标记（见 run()）
+        # 着色器预设（shaderpacks）：包列表与当前生效预设（spec 5.7）
+        self.packs = list_packs()            # 预设包列表（reload_shader_preset 每次重扫）
+        self.preset = None                   # LoadedPack；reload 后保证非 None（内置损坏除外）
+        self._frame_renderer = None          # 预设帧渲染器；None = 默认管线直渲
+        self.preset_fallback = False         # 预设回落提示标记（设置页显示）
+        self._pending_preset_reload = False  # 帧边界执行的预设重载标记（同 _pending_rebuild）
         self.debug_overlay = False    # F3 调试覆盖层开关（FPS + 相机坐标）
         # 自测窗口平均帧率：io.framerate = 1/io.delta_time，但主循环只调
         # process_event 从不调集成层的 process_inputs() → delta_time 恒为
@@ -57,6 +67,9 @@ class App:
 
         pygame.init()
         self._open_window()
+        # 着色器预设：GL 上下文就绪后加载一次（帧渲染器的 RT/程序在此创建）；
+        # _open_window 自身不调（避免与 rebuild 路径双重调用，spec 5.7）
+        self.reload_shader_preset()
         imgui.create_context()
         self._impl = PygameRenderer()
         # spike 结论：pygame 集成不初始化 display_size，new_frame 会断言崩溃
@@ -113,6 +126,9 @@ class App:
             # 先关窗销毁旧 GL 上下文，再按新尺寸/模式重开（__init__ 首开无需此步）
             pygame.display.set_mode((0, 0))
             self._open_window()
+            # 新 GL 上下文：预设 RT/程序属旧上下文必须重建（失败由回落链兜底）；
+            # 置于 screen.reload() 之前，保证场景以新包表面类重载（spec 5.7）
+            self.reload_shader_preset()
             # 字体重载失败不置 None：旧字体对象结构完好（纹理最多次过期待下次
             # 重建），置 None 反而令主循环 push/pop 失衡 → render 断言崩溃；
             # 失败路径提示重启生效
@@ -179,7 +195,12 @@ class App:
                 # 失败被吞 → font 置 None → push/pop 失衡 → render 断言崩溃，
                 # 用户实飞「保存并应用」触发过；故 UI 处理器只置标记，此处执行）
                 self._pending_rebuild = False
+                self._pending_preset_reload = False  # rebuild 尾部已 reload，避免二次执行
                 self.rebuild_window()
+            elif self._pending_preset_reload:
+                # 帧边界执行预设重载：GL 资源创建禁止在 imgui 帧中进行（同 _pending_rebuild）
+                self._pending_preset_reload = False
+                self.reload_shader_preset()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return
@@ -202,8 +223,22 @@ class App:
 
             self.screen.update(dt)
 
-            soup3D.update()               # 先渲 3D（spike 验证的顺序）
-            self.screen.render_scene()    # 3D 直渲钩子（显示列表失效，见 base.py）
+            if self._frame_renderer is not None:
+                fr = self._frame_renderer
+                try:
+                    soup3D.update(render=lambda: runtime.pack_frame(fr, self.screen.render_scene))
+                except Exception:
+                    # 运行期兜底（spec 5.7/6）：预设帧渲染抛异常 → 当帧起回落默认
+                    # 管线（当帧画面残缺可接受），不中断游戏。引擎 update(render=...)
+                    # 的 finally 已恢复 GL 状态，异常后状态干净
+                    traceback.print_exc()
+                    self._dispose_frame_renderer()
+                    self.preset_fallback = True
+                    soup3D.update()
+                    self.screen.render_scene()
+            else:
+                soup3D.update()               # 先渲 3D（spike 验证的顺序）
+                self.screen.render_scene()    # 3D 直渲钩子（显示列表失效，见 base.py）
             imgui.new_frame()
             # push 前捕获：render_ui 处理器可能触发重建改动 self.font（帧中禁字体
             # 图集操作），pop 条件若再读 self.font 会与 push 时不一致 → 栈失衡
@@ -228,6 +263,64 @@ class App:
                 self._frames_left -= 1
                 if self._frames_left <= 0:
                     return
+
+    # ---- 着色器预设（shaderpacks）----
+    def _dispose_frame_renderer(self):
+        """释放当前帧渲染器（dispose 契约可选；释放失败打印不阻断回落链）"""
+        if self._frame_renderer is None:
+            return
+        dispose = getattr(self._frame_renderer, "dispose", None)
+        if callable(dispose):
+            try:
+                dispose()
+            except Exception:
+                traceback.print_exc()
+        self._frame_renderer = None
+
+    def _find_pack_info(self, pack_id: str):
+        """在 self.packs 里找 id 匹配且 valid 的包（无则 None）"""
+        return next((p for p in self.packs if p.id == pack_id and p.valid), None)
+
+    def reload_shader_preset(self):
+        """按 settings.shader_preset 重载预设（spec 5.7 回落链）。
+
+        旧渲染器释放 → 重扫包列表 → 找 valid 包 → load_pack → 实例化帧渲染器。
+        代码级失败（import/契约/实例化，含目标 id 不存在时 load_pack(None) 的
+        AttributeError）整体回落 builtin_performance；连性能优先都失败（内置包
+        损坏）→ 空预设走默认管线。applied id 与存档不一致时置 preset_fallback
+        （设置页显示回落提示）。
+        """
+        self._dispose_frame_renderer()
+        self.preset_fallback = False
+        try:
+            self.packs = list_packs()
+            info = self._find_pack_info(self.settings.shader_preset)
+            try:
+                loaded = load_pack(info)
+                renderer = None
+                if loaded.create_frame_renderer is not None:
+                    renderer = loaded.create_frame_renderer(soup3D.proj_width,
+                                                            soup3D.proj_height)
+            except Exception:
+                # 代码级失败：整体回落性能优先
+                traceback.print_exc()
+                info = self._find_pack_info("builtin_performance")
+                loaded = load_pack(info)
+                renderer = None
+                if loaded.create_frame_renderer is not None:
+                    renderer = loaded.create_frame_renderer(soup3D.proj_width,
+                                                            soup3D.proj_height)
+            self.preset = loaded
+            self._frame_renderer = renderer
+            self.preset_fallback = loaded.info.id != self.settings.shader_preset
+        except Exception:
+            # 兜底：连性能优先包都加载失败（内置包损坏的异常情形）→ 空预设走默认
+            # 管线；flight 注入点对 preset=None 会 AttributeError → 场景加载失败进
+            # 错误弹窗，游戏本体仍可用（spec 6 错误表的最终降级）
+            traceback.print_exc()
+            self.preset = None
+            self._frame_renderer = None
+            self.preset_fallback = True
 
     def _render_debug_overlay(self):
         """F3 调试覆盖层：右上角无装饰小窗，显示 FPS 与相机坐标（渲染系，米）"""
