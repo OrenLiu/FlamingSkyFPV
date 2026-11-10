@@ -17,6 +17,15 @@ MODE_STICKS = {
 
 # 各通道的方向指令（用户裁定：向导以带方向的指令引导，方向固定不变）
 DIRECTION = {"throttle": "向上", "yaw": "向右", "roll": "向右", "pitch": "向上"}
+# 捕获结果的极性修正：向导假定「指令方向 = 通道正杆义」——对 throttle/yaw/roll
+# 成立（油门上推+、yaw右+、roll右+），唯 pitch 杆义为「拉杆+」（channels.py），
+# 指令「向上」是推杆 = 负杆义 → 捕获的方向标志须翻转；否则飞行时推杆读出抬头，
+# 俯仰整体反向。油门上推读出高油门不受影响，保持不变。
+POLARITY_FLIP = frozenset({"pitch"})
+
+def channel_inverted(channel: str, raw_inverted: bool) -> bool:
+    """AxisCapture 判得的方向标志 → 该通道绑定的 inverted（按 POLARITY_FLIP 翻转）"""
+    return raw_inverted != (channel in POLARITY_FLIP)
 
 class AxisCapture:
     """喂入每帧全部轴值，跟踪各轴 min/max；用于"动一动杆"自动识别轴。
