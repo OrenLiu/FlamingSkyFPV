@@ -38,7 +38,11 @@ class DroneParamsScreen(Screen):
 
     def render_ui(self):
         imgui.set_next_window_position(30, 30)
-        imgui.set_next_window_size(620, 0)  # 高度自适应
+        io = imgui.get_io()
+        # 高度必须固定为视口可用高度（上 30 + 下 30 边距）：0=自适应时 imgui
+        # 把窗口钳到视口高减安全边距，顶部又偏移 30 → 底部永远压出屏幕外，
+        # 且底部按钮以下内容不可见；固定高度后 imgui 自动为溢出内容出滚动条
+        imgui.set_next_window_size(620, io.display_size[1] - 60)
         imgui.begin("无人机参数", flags=imgui.WINDOW_NO_COLLAPSE)
 
         p = self._p
