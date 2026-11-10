@@ -15,6 +15,11 @@ class Settings:
     # 数字走 clock.tick 限速（即时生效）。additive 字段：旧档缺失键加载时补默认
     # "60"（保持一期硬锁 60 行为），不升 schema
     fps_mode: str = "60"
+    # 着色器预设包 id（shaderpacks.registry 的 PackInfo.id，内置为 builtin_performance /
+    # builtin_quality，文件夹包为目录名）。additive 字段：旧档缺失键加载时补默认
+    # "builtin_performance"，不升 schema（fps_mode 先例）。失效 id 由 App.
+    # reload_shader_preset 回落 builtin_performance（spec：着色器预设系统设计 5.7）
+    shader_preset: str = "builtin_performance"
 
 @dataclass
 class PIDGains:
