@@ -122,7 +122,8 @@ class FlightScreen(Screen):
         s = self._scene
         obj = s.dir / s.model
         mtl = obj.with_suffix(".mtl")
-        self._model = soup3D.open_obj(str(obj), str(mtl) if mtl.exists() else None)
+        self._model = soup3D.open_obj(str(obj), str(mtl) if mtl.exists() else None,
+                                      surface=self.app.preset.surface_class)
         self._model.size(s.scale, s.scale, s.scale)   # 倍数缩放（引擎 API：倍数）
         # spike 结论：不调 show()（显示列表回放在 Mesa 失效），render_scene() 逐帧直渲
         self._sun = soup3D.light.Direct((30, -60, 0), (0.8, 0.8, 0.75))
