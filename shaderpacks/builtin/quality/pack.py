@@ -12,7 +12,7 @@ from OpenGL.GL import (GL_ACTIVE_TEXTURE, GL_BLEND, GL_COLOR_BUFFER_BIT,
                        GL_DRAW_FRAMEBUFFER, GL_DRAW_FRAMEBUFFER_BINDING, GL_FALSE,
                        GL_FRAGMENT_SHADER, GL_FRAMEBUFFER, GL_LINK_STATUS,
                        GL_READ_FRAMEBUFFER, GL_READ_FRAMEBUFFER_BINDING,
-                       GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE_2D,
+                       GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE_2D,
                        GL_TEXTURE_BINDING_2D, GL_TRIANGLES, GL_TRUE,
                        GL_VERTEX_SHADER, GL_VIEWPORT, glActiveTexture,
                        glAttachShader, glBindFramebuffer, glBindTexture,
@@ -40,19 +40,21 @@ SHADOW_EYE_DIST = 120.0          # 太阳相机沿指向光源方向的后撤距
 SHADOW_TEX_UNIT = 2              # shadowMap 纹理单元（空闲单元，避开 0/1/3 引擎约定）
 DEFAULT_ROUGHNESS = 0.8         # MTL 的 Pr 未提供时的默认粗糙度（spec 5.6）
 DEFAULT_METALLIC = 0.0          # MTL 的 Pm 未提供时的默认金属度（spec 5.6）
-EXPOSURE = 3.0                 # 合成曝光（Lambert/π 后整体偏暗的补偿，目检可调）
+EXPOSURE = 0.65                 # 合成曝光（合成无 gamma：材质/灯光为显示参考值，
+                                # 0.65 使中间调与性能优先对齐，ACES 仅做高光滚降）
 SSR_STEPS = 24                 # SSR 光线步进次数（性能预算超限时减小/置 0 关闭反射）
 SSR_REFINE = 4                 # 命中后二分细化次数
 SSR_THICKNESS = 0.5            # 命中判定厚度（米，视图空间）
 SSR_MAX_DIST = 120.0           # 最大步进距离（米）
-SSR_STRENGTH = 0.35            # SSR 全局反射强度系数（v1 无粗糙度 G-buffer，粗糙表面
-                               # 不做模糊；全局压低镜面感，修「掠射角镜面世界」观感）
+SSR_STRENGTH = 0.35            # SSR 全局反射强度系数（叠加菲涅尔与粗糙度调制后
+                               # 的总闸，目检可调）
+SSR_BLUR_RADIUS = 0.02         # SSR 反射模糊最大半径（UV，随反射点粗糙度线性缩放）
 
-# 合成通道片段着色器（SSR + 背景直通 + 曝光 → ACES → gamma，一个全屏通道直绘默认帧缓冲）。
-# 背景（深度=1）是显示就绪的 LDR 清屏色，直通不参与色调映射——过曝会打成近白，
-# 且保证主菜单/设置页（空场景帧）背景为固定色、与性能优先观感一致。
-# Python % 格式化：五个常量注入 #define（步数/细化为 int，强度/距离/厚度为 float），
-# GLSL 正文不含其他 % 字符
+# 合成通道片段着色器（SSR + 背景直通 + 曝光 → ACES，一个全屏通道直绘默认帧缓冲）。
+# 背景（深度=1）直通固定色；场景像素曝光 → ACES（无 gamma：材质/灯光为显示
+# 参考值，gamma 直出会整体提亮，与性能优先观感脱节）。
+# Python % 格式化：六个常量注入 #define（步数/细化为 int，强度/距离/厚度/模糊
+# 半径为 float），GLSL 正文不含其他 % 字符
 _COMPOSITE_FS = """
 #version 330 core
 #define SSR_STEPS %d
@@ -60,12 +62,14 @@ _COMPOSITE_FS = """
 #define SSR_STRENGTH %.2f
 #define SSR_THICKNESS %.1f
 #define SSR_MAX_DIST %.1f
+#define SSR_BLUR_RADIUS %.3f
 
 in vec2 UV;
 out vec4 FragColor;
 
 uniform sampler2D hdrColor;   // 单元0：HDR 颜色
 uniform sampler2D hdrDepth;   // 单元1：HDR 深度（0..1）
+uniform sampler2D roughTex;   // 单元2：粗糙度图（粗糙度通道写入）
 uniform mat4 invProj;         // 透视矩阵逆（深度 → 视图空间重建）
 uniform mat4 proj;            // 透视矩阵（视图空间 → 屏幕投影）
 uniform float exposure;
@@ -143,18 +147,25 @@ void main()
                 }
             }
             if (found > 0.5) {
-                // 屏幕边缘淡出 + 菲涅尔加权混合
+                // 屏幕边缘淡出 + 菲涅尔/粗糙度加权混合；反射色按粗糙度多点采样
+                // 模糊（物理驱动 = 反射点自身粗糙度：微面元越粗糙反射越弱越散）
                 vec2 border = min(hitUV, 1.0 - hitUV);
                 float edge = clamp(min(border.x, border.y) * 8.0, 0.0, 1.0);
-                color = mix(color, texture(hdrColor, hitUV).rgb,
-                            fresnel * edge * SSR_STRENGTH);
+                float roughSelf = texture(roughTex, UV).r;
+                vec3 refl = texture(hdrColor, hitUV).rgb;
+                float r = roughSelf * SSR_BLUR_RADIUS;
+                refl += texture(hdrColor, hitUV + vec2( r,  r)).rgb;
+                refl += texture(hdrColor, hitUV + vec2( r, -r)).rgb;
+                refl += texture(hdrColor, hitUV + vec2(-r,  r)).rgb;
+                refl += texture(hdrColor, hitUV + vec2(-r, -r)).rgb;
+                color = mix(color, refl * 0.2,
+                            fresnel * edge * SSR_STRENGTH * (1.0 - roughSelf));
             }
         }
     }
 
-    // 曝光 → ACES → gamma 2.2
-    color = aces(color * exposure);
-    FragColor = vec4(pow(color, vec3(1.0 / 2.2)), 1.0);
+    // 曝光 → ACES（无 gamma：材质/灯光为显示参考值，gamma 直出会整体提亮）
+    FragColor = vec4(aces(color * exposure), 1.0);
 }
 """
 
@@ -298,6 +309,54 @@ class DepthSurface(_ShadowSurfaceBase):
             vertex_shader, fragment_shader,
             vbo_type=[soup3D.FLOAT, soup3D.FLOAT, soup3D.FLOAT])
         shader_program.uniform_tex("baseColor", self.base_color, 0)
+        return shader_program
+
+
+class RoughnessSurface(soup3D.shader.AutoSP):
+    """粗糙度通道表面：把材质 roughness 作为颜色渲进粗糙度 RT（SSR 模糊/衰减采样）。
+
+    继承 AutoSP 获得 rend_cached 拆分/VAO 缓存与 set_mat_queue 的
+    model/view/projection 推送（相机 POV 直绘，与主通道同视角）；VS 只消费
+    位置（uv/normal 属性使能但未被 program 消费，GL 合法，DepthSurface 先例）。
+    FS 输出 alpha=1，blend 下无实际混合，无需改混合状态。
+    """
+
+    def __init__(self, roughness):
+        self._roughness = float(roughness)
+        # AutoSP 构造需要一个 base_color（uniform_tex 单元 0 绑定占位，FS 无此
+        # 采样器，location=-1 被引擎静默忽略）
+        super().__init__(soup3D.shader.MixChannel((1, 1), 1.0, 1.0, 1.0, 1.0),
+                         double_side=True, max_light_count=1)
+
+    def create_shader_program(self):
+        vertex_shader = """
+        #version 330 core
+        layout(location = 0) in vec3 VertPos;
+        layout(location = 1) in vec2 VertUV;
+        layout(location = 2) in vec3 VertNormal;
+
+        uniform mat4 model;
+        uniform mat4 view;
+        uniform mat4 projection;
+
+        void main()
+        {
+            gl_Position = projection * view * vec4(VertPos, 1.0);
+        }
+        """
+        fragment_shader = """
+        #version 330 core
+        uniform float roughness;
+        out vec4 FragColor;
+        void main()
+        {
+            FragColor = vec4(roughness, 0.0, 0.0, 1.0);
+        }
+        """
+        shader_program = soup3D.shader.ShaderProgram(
+            vertex_shader, fragment_shader,
+            vbo_type=[soup3D.FLOAT, soup3D.FLOAT, soup3D.FLOAT])
+        shader_program.uniform("roughness", soup3D.FLOAT_VEC1, self._roughness)
         return shader_program
 
 
@@ -532,38 +591,45 @@ class PBRSurface(_ShadowSurfaceBase):
 
 
 class QualityFrameRenderer:
-    """画面优先帧渲染器：阴影通道 → HDR 主通道 → SSR+ACES 合并合成通道
-    （全屏三角直绘默认帧缓冲上屏）。
+    """画面优先帧渲染器：阴影通道 → 粗糙度通道 → HDR 主通道 → SSR+ACES
+    合并合成通道（全屏三角直绘默认帧缓冲上屏）。
 
     资源（构造时创建，要求 GL 上下文就绪）：阴影 RT（固定 2048²）+ HDR RT
-    （窗口尺寸 rgba16f + 深度纹理）。dispose() 供 GL 上下文销毁前释放。
+    （窗口尺寸 rgba16f + 深度纹理）+ 粗糙度 RT（窗口尺寸 rgba8）。
+    dispose() 供 GL 上下文销毁前释放。
     """
 
     def __init__(self, width, height):
         self._shadow_rt = RenderTarget(SHADOW_SIZE, SHADOW_SIZE, "rgba8", "texture")
         self._hdr_rt = RenderTarget(width, height, "rgba16f", "texture")
-        # DepthSurface 按 Face 对象弱引用缓存（face 释放自动清理，规避 id 复用风险）
+        self._rough_rt = RenderTarget(width, height, "rgba8", "renderbuffer")
+        # DepthSurface/RoughnessSurface 按 Face 对象弱引用缓存（face 释放自动
+        # 清理，规避 id 复用风险）
         self._depth_surfaces = weakref.WeakKeyDictionary()
+        self._rough_surfaces = weakref.WeakKeyDictionary()
         # 合成通道：全屏三角辅助 + 以当前常量编译的程序（SSR_STEPS 可在构造前
         # monkeypatch 做 A/B；A/B 测试即依赖此语义）
         self._composite_pass = api.FullScreenPass()
         self._composite_prog = _compile_program(
             api.FULLSCREEN_VS,
             _COMPOSITE_FS % (SSR_STEPS, SSR_REFINE, SSR_STRENGTH,
-                             SSR_THICKNESS, SSR_MAX_DIST))
+                             SSR_THICKNESS, SSR_MAX_DIST, SSR_BLUR_RADIUS))
 
     def render_frame(self, draw_scene):
         has_sun = self._update_shadow_registry(draw_scene.faces)
         if has_sun:
             self._render_shadow_pass(draw_scene.faces)
+        self._render_roughness_pass(draw_scene.faces)
         self._render_main_pass(draw_scene)
         self._render_composite()
 
     def dispose(self):
         """GL 上下文销毁前释放：删 RT/合成程序/全屏 VAO（引擎同模式，失败静默）"""
         self._depth_surfaces.clear()
+        self._rough_surfaces.clear()
         self._shadow_rt = None
         self._hdr_rt = None
+        self._rough_rt = None
         try:
             if self._composite_prog is not None:
                 glDeleteProgram(self._composite_prog)
@@ -639,6 +705,52 @@ class QualityFrameRenderer:
             self._depth_surfaces[face] = ds
         return ds
 
+    def _render_roughness_pass(self, faces):
+        """粗糙度通道：每材质 roughness 渲进粗糙度 RT（相机 POV，与主通道同
+        视角），SSR 据此做反射模糊与衰减。清屏白色 = 全粗糙（语义保守：无数据
+        处无反射）。FS 输出 alpha=1，blend 下无实际混合，无需改混合状态。"""
+        rt = self._rough_rt
+        rt.bind()
+        try:
+            prev_clear = glGetFloatv(GL_COLOR_CLEAR_VALUE)
+            prev_mask = glGetBooleanv(GL_DEPTH_WRITEMASK)
+            glClearColor(1.0, 1.0, 1.0, 1.0)
+            glDepthMask(GL_TRUE)
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            glDepthMask(prev_mask)
+            glClearColor(*prev_clear)
+            last_model = None
+            model_mat = None
+            for model, face in faces:
+                if model is not last_model:
+                    # 同模型 faces 连续排列（spec 4.3）：组首计算模型矩阵一次
+                    last_model = model
+                    model_mat = model.get_model_mat()
+                rs = self._rough_surface_for(face)
+                rs.set_model_mat(model_mat)
+                if rs.is_dirty():
+                    rs.update()
+                rs.use()
+                rs.rend_cached(face.mode, face.vertex)
+                rs.unuse()
+        finally:
+            rt.unbind()
+
+    def _rough_surface_for(self, face):
+        """按 Face 对象弱引用缓存 RoughnessSurface（face 释放自动清理）"""
+        rs = self._rough_surfaces.get(face)
+        if rs is None:
+            rough = getattr(face.surface, "roughness", DEFAULT_ROUGHNESS)
+            rs = RoughnessSurface(rough)
+            # 引擎表面矩阵模型 = 「构造时默认单位阵 + 相机事件推送」；本表面创建
+            # 晚于 Model 构造与相机事件，必须补推当前矩阵，否则 view/projection
+            # 恒为单位阵、顶点全部落在裁剪体之外（粗糙度 RT 全为清屏色的根因）。
+            # 创建时补推一次即可：此后 camera 事件经 set_mat_queue 持续覆盖。
+            rs.set_view_mat(soup3D.camera.get_view_mat())
+            rs.set_projection_mat(soup3D.get_projection_mat())
+            self._rough_surfaces[face] = rs
+        return rs
+
     def _render_main_pass(self, draw_scene):
         """主通道：HDR RT 清屏（天空色）→ draw_scene()（表面 rend_cached 进 RT）。"""
         rt = self._hdr_rt
@@ -656,9 +768,10 @@ class QualityFrameRenderer:
             rt.unbind()
 
     def _render_composite(self):
-        """合成通道：全屏三角直绘默认帧缓冲——HDR 颜色 + 深度重建做 SSR，
-        背景（深度=1）直通固定色，场景像素曝光 → ACES → gamma 后上屏。
-        GL 状态卫生照 RenderTarget.present 的保存/恢复模式。"""
+        """合成通道：全屏三角直绘默认帧缓冲——HDR 颜色 + 深度 + 粗糙度重建做
+        SSR（粗糙度调制模糊与衰减），背景（深度=1）直通固定色，场景像素
+        曝光 → ACES 后上屏。GL 状态卫生照 RenderTarget.present 的保存/恢复
+        模式。"""
         prog = self._composite_prog
         prev_viewport = tuple(int(v) for v in glGetIntegerv(GL_VIEWPORT))
         prev_draw_fbo = _gl_scalar(glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING))
@@ -677,8 +790,11 @@ class QualityFrameRenderer:
         glBindTexture(GL_TEXTURE_2D, self._hdr_rt.color.get_texture_id())
         glActiveTexture(GL_TEXTURE1)
         glBindTexture(GL_TEXTURE_2D, self._hdr_rt.depth.get_texture_id())
+        glActiveTexture(GL_TEXTURE2)
+        glBindTexture(GL_TEXTURE_2D, self._rough_rt.color.get_texture_id())
         glUniform1i(glGetUniformLocation(prog, "hdrColor"), 0)
         glUniform1i(glGetUniformLocation(prog, "hdrDepth"), 1)
+        glUniform1i(glGetUniformLocation(prog, "roughTex"), 2)
         proj = soup3D.get_projection_mat()
         # inverse 先存局部变量再取 value_ptr：对临时对象取指针会在 PyOpenGL
         # 参数转换链中被 GC（上传已释放内存的垃圾矩阵，Task 10 注释同款坑）
