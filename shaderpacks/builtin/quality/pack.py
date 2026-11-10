@@ -1,7 +1,7 @@
 """内置「画面优先」预设（spec 5.6 参考实现）。
 
-当前版本：太阳方向光阴影贴图通道 + HDR（rgba16f）主通道 + present 直通呈现
-（spec 5.6 前半管线；PBR 表面与 SSR/ACES 合成通道由后续提交引入本文件）。
+当前管线：太阳方向光阴影贴图通道 → HDR（rgba16f）主通道 → SSR+ACES
+合并合成通道（全屏三角直绘默认帧缓冲上屏）。
 """
 import weakref
 
@@ -519,7 +519,8 @@ class PBRSurface(_ShadowSurfaceBase):
 
 
 class QualityFrameRenderer:
-    """画面优先帧渲染器：阴影通道 → HDR 主通道 → present 直通呈现。
+    """画面优先帧渲染器：阴影通道 → HDR 主通道 → SSR+ACES 合并合成通道
+    （全屏三角直绘默认帧缓冲上屏）。
 
     资源（构造时创建，要求 GL 上下文就绪）：阴影 RT（固定 2048²）+ HDR RT
     （窗口尺寸 rgba16f + 深度纹理）。dispose() 供 GL 上下文销毁前释放。
