@@ -4,7 +4,7 @@ import pygame
 from .base import Screen
 from config_store import AxisBinding
 from input.joystick import JoystickInput
-from input.wizard import AxisCapture, MODE_STICKS, DIRECTION
+from input.wizard import AxisCapture, MODE_STICKS, DIRECTION, channel_inverted
 
 CHANNELS = ["throttle", "yaw", "roll", "pitch"]
 CHANNEL_CN = {"throttle": "油门", "yaw": "偏航", "roll": "横滚", "pitch": "俯仰"}
@@ -167,7 +167,9 @@ class RCSetupScreen(Screen):
                 if found is not None:
                     axis, inverted = found
                     wz["bound"][ch_name] = axis
-                    wz["inverted"][ch_name] = inverted
+                    # 捕获判的是原始轴方向；pitch 正杆义与指令方向相反，须按
+                    # POLARITY_FLIP 翻转（否则飞行推杆=抬头，俯仰反向）
+                    wz["inverted"][ch_name] = channel_inverted(ch_name, inverted)
                     wz["capture"] = None
                     if len(wz["bound"]) == 4:
                         wz["stage"] = "verify"
@@ -182,6 +184,7 @@ class RCSetupScreen(Screen):
             ch = tmp.read(self._dt)
             _bar("油门", ch.throttle, 0, 1); _bar("偏航", ch.yaw, -1, 1)
             _bar("横滚", ch.roll, -1, 1); _bar("俯仰", ch.pitch, -1, 1)
+            imgui.text("俯仰方向：推杆低头（−），拉杆抬头（+）")
             if imgui.button("完成并保存", 200, 40):
                 for c, axis in wz["bound"].items():
                     self.app.rc_config.mappings[c] = AxisBinding(
