@@ -45,14 +45,19 @@ SSR_STEPS = 24                 # SSR 光线步进次数（性能预算超限时�
 SSR_REFINE = 4                 # 命中后二分细化次数
 SSR_THICKNESS = 0.5            # 命中判定厚度（米，视图空间）
 SSR_MAX_DIST = 120.0           # 最大步进距离（米）
+SSR_STRENGTH = 0.35            # SSR 全局反射强度系数（v1 无粗糙度 G-buffer，粗糙表面
+                               # 不做模糊；全局压低镜面感，修「掠射角镜面世界」观感）
 
-# 合成通道片段着色器（SSR + 曝光 → ACES → gamma，一个全屏通道直绘默认帧缓冲）。
-# Python % 格式化：四个常量注入 #define（步数/细化为 int，距离/厚度为 float），
+# 合成通道片段着色器（SSR + 背景直通 + 曝光 → ACES → gamma，一个全屏通道直绘默认帧缓冲）。
+# 背景（深度=1）是显示就绪的 LDR 清屏色，直通不参与色调映射——过曝会打成近白，
+# 且保证主菜单/设置页（空场景帧）背景为固定色、与性能优先观感一致。
+# Python % 格式化：五个常量注入 #define（步数/细化为 int，强度/距离/厚度为 float），
 # GLSL 正文不含其他 % 字符
 _COMPOSITE_FS = """
 #version 330 core
 #define SSR_STEPS %d
 #define SSR_REFINE %d
+#define SSR_STRENGTH %.2f
 #define SSR_THICKNESS %.1f
 #define SSR_MAX_DIST %.1f
 
@@ -85,7 +90,14 @@ void main()
     float depth = texture(hdrDepth, UV).r;
     vec3 color = texture(hdrColor, UV).rgb;
 
-    // SSR：深度=1 的天空像素直通；反射方向朝屏幕外（R.z>=0）跳过
+    // 背景（深度=1）直通：显示就绪的清屏色，不参与曝光/ACES/gamma。
+    // 空场景帧（主菜单/设置页）整屏走此分支 → 固定背景色，与性能优先观感一致
+    if (depth >= 1.0) {
+        FragColor = vec4(color, 1.0);
+        return;
+    }
+
+    // SSR（仅场景像素）：反射方向朝屏幕外（R.z>=0）跳过
     if (depth < 1.0) {
         vec3 viewPos = view_pos_at(UV, depth);
         vec3 N = normalize(cross(dFdx(viewPos), dFdy(viewPos)));
@@ -134,7 +146,8 @@ void main()
                 // 屏幕边缘淡出 + 菲涅尔加权混合
                 vec2 border = min(hitUV, 1.0 - hitUV);
                 float edge = clamp(min(border.x, border.y) * 8.0, 0.0, 1.0);
-                color = mix(color, texture(hdrColor, hitUV).rgb, fresnel * edge);
+                color = mix(color, texture(hdrColor, hitUV).rgb,
+                            fresnel * edge * SSR_STRENGTH);
             }
         }
     }
@@ -536,7 +549,8 @@ class QualityFrameRenderer:
         self._composite_pass = api.FullScreenPass()
         self._composite_prog = _compile_program(
             api.FULLSCREEN_VS,
-            _COMPOSITE_FS % (SSR_STEPS, SSR_REFINE, SSR_THICKNESS, SSR_MAX_DIST))
+            _COMPOSITE_FS % (SSR_STEPS, SSR_REFINE, SSR_STRENGTH,
+                             SSR_THICKNESS, SSR_MAX_DIST))
 
     def render_frame(self, draw_scene):
         has_sun = self._update_shadow_registry(draw_scene.faces)
@@ -643,8 +657,8 @@ class QualityFrameRenderer:
 
     def _render_composite(self):
         """合成通道：全屏三角直绘默认帧缓冲——HDR 颜色 + 深度重建做 SSR，
-        曝光 → ACES → gamma 后上屏。GL 状态卫生照 RenderTarget.present 的
-        保存/恢复模式。"""
+        背景（深度=1）直通固定色，场景像素曝光 → ACES → gamma 后上屏。
+        GL 状态卫生照 RenderTarget.present 的保存/恢复模式。"""
         prog = self._composite_prog
         prev_viewport = tuple(int(v) for v in glGetIntegerv(GL_VIEWPORT))
         prev_draw_fbo = _gl_scalar(glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING))
