@@ -49,8 +49,8 @@ SHADOW_EYE_DIST = 120.0          # 太阳相机沿指向光源方向的后撤距
 SHADOW_TEX_UNIT = 2              # shadowMap 纹理单元（空闲单元，避开 0/1/3 引擎约定）
 DEFAULT_ROUGHNESS = 0.8         # MTL 的 Pr/Ns 均未提供时的默认粗糙度（spec 5.6）
 DEFAULT_METALLIC = 0.0          # MTL 的 Pm 未提供时的默认金属度（spec 5.6）
-# map_Ns 逐像素粗糙度的默认占位：1×1 全白（=光滑度系数 1，逐像素粗糙度=标量值）
-_ROUGH_MAP_WHITE = soup3D.shader.MixChannel((1, 1), 1.0, 1.0, 1.0, 1.0)
+NS_MAP_SHININESS_SCALE = 1000.0  # map_Ns 贴图值 → shininess 的缩放（白=1000≈镜面
+# 0.045、黑=完全哑光 1.0，roughness_from_shininess 同式换算）
 
 
 def roughness_from_shininess(ns):
@@ -141,10 +141,11 @@ def _generate_sky_equirect(sun_yaw, sun_pitch, sun_color):
     return np.clip(sky * 255.0, 0.0, 255.0).astype(np.uint8)
 EXPOSURE = 0.65                 # 合成曝光（合成无 gamma：材质/灯光为显示参考值，
                                 # 0.65 使中间调与性能优先对齐，ACES 仅做高光滚降）
-SSR_STEPS = 24                 # SSR 光线步进次数（性能预算超限时减小/置 0 关闭反射）
+SSR_STEPS = 64                 # SSR 光线步进次数（性能预算超限时减小/置 0 关闭反射）
 SSR_REFINE = 4                 # 命中后二分细化次数
 SSR_THICKNESS = 0.5            # 命中判定厚度（米，视图空间）
-SSR_MAX_DIST = 120.0           # 最大步进距离（米）
+SSR_MAX_DIST = 60.0            # 最大步进距离（米；与 STEPS 决定步长 ~0.94m，
+                               # 步长过大是贴地掠射反射错位破碎的主因）
 SSR_STRENGTH = 0.35            # SSR 掠射反射强度系数（菲涅尔项的闸，目检可调）
 SSR_BASE = 0.25                # SSR 正对角反射底座（视觉驱动，非物理：菲涅尔在正对
                                # 角仅 ~4%，会把一切非掠射反射压到不可见；积水/光滑面的
@@ -516,13 +517,16 @@ class RoughnessSurface(soup3D.shader.AutoSP):
             fragment_shader = """
         #version 330 core
         in vec2 TexCoord;
-        uniform float roughness;
+        uniform float nsScale;            // map_Ns 贴图值的 shininess 缩放
         uniform sampler2D roughnessMap;
         out vec4 FragColor;
         void main()
         {
-            FragColor = vec4(roughness * (1.0 - texture(roughnessMap, TexCoord).r),
-                             0.0, 0.0, 1.0);
+            // map_Ns 规范语义（替换式）：贴图值 × nsScale = 逐像素 shininess，
+            // 白=光滑镜面、黑=完全哑光；调制式（标量×系数）会被材质标量粗糙度
+            // 压死积水镜面，故贴图存在时完全按贴图表达
+            float ns_pix = texture(roughnessMap, TexCoord).r * nsScale;
+            FragColor = vec4(sqrt(2.0 / (ns_pix + 2.0)), 0.0, 0.0, 1.0);
         }
         """
         else:
@@ -539,6 +543,8 @@ class RoughnessSurface(soup3D.shader.AutoSP):
             vertex_shader, fragment_shader,
             vbo_type=[soup3D.FLOAT, soup3D.FLOAT, soup3D.FLOAT])
         shader_program.uniform("roughness", soup3D.FLOAT_VEC1, self._roughness)
+        shader_program.uniform("nsScale", soup3D.FLOAT_VEC1,
+                               NS_MAP_SHININESS_SCALE)
         if self._map_tex is not None:
             shader_program.uniform_tex("roughnessMap", self._map_tex, 1)
         return shader_program
@@ -565,10 +571,16 @@ class PBRSurface(_ShadowSurfaceBase):
         self._last_cam = None
         super().__init__(base_color, normal=normal, emission=emission,
                          double_side=double_side, max_light_count=max_light_count)
-        # map_Ns 逐像素粗糙度：默认 1×1 白占位（贴图值 1 → 逐像素=标量）；
-        # post_load 注入真实贴图（rebind_roughness_map）后替换绑定
+        # map_Ns 逐像素粗糙度：默认 1×1 占位（占位值按材质标量粗糙度反算为
+        # shininess，使无贴图时逐像素通道输出恰为标量粗糙度）；post_load 注入
+        # 真实贴图（rebind_roughness_map）后替换绑定
         self.roughness_map_tex = None
-        self.shader_program.uniform_tex("roughnessMap", _ROUGH_MAP_WHITE, 4)
+        t_star = (2.0 / (self.roughness ** 2) - 2.0) / NS_MAP_SHININESS_SCALE
+        placeholder = soup3D.shader.MixChannel((1, 1), max(0.0, min(1.0, t_star)),
+                                               1.0, 1.0, 1.0)
+        self.shader_program.uniform_tex("roughnessMap", placeholder, 4)
+        self.shader_program.uniform("nsScale", soup3D.FLOAT_VEC1,
+                                    NS_MAP_SHININESS_SCALE)
 
     def create_shader_program(self):
         vertex_shader = """
@@ -611,6 +623,7 @@ class PBRSurface(_ShadowSurfaceBase):
         uniform sampler2D shadowMap;
         uniform sampler2D emission;
         uniform sampler2D roughnessMap;   // 单元4：map_Ns 逐像素粗糙度（白=光滑）
+        uniform float nsScale;            // map_Ns 贴图值的 shininess 缩放
         uniform float roughness;
         uniform float metallic;
         uniform vec3 cameraPos;      // 引擎相机（GGX 视线方向，update 每帧补传）
@@ -709,9 +722,11 @@ class PBRSurface(_ShadowSurfaceBase):
                 float ndv = max(dot(N, V), 0.0);
                 float ndh = max(dot(N, H), 0.0);
                 float vdh = max(dot(V, H), 0.0);
-                // GGX：D = a²/(π((n·h)²(a²-1)+1)²)；逐像素粗糙度 = 标量 ×
-                // (1 - map_Ns 贴图值)（贴图白=光滑，MTL shininess 贴图规范语义）
-                float matRough = roughness * (1.0 - texture(roughnessMap, TexCoord).r);
+                // GGX：D = a²/(π((n·h)²(a²-1)+1)²)；材质有 map_Ns 贴图时按其
+                // 规范语义替换式表达逐像素粗糙度（贴图值×nsScale=shininess，
+                // 白=光滑镜面、黑=完全哑光）；无贴图时占位值已反算为标量粗糙度
+                float ns_pix = texture(roughnessMap, TexCoord).r * nsScale;
+                float matRough = sqrt(2.0 / (ns_pix + 2.0));
                 float a = matRough * matRough;
                 float a2 = a * a;
                 float dd = ndh * ndh * (a2 - 1.0) + 1.0;
