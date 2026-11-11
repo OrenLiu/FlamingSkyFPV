@@ -178,7 +178,8 @@ void main()
                 refl += texture(hdrColor, hitUV + vec2(-r,  r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2(-r, -r)).rgb;
                 color = mix(color, refl * 0.2,
-                            smoothness * (SSR_BASE + fresnel * SSR_STRENGTH) * edge);
+                            smoothness * smoothness
+                            * (SSR_BASE + fresnel * SSR_STRENGTH) * edge);
             }
         }
     }
