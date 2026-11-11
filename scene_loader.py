@@ -12,6 +12,7 @@ class SceneInfo:
     cover: str = ""   # 封面图（可选，相对场景目录；仅展示用，缺失不判无效）
     scale: float = 1.0
     spawn: tuple = (0.0, 0.0, 2.0)
+    sky: dict = field(default_factory=dict)   # 天空配置（解析后恒含四键，见 list_scenes）
     valid: bool = True
     error: str = ""
 
@@ -37,6 +38,17 @@ def list_scenes(scene_root: str = "scene") -> list:
             info.scale = float(data.get("scale", 1.0))
             spawn = data.get("spawn", [0, 0, 2])
             info.spawn = tuple(float(v) for v in spawn)
+            # 天空配置：太阳参数同时驱动方向光与画面优先包的天空盒；panorama
+            # 为场景目录内等距圆柱全景图（缺省程序生成默认天空）
+            sky = data.get("sky", {})
+            info.sky = {
+                "sun_yaw": float(sky.get("sun_yaw", 30)),
+                "sun_pitch": float(sky.get("sun_pitch", -60)),
+                "sun_color": [float(v) for v in
+                              sky.get("sun_color", [0.8, 0.8, 0.75])],
+                "panorama": (str(d / sky["panorama"])
+                             if sky.get("panorama") else ""),
+            }
         except Exception as e:  # 非法场景：标记而非中断（设计文档第 8 节）
             info.valid = False
             info.error = str(e)

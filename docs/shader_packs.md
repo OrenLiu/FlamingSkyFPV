@@ -44,6 +44,7 @@ shader_packs/<包目录名>/
 | --- | --- | --- |
 | `render_frame(draw_scene)` | 是 | 接管整帧（含清屏）。`draw_scene()` 把场景内容画进**当前绑定的渲染目标**；`draw_scene.faces` 为 `[(model, face), ...]`（阴影通道迭代用；同模型 faces 连续排列；无场景时为空列表）。引擎光源/EAU 由游戏 runtime 在调用前自动处理，包无需自调 |
 | `dispose()` | 否 | GL 上下文销毁前释放资源（RT/程序/纹理）。缺省依赖 GC + `__del__` |
+| `set_sky(sun_yaw, sun_pitch, sun_color, panorama_path=None)` | 否 | 场景天空配置钩子：生成/加载等距圆柱天空盒（自带全景图优先，否则程序生成蓝天渐变+云朵+太阳），画面优先背景与 SSR miss 回退消费；太阳参数与场景方向光同源 |
 
 ## 约定与注意
 

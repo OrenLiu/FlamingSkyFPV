@@ -6,6 +6,9 @@
 import os
 import weakref
 
+import numpy as np
+from PIL import Image
+
 import soup3D
 from OpenGL.GL import (GL_ACTIVE_TEXTURE, GL_BLEND, GL_COLOR_BUFFER_BIT,
                        GL_COLOR_CLEAR_VALUE, GL_COMPILE_STATUS, GL_CURRENT_PROGRAM,
@@ -13,17 +16,22 @@ from OpenGL.GL import (GL_ACTIVE_TEXTURE, GL_BLEND, GL_COLOR_BUFFER_BIT,
                        GL_DRAW_FRAMEBUFFER, GL_DRAW_FRAMEBUFFER_BINDING, GL_FALSE,
                        GL_FRAGMENT_SHADER, GL_FRAMEBUFFER, GL_LINK_STATUS,
                        GL_READ_FRAMEBUFFER, GL_READ_FRAMEBUFFER_BINDING,
-                       GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE_2D,
+                       GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3,
+                       GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT,
+                       GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER,
+                       GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR,
                        GL_TEXTURE_BINDING_2D, GL_TRIANGLES, GL_TRUE,
                        GL_VERTEX_SHADER, GL_VIEWPORT, glActiveTexture,
                        glAttachShader, glBindFramebuffer, glBindTexture,
                        glClear, glClearColor, glCompileShader,
                        glCreateProgram, glCreateShader, glDeleteProgram,
                        glDeleteShader, glDepthMask, glDisable, glDrawArrays,
-                       glEnable, glGetBooleanv, glGetFloatv, glGetIntegerv,
+                       glEnable, glGenerateMipmap, glGetBooleanv, glGetFloatv,
+                       glGetIntegerv,
                        glGetProgramInfoLog, glGetProgramiv, glGetShaderInfoLog,
                        glGetShaderiv, glGetUniformLocation, glIsEnabled,
-                       glLinkProgram, glShaderSource, glUniform1f, glUniform1i,
+                       glLinkProgram, glShaderSource, glTexParameteri,
+                       glUniform1f, glUniform1i, glUniform3f,
                        glUniformMatrix4fv, glUseProgram, glViewport)
 from pyglm import glm
 from soup3D.target import RenderTarget
@@ -57,6 +65,60 @@ def roughness_from_shininess(ns):
     if ns is None:
         return DEFAULT_ROUGHNESS
     return (2.0 / (float(ns) + 2.0)) ** 0.5
+
+
+def _generate_sky_equirect(sun_yaw, sun_pitch, sun_color):
+    """程序生成等距圆柱（equirectangular）天空盒（numpy → uint8 RGB 数组）。
+
+    内容：按高度角蓝天渐变（天顶深蓝 → 地平线浅蓝 → 地下暗雾色）、两层
+    频率的噪声云朵（地平线上方）、太阳光斑（核心 + 光晕，按 sun_color 着色）。
+    太阳方向与引擎 Direct 同式（toward=(yaw, pitch, 0) 的四元数换算，上游
+    同步核对点）。行序约定：数组第 0 行 = 天顶（from_array 顶原点语义）。
+    固定随机种子：同参数生成结果可复现。
+    """
+    w, h = SKY_TEX_SIZE
+    yy, xx = np.mgrid[0:h, 0:w]
+    theta = yy / h * np.pi                       # 0 = 天顶行
+    phi = (xx / w - 0.5) * 2.0 * np.pi
+    dir_y = np.cos(theta)
+    sin_t = np.sin(theta)
+    dir_x = (sin_t * np.cos(phi)).astype(np.float32)
+    dir_z = (sin_t * np.sin(phi)).astype(np.float32)
+    # 蓝天渐变
+    zenith = np.array([0.22, 0.42, 0.85], dtype=np.float32)
+    horizon = np.array([0.62, 0.76, 0.94], dtype=np.float32)
+    ground_col = np.array([0.30, 0.32, 0.34], dtype=np.float32)
+    deep_col = np.array([0.16, 0.17, 0.18], dtype=np.float32)
+    sky = np.empty((h, w, 3), dtype=np.float32)
+    up = dir_y >= 0
+    f = dir_y[up] ** 0.6
+    sky[up] = horizon * (1.0 - f[:, None]) + zenith * f[:, None]
+    gd = (-dir_y[~up])[:, None]
+    sky[~up] = ground_col * (1.0 - gd) + deep_col * gd
+    # 太阳光斑（与 Direct 同式换算太阳方向）
+    quat = soup3D.s3dm.euler_to_quat(sun_yaw, sun_pitch, 0)
+    sun_dir = glm.normalize(-(quat * glm.vec3(0.0, 0.0, -1.0)))
+    dot = np.clip(dir_x * sun_dir.x + dir_y * sun_dir.y + dir_z * sun_dir.z,
+                  0.0, 1.0)
+    ang = np.arccos(dot)
+    core = np.exp(-ang ** 2 / 0.0008)
+    halo = np.exp(-ang ** 2 / 0.05) * 0.35
+    sun_rgb = np.array(sun_color, dtype=np.float32)
+    sky += (core[..., None] * (1.4 + 0.5 * sun_rgb) + halo[..., None] * sun_rgb)
+    # 云朵：固定种子三层噪声 fBm（PIL 双线性上采样平滑），仅地平线上方
+    rng = np.random.default_rng(20261111)
+
+    def fbm(freq):
+        small = (rng.random((freq, freq * 2)) * 255).astype(np.uint8)
+        img = Image.fromarray(small).resize((w, h), Image.BILINEAR)
+        return np.asarray(img, dtype=np.float32) / 255.0
+
+    noise = fbm(16) * 0.6 + fbm(32) * 0.28 + fbm(64) * 0.12
+    cloud = np.clip((noise - 0.52) / 0.18, 0.0, 1.0) ** 1.5
+    cloud *= np.clip((dir_y - 0.03) * 6.0, 0.0, 1.0)
+    cloud_rgb = np.array([0.97, 0.98, 1.0], dtype=np.float32)
+    sky = sky * (1.0 - cloud[..., None]) + cloud_rgb * cloud[..., None]
+    return np.clip(sky * 255.0, 0.0, 255.0).astype(np.uint8)
 EXPOSURE = 0.65                 # 合成曝光（合成无 gamma：材质/灯光为显示参考值，
                                 # 0.65 使中间调与性能优先对齐，ACES 仅做高光滚降）
 SSR_STEPS = 24                 # SSR 光线步进次数（性能预算超限时减小/置 0 关闭反射）
@@ -68,6 +130,7 @@ SSR_BASE = 0.25                # SSR 正对角反射底座（视觉驱动，非�
                                # 角仅 ~4%，会把一切非掠射反射压到不可见；积水/光滑面的
                                # 「处处可辨镜面感」需要底座。粗糙度衰减×模糊仍按物理）
 SSR_BLUR_RADIUS = 0.02         # SSR 反射模糊最大半径（UV，随反射点粗糙度线性缩放）
+SKY_TEX_SIZE = (1024, 512)     # 程序生成等距圆柱天空盒尺寸（宽, 高；2:1）
 
 # 合成通道片段着色器（SSR + 背景直通 + 曝光 → ACES，一个全屏通道直绘默认帧缓冲）。
 # 背景（深度=1）直通固定色；场景像素曝光 → ACES（无 gamma：材质/灯光为显示
@@ -90,6 +153,9 @@ out vec4 FragColor;
 uniform sampler2D hdrColor;   // 单元0：HDR 颜色
 uniform sampler2D hdrDepth;   // 单元1：HDR 深度（0..1）
 uniform sampler2D roughTex;   // 单元2：粗糙度图（粗糙度通道写入）
+uniform sampler2D skySampler; // 单元3：天空盒（SSR miss 回退采样）
+uniform mat4 viewInv;         // 视图逆（反射方向视图系 → 世界系）
+uniform int skyEnabled;       // 场景是否配置了天空盒
 uniform mat4 invProj;         // 透视矩阵逆（深度 → 视图空间重建）
 uniform mat4 proj;            // 透视矩阵（视图空间 → 屏幕投影）
 uniform float exposure;
@@ -99,6 +165,13 @@ vec3 aces(vec3 x)
     // ACES 近似（Narkowicz 拟合）
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14),
                  0.0, 1.0);
+}
+
+// 等距圆柱采样（约定与 _generate_sky_equirect 行序互逆）
+vec2 sky_uv(vec3 d)
+{
+    return vec2(atan(d.z, d.x) / 6.2831853 + 0.5,
+                1.0 - acos(clamp(d.y, -1.0, 1.0)) / 3.14159265);
 }
 
 vec3 view_pos_at(vec2 uv, float depth)
@@ -166,29 +239,64 @@ void main()
                     break;
                 }
             }
+            float smoothness = 1.0 - texture(roughTex, UV).r;
+            vec3 refl;
+            float k;
             if (found > 0.5) {
-                // 屏幕边缘淡出 + 反射加权混合：混合系数 = 光滑度 ×
-                // (SSR_BASE 正对底座 + 菲涅尔 × SSR_STRENGTH)——纯菲涅尔在正对
-                // 角仅约百分之四，会把差异化粗糙度全部压到不可见；反射色按粗糙度
-                // 多点采样模糊（物理驱动 = 反射点自身粗糙度：越粗糙越弱越散）
+                // 屏内命中：屏幕边缘淡出 + 光滑度² × (底座 + 菲涅尔×强度)；
+                // 反射色按粗糙度多点采样模糊（物理驱动 = 反射点自身粗糙度：
+                // 越粗糙越弱越散）
                 vec2 border = min(hitUV, 1.0 - hitUV);
                 float edge = clamp(min(border.x, border.y) * 8.0, 0.0, 1.0);
-                float smoothness = 1.0 - texture(roughTex, UV).r;
                 vec3 refl = texture(hdrColor, hitUV).rgb;
                 float r = (1.0 - smoothness) * SSR_BLUR_RADIUS;
                 refl += texture(hdrColor, hitUV + vec2( r,  r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2( r, -r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2(-r,  r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2(-r, -r)).rgb;
-                color = mix(color, refl * 0.2,
-                            smoothness * smoothness
-                            * (SSR_BASE + fresnel * SSR_STRENGTH) * edge);
+                k = smoothness * smoothness
+                    * (SSR_BASE + fresnel * SSR_STRENGTH) * edge;
+            } else if (skyEnabled == 1) {
+                // 屏内未命中：按反射方向回退采样天空盒——出屏反射也有天空、
+                // 云朵与太阳（画面优先需求：天空中的东西出现在镜面反射中）
+                vec3 worldR = (viewInv * vec4(R, 0.0)).xyz;
+                refl = texture(skySampler, sky_uv(normalize(worldR))).rgb;
+                k = smoothness * smoothness
+                    * (SSR_BASE + fresnel * SSR_STRENGTH);
+            } else {
+                refl = color;
+                k = 0.0;
             }
+            color = mix(color, refl, k);
         }
     }
 
     // 曝光 → ACES（无 gamma：材质/灯光为显示参考值，gamma 直出会整体提亮）
     FragColor = vec4(aces(color * exposure), 1.0);
+}
+"""
+
+
+# 背景通道片段着色器：按像素视线方向采样等距圆柱天空盒（约定与
+# _generate_sky_equirect 行序互逆：v = 1 - acos(dir.y)/π，u = atan(z,x)/2π+0.5）。
+# 画进 HDR RT 后深度保持 1 → 合成端背景直通分支自动显示，无需改动。
+_SKY_FS = """
+#version 330 core
+in vec2 UV;
+out vec4 FragColor;
+uniform sampler2D skySampler;   // 单元3：等距圆柱天空盒
+uniform mat4 invViewProj;
+uniform vec3 camPos;
+vec2 sky_uv(vec3 d)
+{
+    return vec2(atan(d.z, d.x) / 6.2831853 + 0.5,
+                1.0 - acos(clamp(d.y, -1.0, 1.0)) / 3.14159265);
+}
+void main()
+{
+    vec4 far_pt = invViewProj * vec4(UV * 2.0 - 1.0, 1.0, 1.0);
+    vec3 dir = normalize(far_pt.xyz / far_pt.w - camPos);
+    FragColor = vec4(texture(skySampler, sky_uv(dir)).rgb, 1.0);
 }
 """
 
@@ -678,14 +786,40 @@ class QualityFrameRenderer:
             api.FULLSCREEN_VS,
             _COMPOSITE_FS % (SSR_STEPS, SSR_REFINE, SSR_STRENGTH, SSR_BASE,
                              SSR_THICKNESS, SSR_MAX_DIST, SSR_BLUR_RADIUS))
+        # 天空：set_sky 按场景配置（自带全景图或程序生成），背景通道与
+        # SSR miss 回退消费；未配置（性能优先/未进场景）→ 纯色背景
+        self._sky_tex = None
+        self._sky_prog = _compile_program(api.FULLSCREEN_VS, _SKY_FS)
+        self._sky_pass = api.FullScreenPass()
 
     def render_frame(self, draw_scene):
+        has_scene = len(draw_scene.faces) > 0
         has_sun = self._update_shadow_registry(draw_scene.faces)
         if has_sun:
             self._render_shadow_pass(draw_scene.faces)
         self._render_roughness_pass(draw_scene.faces)
-        self._render_main_pass(draw_scene)
+        self._render_main_pass(draw_scene, has_scene)
         self._render_composite()
+
+    def set_sky(self, sun_yaw, sun_pitch, sun_color, panorama_path=None):
+        """场景天空配置（spec 4.3 渲染器可选方法）：生成/加载等距圆柱天空盒。
+
+        panorama_path 提供时加载自带全景图；否则按太阳参数程序生成（蓝天渐变
+        + 噪声云朵 + 太阳光斑，固定种子可复现）。太阳方向与场景方向光同参，
+        保证画面里的太阳、光照方向、镜面反射三者一致。
+        """
+        if panorama_path is not None:
+            tex = soup3D.shader.Texture(panorama_path)
+        else:
+            tex = soup3D.shader.Texture.from_array(
+                _generate_sky_equirect(sun_yaw, sun_pitch, sun_color),
+                color="rgb8")
+        tid = tex.get_texture_id()
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glGenerateMipmap(GL_TEXTURE_2D)
+        self._sky_tex = tex
 
     def dispose(self):
         """GL 上下文销毁前释放：删 RT/合成程序/全屏 VAO（引擎同模式，失败静默）"""
@@ -703,6 +837,9 @@ class QualityFrameRenderer:
         if self._composite_pass is not None:
             self._composite_pass.dispose()
             self._composite_pass = None
+        if self._sky_pass is not None:
+            self._sky_pass.dispose()
+            self._sky_pass = None
 
     # ---- 阴影状态与通道 ----
     def _update_shadow_registry(self, faces):
@@ -816,8 +953,10 @@ class QualityFrameRenderer:
             self._rough_surfaces[face] = rs
         return rs
 
-    def _render_main_pass(self, draw_scene):
-        """主通道：HDR RT 清屏（天空色）→ draw_scene()（表面 rend_cached 进 RT）。"""
+    def _render_main_pass(self, draw_scene, has_scene):
+        """主通道：HDR RT 清屏（天空色）→ 天空背景（已配置且有场景）→
+        draw_scene()（表面 rend_cached 进 RT）。背景不写深度（保持 1），
+        合成端背景直通分支自动显示天空。"""
         rt = self._hdr_rt
         rt.bind()
         try:
@@ -828,9 +967,37 @@ class QualityFrameRenderer:
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             glDepthMask(prev_mask)
             glClearColor(*prev_clear)
+            if self._sky_tex is not None and has_scene:
+                self._draw_sky_background()
             draw_scene()
         finally:
             rt.unbind()
+
+    def _draw_sky_background(self):
+        """天空背景通道：全屏三角按像素视线方向采样天空盒，画进 HDR RT
+        （不写深度）。GL 状态卫生照背景语义保存/恢复深度写掩码与测试。"""
+        prev_mask = glGetBooleanv(GL_DEPTH_WRITEMASK)
+        prev_depth = glIsEnabled(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glDisable(GL_DEPTH_TEST)
+        glUseProgram(self._sky_prog)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self._sky_tex.get_texture_id())
+        glUniform1i(glGetUniformLocation(self._sky_prog, "skySampler"), 0)
+        view = soup3D.camera.get_view_mat()
+        proj = soup3D.get_projection_mat()
+        inv_vp = glm.inverse(proj * view)   # 先存局部变量再取指针（悬垂教训）
+        glUniformMatrix4fv(glGetUniformLocation(self._sky_prog, "invViewProj"),
+                           1, GL_FALSE, glm.value_ptr(inv_vp))
+        glUniform3f(glGetUniformLocation(self._sky_prog, "camPos"),
+                    soup3D.camera.X, soup3D.camera.Y, soup3D.camera.Z)
+        self._sky_pass.draw(self._sky_prog)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        if prev_depth:
+            glEnable(GL_DEPTH_TEST)
+        else:
+            glDisable(GL_DEPTH_TEST)
+        glDepthMask(prev_mask)
 
     def _render_composite(self):
         """合成通道：全屏三角直绘默认帧缓冲——HDR 颜色 + 深度 + 粗糙度重建做
@@ -860,6 +1027,17 @@ class QualityFrameRenderer:
         glUniform1i(glGetUniformLocation(prog, "hdrColor"), 0)
         glUniform1i(glGetUniformLocation(prog, "hdrDepth"), 1)
         glUniform1i(glGetUniformLocation(prog, "roughTex"), 2)
+        # 天空盒：已配置则绑单元 3 + 启用 miss 回退；未配置不采样（分支防护）
+        glActiveTexture(GL_TEXTURE3)
+        if self._sky_tex is not None:
+            glBindTexture(GL_TEXTURE_2D, self._sky_tex.get_texture_id())
+        glUniform1i(glGetUniformLocation(prog, "skySampler"), 3)
+        glUniform1i(glGetUniformLocation(prog, "skyEnabled"),
+                    1 if self._sky_tex is not None else 0)
+        view_mat = soup3D.camera.get_view_mat()
+        view_inv = glm.inverse(view_mat)   # 先存局部变量再取指针（悬垂教训）
+        glUniformMatrix4fv(glGetUniformLocation(prog, "viewInv"),
+                           1, GL_FALSE, glm.value_ptr(view_inv))
         proj = soup3D.get_projection_mat()
         # inverse 先存局部变量再取 value_ptr：对临时对象取指针会在 PyOpenGL
         # 参数转换链中被 GC（上传已释放内存的垃圾矩阵，Task 10 注释同款坑）

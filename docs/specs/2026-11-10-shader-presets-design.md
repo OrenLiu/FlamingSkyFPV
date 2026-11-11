@@ -110,6 +110,7 @@ shader_packs/<包目录名>/
 | --- | --- | --- |
 | `render_frame(draw_scene)` | 是 | 接管整帧。`draw_scene()` 把当前屏幕的 3D 场景内容画进**当前绑定的渲染目标**（内部即 `screen.render_scene`：逐 face `use → rend_cached → unuse`）。引擎光源/EAU 由游戏 runtime 在调用前自动处理（`pack_frame`，包无需自调）。`draw_scene` 带 `.faces` 属性（见下） |
 | `dispose()` | 否 | GL 上下文销毁前释放资源（RT/程序/纹理）。缺省依赖 GC + `__del__` |
+| `set_sky(sun_yaw, sun_pitch, sun_color, panorama_path=None)` | 否 | 场景天空配置钩子（2026-11-11 扩展）：生成/加载等距圆柱天空盒（自带全景图优先，否则程序生成蓝天渐变+噪声云朵+太阳光斑），画面优先背景与 SSR miss 回退消费；太阳参数与场景方向光同源，保证太阳、光照、反射三者一致 |
 
 `draw_scene.faces`：`[(model, face), ...]` 列表，本帧场景的全部模型面（阴影通道迭代用；深度着色需要模型矩阵，故以 (model, face) 对给出，同模型 faces 连续排列）。无场景时为空列表。由游戏 runtime 的 `SceneDrawer` 包装提供（包作者只读，不感知 screen 内部）。
 

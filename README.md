@@ -19,7 +19,9 @@ python main.py
 
 ## 场景格式
 
-`scene/<场景名>/` 目录：`config.json`（`name` 显示名、`model` OBJ 文件、可选 `scale` 缩放倍数与 `spawn` 出生点 [x,y,z]）+ OBJ/MTL + 贴图。放入即出现在"开始飞行"列表中。
+`scene/<场景名>/` 目录：`config.json`（`name` 显示名、`model` OBJ 文件、可选 `scale` 缩放倍数、`spawn` 出生点 [x,y,z] 与 `sky` 天空配置）+ OBJ/MTL + 贴图。放入即出现在"开始飞行"列表中。
+
+`sky` 段（可选）：`sun_yaw`/`sun_pitch` 太阳角度（度，同时驱动方向光与画面优先模式的天空盒太阳）、`sun_color` [r,g,b] 太阳颜色、`panorama` 场景目录内等距圆柱全景图文件名（画面优先模式的天空盒；缺省程序生成蓝天渐变+云朵+太阳）。示例：`"sky": {"sun_yaw": 120, "sun_pitch": -30, "sun_color": [1.0, 0.6, 0.2]}`。
 
 ## 技术栈
 
