@@ -105,17 +105,37 @@ def _generate_sky_equirect(sun_yaw, sun_pitch, sun_color):
     halo = np.exp(-ang ** 2 / 0.05) * 0.35
     sun_rgb = np.array(sun_color, dtype=np.float32)
     sky += (core[..., None] * (1.4 + 0.5 * sun_rgb) + halo[..., None] * sun_rgb)
-    # 云朵：固定种子三层噪声 fBm（PIL 双线性上采样平滑），仅地平线上方
+    # 云朵：3D value noise 按方向场采样——equirect 平面噪声在天顶极点会被
+    # 挤成放射条纹、在地平线呈环绕带；按 3D 方向生成则云在世界空间均匀铺开
+    # （天顶自然、低空淡出消环绕感）。固定种子可复现。
     rng = np.random.default_rng(20261111)
 
-    def fbm(freq):
-        small = (rng.random((freq, freq * 2)) * 255).astype(np.uint8)
-        img = Image.fromarray(small).resize((w, h), Image.BILINEAR)
-        return np.asarray(img, dtype=np.float32) / 255.0
+    def value_noise_3d(freq):
+        """freq³ 网格随机值按方向三线性插值（周期性 wrap，无缝）"""
+        grid = rng.random((freq, freq, freq)).astype(np.float32)
+        px = np.stack([dir_x, dir_y, dir_z]) * 0.5 + 0.5   # 方向 → 单位立方体
+        g = px * freq
+        i0 = np.floor(g).astype(np.int32) % freq
+        i1 = (i0 + 1) % freq
+        f = g - np.floor(g)
+        sm = f * f * (3.0 - 2.0 * f)
+        out = np.zeros(dir_y.shape, dtype=np.float32)
+        for cx in (0, 1):
+            for cy in (0, 1):
+                for cz in (0, 1):
+                    ix = i1[0] if cx else i0[0]
+                    iy = i1[1] if cy else i0[1]
+                    iz = i1[2] if cz else i0[2]
+                    wx = sm[0] if cx else 1.0 - sm[0]
+                    wy = sm[1] if cy else 1.0 - sm[1]
+                    wz = sm[2] if cz else 1.0 - sm[2]
+                    out += wx * wy * wz * grid[ix, iy, iz]
+        return out
 
-    noise = fbm(16) * 0.6 + fbm(32) * 0.28 + fbm(64) * 0.12
-    cloud = np.clip((noise - 0.52) / 0.18, 0.0, 1.0) ** 1.5
-    cloud *= np.clip((dir_y - 0.03) * 6.0, 0.0, 1.0)
+    noise = (value_noise_3d(4) * 0.6 + value_noise_3d(10) * 0.28
+             + value_noise_3d(20) * 0.12)
+    cloud = np.clip((noise - 0.5) / 0.22, 0.0, 1.0) ** 1.4
+    cloud *= np.clip((dir_y - 0.06) * 5.0, 0.0, 1.0)   # 低空淡出，消环绕感
     cloud_rgb = np.array([0.97, 0.98, 1.0], dtype=np.float32)
     sky = sky * (1.0 - cloud[..., None]) + cloud_rgb * cloud[..., None]
     return np.clip(sky * 255.0, 0.0, 255.0).astype(np.uint8)
@@ -214,7 +234,13 @@ void main()
                     break;   // 步出屏幕：视为不命中
                 }
                 vec2 suv = ndc.xy * 0.5 + 0.5;
-                float sceneZ = view_pos_at(suv, texture(hdrDepth, suv).r).z;
+                float sdepth = texture(hdrDepth, suv).r;
+                // 背景像素（深度=1，天空盒）不是几何：跳过——否则光线扫过天空
+                // 区域时假命中并采到天空/云色，造成碎乱反射（真实 miss 走天空回退）
+                if (sdepth >= 0.9999) {
+                    continue;
+                }
+                float sceneZ = view_pos_at(suv, sdepth).z;
                 // 命中判定（视图 z 均为负，越远越小）：步进点落到场景表面
                 // z + 厚度之后（≤）即命中
                 if (p.z <= sceneZ + SSR_THICKNESS) {
@@ -228,7 +254,12 @@ void main()
                         vec3 q = viewPos + R * mid;
                         vec4 c2 = proj * vec4(q, 1.0);
                         vec2 uv2 = (c2.xyz / c2.w).xy * 0.5 + 0.5;
-                        float s2z = view_pos_at(uv2, texture(hdrDepth, uv2).r).z;
+                        float s2d = texture(hdrDepth, uv2).r;
+                        if (s2d >= 0.9999) {
+                            lo = mid;   // 细化同样跳过天空背景
+                            continue;
+                        }
+                        float s2z = view_pos_at(uv2, s2d).z;
                         if (q.z <= s2z + SSR_THICKNESS) {
                             hi = mid;
                             hitUV = uv2;
@@ -245,10 +276,11 @@ void main()
             if (found > 0.5) {
                 // 屏内命中：屏幕边缘淡出 + 光滑度² × (底座 + 菲涅尔×强度)；
                 // 反射色按粗糙度多点采样模糊（物理驱动 = 反射点自身粗糙度：
-                // 越粗糙越弱越散）
+                // 越粗糙越弱越散）。注意 refl/k 是外层声明的变量——此处
+                // 赋值（不可加 vec3 声明，变量遮蔽会让 mix 读到未初始化值）
                 vec2 border = min(hitUV, 1.0 - hitUV);
                 float edge = clamp(min(border.x, border.y) * 8.0, 0.0, 1.0);
-                vec3 refl = texture(hdrColor, hitUV).rgb;
+                refl = texture(hdrColor, hitUV).rgb;
                 float r = (1.0 - smoothness) * SSR_BLUR_RADIUS;
                 refl += texture(hdrColor, hitUV + vec2( r,  r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2( r, -r)).rgb;
