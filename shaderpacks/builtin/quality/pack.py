@@ -792,10 +792,19 @@ class PBRSurface(_ShadowSurfaceBase):
         return shader_program
 
     def rebind_roughness_map(self, path):
-        """绑定逐像素粗糙度贴图（MTL map_Ns）：逐像素粗糙度 = 标量粗糙度 ×
-        (1 - 贴图值)。白=光滑（MTL shininess 贴图规范语义）。供 post_load
-        场景加载钩子调用；rend_cached 的纹理绑定循环逐帧自动重绑单元 4。"""
-        self.roughness_map_tex = soup3D.shader.Texture(path)
+        """绑定逐像素粗糙度贴图（MTL map_Ns）：逐像素 shininess = 贴图值 ×
+        nsScale（白=光滑镜面、黑=完全哑光）。供 post_load 场景加载钩子调用。
+
+        贴图经降采样加载（工具导出的 map_Ns 可达 10400² RGBA ≈ 432MB，部分
+        驱动对这种规模的单纹理上传会静默失败→采样恒黑→逐像素失效；1024²
+        对积水斑驳足够，且跨驱动行为一致）。bytes 构造与文件版同一上传路径，
+        UV 语义一致。"""
+        from PIL import Image as _PILImage
+        img = _PILImage.open(path)
+        img.thumbnail((1024, 1024))
+        img = img.convert("RGB")
+        self.roughness_map_tex = soup3D.shader.Texture(
+            img.tobytes(), width=img.width, height=img.height, format="RGB")
         self.shader_program.uniform_tex("roughnessMap",
                                         self.roughness_map_tex, 4)
 
