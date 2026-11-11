@@ -141,7 +141,7 @@ class FlightScreen(Screen):
         self._sun = soup3D.light.Direct((sky["sun_yaw"], sky["sun_pitch"], 0),
                                         tuple(sky["sun_color"]))
         self._sun.turn_on()
-        soup3D.light.ambient(0.45, 0.45, 0.45)
+        soup3D.light.ambient(*s.sky["ambient"])
         self._world = FlightWorld(self.app.drone_params)
         self._world.load_scene_mesh(str(obj), s.scale)
         self._world.reset(s.spawn)
