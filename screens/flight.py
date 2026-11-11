@@ -120,6 +120,7 @@ class FlightScreen(Screen):
     # ---- 场景加载/卸载 ----
     def _load_scene(self):
         s = self._scene
+        sky = s.sky   # 天空配置：太阳参数同时驱动方向光与画面优先包的天空盒
         obj = s.dir / s.model
         mtl = obj.with_suffix(".mtl")
         self._model = soup3D.open_obj(str(obj), str(mtl) if mtl.exists() else None,
@@ -129,9 +130,16 @@ class FlightScreen(Screen):
         if self.app.preset.post_load is not None:
             self.app.preset.post_load(self._model,
                                       str(mtl) if mtl.exists() else None)
+        # 画面优先包的天空盒（渲染器可选方法 set_sky）：全景图或按太阳参数
+        # 程序生成；性能优先包无帧渲染器，方向光参数两模式共享
+        renderer = getattr(self.app, "_frame_renderer", None)
+        if renderer is not None and hasattr(renderer, "set_sky"):
+            renderer.set_sky(sky["sun_yaw"], sky["sun_pitch"],
+                             sky["sun_color"], sky["panorama"] or None)
         self._model.size(s.scale, s.scale, s.scale)   # 倍数缩放（引擎 API：倍数）
         # spike 结论：不调 show()（显示列表回放在 Mesa 失效），render_scene() 逐帧直渲
-        self._sun = soup3D.light.Direct((30, -60, 0), (0.8, 0.8, 0.75))
+        self._sun = soup3D.light.Direct((sky["sun_yaw"], sky["sun_pitch"], 0),
+                                        tuple(sky["sun_color"]))
         self._sun.turn_on()
         soup3D.light.ambient(0.45, 0.45, 0.45)
         self._world = FlightWorld(self.app.drone_params)
