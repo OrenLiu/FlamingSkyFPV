@@ -25,6 +25,7 @@ class LoadedPack:
     skinned_surface_class: type
     create_frame_renderer: object = None
     raw_module: types.ModuleType = None
+    post_load: object = None   # 可选场景加载钩子 (model, mtl_path)，逐材质扩展注入
 
 
 def load_pack(info: PackInfo) -> LoadedPack:
@@ -54,8 +55,12 @@ def load_pack(info: PackInfo) -> LoadedPack:
     if cfr is not None and not callable(cfr):
         raise PackLoadError(f"create_frame_renderer 不是可调用对象（{info.id}）")
     skinned = getattr(module, "skinned_surface_class", surface_class)
+    post_load = getattr(module, "post_load", None)
+    if post_load is not None and not callable(post_load):
+        raise PackLoadError(f"post_load 不是可调用对象（{info.id}）")
     return LoadedPack(info=info,
                       surface_class=surface_class,
                       skinned_surface_class=skinned,
                       create_frame_renderer=cfr,
-                      raw_module=module)
+                      raw_module=module,
+                      post_load=post_load)

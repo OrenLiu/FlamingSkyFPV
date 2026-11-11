@@ -36,6 +36,7 @@ shader_packs/<包目录名>/
 | `surface_class` | 是 | 表面着色器类/工厂。加载器经 `shader.make_surface` 内省，只传该类可接收的标准材质参数：`base_color`、`normal`、`emission`、`double_side`、`max_light_count`、`roughness`、`metallic`、`ior`、`transmission`、`shininess`、`illum`（`roughness`/`metallic` 来自 MTL 的 `Pr`/`Pm`，文件未提供时不传） |
 | `skinned_surface_class` | 否 | 蒙皮表面类（GLTF 场景用）。缺省 = `surface_class`。一期游戏无蒙皮场景，接口预留 |
 | `create_frame_renderer(width, height)` | 否 | 返回帧渲染器实例；缺省 = 无（默认管线直渲窗口） |
+| `post_load(model, mtl_path)` | 否 | 场景加载钩子：open_obj 之后、首帧前调用，供包做逐材质扩展（内置画面优先包用它注入 MTL `map_Ns` 逐像素粗糙度贴图） |
 
 帧渲染器实例契约：
 
