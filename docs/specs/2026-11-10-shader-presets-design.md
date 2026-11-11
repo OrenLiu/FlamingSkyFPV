@@ -102,6 +102,7 @@ shader_packs/<包目录名>/
 | `surface_class` | 是 | 表面着色器类/工厂。可声明接收 `SURFACE_MATERIAL_PARAMS` 标准材质参数的任意子集（加载器经 `make_surface` 内省过滤）；`roughness`/`metallic` 来自 MTL 的 `Pr`/`Pm`，文件未提供时不传 |
 | `skinned_surface_class` | 否 | 蒙皮表面类（GLTF 场景用）。缺省 = `surface_class`。一期游戏无蒙皮场景，接口预留 |
 | `create_frame_renderer(width, height)` | 否 | 返回帧渲染器实例；缺省 = 无（默认管线直渲窗口） |
+| `post_load(model, mtl_path)` | 否 | 场景加载钩子（2026-11-11 扩展）：open_obj 之后、首帧前调用，供包做逐材质扩展（如 MTL `map_Ns` 逐像素粗糙度贴图注入——积水地面等"同一材质内部分镜面部分漫反射"的表达）。mtl_path 为场景 MTL 路径或 None |
 
 帧渲染器实例契约：
 

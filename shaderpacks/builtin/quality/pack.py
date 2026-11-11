@@ -3,6 +3,7 @@
 当前管线：太阳方向光阴影贴图通道 → HDR（rgba16f）主通道 → SSR+ACES
 合并合成通道（全屏三角直绘默认帧缓冲上屏）。
 """
+import os
 import weakref
 
 import soup3D
@@ -40,6 +41,8 @@ SHADOW_EYE_DIST = 120.0          # 太阳相机沿指向光源方向的后撤距
 SHADOW_TEX_UNIT = 2              # shadowMap 纹理单元（空闲单元，避开 0/1/3 引擎约定）
 DEFAULT_ROUGHNESS = 0.8         # MTL 的 Pr/Ns 均未提供时的默认粗糙度（spec 5.6）
 DEFAULT_METALLIC = 0.0          # MTL 的 Pm 未提供时的默认金属度（spec 5.6）
+# map_Ns 逐像素粗糙度的默认占位：1×1 全白（=光滑度系数 1，逐像素粗糙度=标量值）
+_ROUGH_MAP_WHITE = soup3D.shader.MixChannel((1, 1), 1.0, 1.0, 1.0, 1.0)
 
 
 def roughness_from_shininess(ns):
@@ -341,8 +344,9 @@ class RoughnessSurface(soup3D.shader.AutoSP):
     FS 输出 alpha=1，blend 下无实际混合，无需改混合状态。
     """
 
-    def __init__(self, roughness):
+    def __init__(self, roughness, roughness_map_tex=None):
         self._roughness = float(roughness)
+        self._map_tex = roughness_map_tex
         # AutoSP 构造需要一个 base_color（uniform_tex 单元 0 绑定占位，FS 无此
         # 采样器，location=-1 被引擎静默忽略）
         super().__init__(soup3D.shader.MixChannel((1, 1), 1.0, 1.0, 1.0, 1.0),
@@ -355,16 +359,34 @@ class RoughnessSurface(soup3D.shader.AutoSP):
         layout(location = 1) in vec2 VertUV;
         layout(location = 2) in vec3 VertNormal;
 
+        out vec2 TexCoord;
         uniform mat4 model;
         uniform mat4 view;
         uniform mat4 projection;
 
         void main()
         {
+            TexCoord = vec2(VertUV.x, 1 - VertUV.y);
             gl_Position = projection * view * vec4(VertPos, 1.0);
         }
         """
-        fragment_shader = """
+        # 有无贴图用两个 FS 变体（避免占位白贴图管理）；逐像素粗糙度 =
+        # 标量 × (1 - 贴图值)，与 PBRSurface 主通道同语义（map_Ns 白=光滑）
+        if self._map_tex is not None:
+            fragment_shader = """
+        #version 330 core
+        in vec2 TexCoord;
+        uniform float roughness;
+        uniform sampler2D roughnessMap;
+        out vec4 FragColor;
+        void main()
+        {
+            FragColor = vec4(roughness * (1.0 - texture(roughnessMap, TexCoord).r),
+                             0.0, 0.0, 1.0);
+        }
+        """
+        else:
+            fragment_shader = """
         #version 330 core
         uniform float roughness;
         out vec4 FragColor;
@@ -377,6 +399,8 @@ class RoughnessSurface(soup3D.shader.AutoSP):
             vertex_shader, fragment_shader,
             vbo_type=[soup3D.FLOAT, soup3D.FLOAT, soup3D.FLOAT])
         shader_program.uniform("roughness", soup3D.FLOAT_VEC1, self._roughness)
+        if self._map_tex is not None:
+            shader_program.uniform_tex("roughnessMap", self._map_tex, 1)
         return shader_program
 
 
@@ -401,6 +425,10 @@ class PBRSurface(_ShadowSurfaceBase):
         self._last_cam = None
         super().__init__(base_color, normal=normal, emission=emission,
                          double_side=double_side, max_light_count=max_light_count)
+        # map_Ns 逐像素粗糙度：默认 1×1 白占位（贴图值 1 → 逐像素=标量）；
+        # post_load 注入真实贴图（rebind_roughness_map）后替换绑定
+        self.roughness_map_tex = None
+        self.shader_program.uniform_tex("roughnessMap", _ROUGH_MAP_WHITE, 4)
 
     def create_shader_program(self):
         vertex_shader = """
@@ -442,6 +470,7 @@ class PBRSurface(_ShadowSurfaceBase):
         uniform sampler2D normal;
         uniform sampler2D shadowMap;
         uniform sampler2D emission;
+        uniform sampler2D roughnessMap;   // 单元4：map_Ns 逐像素粗糙度（白=光滑）
         uniform float roughness;
         uniform float metallic;
         uniform vec3 cameraPos;      // 引擎相机（GGX 视线方向，update 每帧补传）
@@ -540,13 +569,15 @@ class PBRSurface(_ShadowSurfaceBase):
                 float ndv = max(dot(N, V), 0.0);
                 float ndh = max(dot(N, H), 0.0);
                 float vdh = max(dot(V, H), 0.0);
-                // GGX：D = a²/(π((n·h)²(a²-1)+1)²)
-                float a = roughness * roughness;
+                // GGX：D = a²/(π((n·h)²(a²-1)+1)²)；逐像素粗糙度 = 标量 ×
+                // (1 - map_Ns 贴图值)（贴图白=光滑，MTL shininess 贴图规范语义）
+                float matRough = roughness * (1.0 - texture(roughnessMap, TexCoord).r);
+                float a = matRough * matRough;
                 float a2 = a * a;
                 float dd = ndh * ndh * (a2 - 1.0) + 1.0;
                 float D = a2 / (3.14159265 * dd * dd);
                 // G = Smith–Schlick（k = (r+1)²/8）
-                float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+                float k = (matRough + 1.0) * (matRough + 1.0) / 8.0;
                 float G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
                 // F = Schlick（f0 = mix(0.04, albedo, metallic)）
                 vec3 F = f0 + (1.0 - f0) * pow(1.0 - vdh, 5.0);
@@ -604,6 +635,14 @@ class PBRSurface(_ShadowSurfaceBase):
         shader_program.uniform("roughness", soup3D.FLOAT_VEC1, self.roughness)
         shader_program.uniform("metallic", soup3D.FLOAT_VEC1, self.metallic)
         return shader_program
+
+    def rebind_roughness_map(self, path):
+        """绑定逐像素粗糙度贴图（MTL map_Ns）：逐像素粗糙度 = 标量粗糙度 ×
+        (1 - 贴图值)。白=光滑（MTL shininess 贴图规范语义）。供 post_load
+        场景加载钩子调用；rend_cached 的纹理绑定循环逐帧自动重绑单元 4。"""
+        self.roughness_map_tex = soup3D.shader.Texture(path)
+        self.shader_program.uniform_tex("roughnessMap",
+                                        self.roughness_map_tex, 4)
 
     def update(self):
         # cameraPos 每帧跟随引擎相机（GGX 视线方向）：相机移动经 set_view_mat
@@ -766,7 +805,8 @@ class QualityFrameRenderer:
         rs = self._rough_surfaces.get(face)
         if rs is None:
             rough = getattr(face.surface, "roughness", DEFAULT_ROUGHNESS)
-            rs = RoughnessSurface(rough)
+            map_tex = getattr(face.surface, "roughness_map_tex", None)
+            rs = RoughnessSurface(rough, map_tex)
             # 引擎表面矩阵模型 = 「构造时默认单位阵 + 相机事件推送」；本表面创建
             # 晚于 Model 构造与相机事件，必须补推当前矩阵，否则 view/projection
             # 恒为单位阵、顶点全部落在裁剪体之外（粗糙度 RT 全为清屏色的根因）。
@@ -857,3 +897,39 @@ surface_class = PBRSurface
 # 引擎光源/EAU 由游戏 runtime 在调用前自动处理，包无需自调
 def create_frame_renderer(width, height):
     return QualityFrameRenderer(width, height)
+
+
+def post_load(model, mtl_path):
+    """场景加载钩子（spec 4.3 扩展）：注入逐像素粗糙度贴图（MTL map_Ns）。
+
+    建模工具普遍把「同一材质内部分镜面部分漫反射」（如雨后积水地面）导出为
+    map_Ns 逐像素贴图——标量 Ns/Pr 表达不了。解析 MTL 后以 map_Kd 路径为
+    代理键把贴图注入对应 PBRSurface（open_obj 不暴露材质名，Kd 路径是
+    face.surface 上唯一稳定的材质标识）。无 map_Ns 的材质不触碰。
+    语义：map_Ns 白=光滑（MTL shininess 贴图规范），逐像素粗糙度 =
+    标量 roughness × (1 - 贴图值)。
+    """
+    if mtl_path is None:
+        return
+    base_dir = os.path.dirname(mtl_path)
+    mats = {}
+    now = None
+    with open(mtl_path, encoding="utf-8", errors="replace") as f:
+        for row in f:
+            tokens = row.split()
+            if not tokens:
+                continue
+            if tokens[0] == "newmtl":
+                now = tokens[1]
+                mats[now] = {}
+            elif now is not None and tokens[0] in ("map_Kd", "map_Ns"):
+                mats[now][tokens[0]] = os.path.join(base_dir, tokens[-1])
+    kd_to_ns = {m["map_Kd"]: m["map_Ns"]
+                for m in mats.values() if "map_Kd" in m and "map_Ns" in m}
+    for face in model.faces:
+        tex = getattr(face.surface, "base_color", None)
+        kd = getattr(getattr(getattr(tex, "R", None), "texture", None),
+                     "image_path", None)
+        ns_path = kd_to_ns.get(kd)
+        if ns_path is not None and hasattr(face.surface, "rebind_roughness_map"):
+            face.surface.rebind_roughness_map(ns_path)
