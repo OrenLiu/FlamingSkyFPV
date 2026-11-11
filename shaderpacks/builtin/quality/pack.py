@@ -46,11 +46,15 @@ SHADOW_HALF_WIDTH = 80.0         # 阴影正交半宽（米，需覆盖整张地
 SHADOW_NEAR = 0.1                # 阴影相机近平面
 SHADOW_FAR = 300.0               # 阴影相机远平面
 SHADOW_EYE_DIST = 120.0          # 太阳相机沿指向光源方向的后撤距离（米）
+SHADOW_BIAS_BASE = 0.01          # 阴影深度 bias 基础项（米）
+SHADOW_BIAS_SLOPE = 0.35         # 阴影深度 bias 斜率项（米，乘光线入射角正切；
+                                 # 需盖过 PCF 邻居 texel 几何深度差 texel尺寸×tanθ）
+SHADOW_BIAS_MAX = 1.5            # bias 上限（米；脱节=bias×cos(掠角)，低角度自动小）
 SHADOW_TEX_UNIT = 2              # shadowMap 纹理单元（空闲单元，避开 0/1/3 引擎约定）
 DEFAULT_ROUGHNESS = 0.8         # MTL 的 Pr/Ns 均未提供时的默认粗糙度（spec 5.6）
 DEFAULT_METALLIC = 0.0          # MTL 的 Pm 未提供时的默认金属度（spec 5.6）
-NS_MAP_SHININESS_SCALE = 1000.0  # map_Ns 贴图值 → shininess 的缩放（白=1000≈镜面
-# 0.045、黑=完全哑光 1.0，roughness_from_shininess 同式换算）
+MAP_NS_WET_DARKEN = 0.5         # map_Ns 积水区反照率乘数（打湿变暗：黑=积水=湿+镜面；
+                                # 让镜面反射落在可见湿地上而非「悬浮残影」，目检可调）
 
 
 def roughness_from_shininess(ns):
@@ -151,6 +155,9 @@ SSR_BASE = 0.25                # SSR 正对角反射底座（视觉驱动，非�
                                # 角仅 ~4%，会把一切非掠射反射压到不可见；积水/光滑面的
                                # 「处处可辨镜面感」需要底座。粗糙度衰减×模糊仍按物理）
 SSR_BLUR_RADIUS = 0.02         # SSR 反射模糊最大半径（UV，随反射点粗糙度线性缩放）
+SSR_POS_TOLERANCE = 1.0        # SSR 位置一致性容差（米）：细化命中点与命中像素表面
+                               # 点的 3D 距离超过此值 = 射线从细杆件上方掠过的假命中
+                               # （深度测试分不清「旁过/穿背」），拒绝改走天空回退
 SKY_TEX_SIZE = (1024, 512)     # 程序生成等距圆柱天空盒尺寸（宽, 高；2:1）
 
 # 合成通道片段着色器（SSR + 背景直通 + 曝光 → ACES，一个全屏通道直绘默认帧缓冲）。
@@ -167,6 +174,7 @@ _COMPOSITE_FS = """
 #define SSR_THICKNESS %.1f
 #define SSR_MAX_DIST %.1f
 #define SSR_BLUR_RADIUS %.3f
+#define SSR_POS_TOLERANCE %.1f
 
 in vec2 UV;
 out vec4 FragColor;
@@ -226,6 +234,7 @@ void main()
             float stepLen = SSR_MAX_DIST / float(SSR_STEPS);
             vec2 hitUV = vec2(0.0);
             float found = 0.0;
+            float travel = SSR_MAX_DIST;   // 反射射线行程（米；未命中保持最大值）
             vec3 p = viewPos;
             for (int i = 0; i < SSR_STEPS; i++) {
                 p += R * stepLen;
@@ -248,6 +257,7 @@ void main()
                     hitUV = suv;
                     found = 1.0;
                     // 二分细化（SSR_REFINE 次）
+                    vec3 hitP = p;   // 细化命中点（供位置一致性验证）
                     float lo = stepLen * float(i);
                     float hi = stepLen * float(i + 1);
                     for (int r = 0; r < SSR_REFINE; r++) {
@@ -264,10 +274,22 @@ void main()
                         if (q.z <= s2z + SSR_THICKNESS) {
                             hi = mid;
                             hitUV = uv2;
+                            hitP = q;
                         } else {
                             lo = mid;
                         }
                     }
+                    // 位置一致性拒绝：屏幕空间深度测试只能证明「射线深度越过了
+                    // 表面深度」，不能证明「射线真的穿过了表面」——从细杆件（脚手
+                    // 架等）上方掠过的射线在其 UV 停留于该杆件屏幕带内时深度越面
+                    // → 假命中，把杆件结构拉伸成「放大版模型蒙板」（用户实飞）。
+                    // 用细化命中点与命中像素表面点的 3D 距离二次验证：真命中为
+                    // 厚度量级、掠过式假命中为米级垂直失配 → 拒绝，改走天空回退
+                    vec3 sp = view_pos_at(hitUV, texture(hdrDepth, hitUV).r);
+                    if (distance(hitP, sp) > SSR_POS_TOLERANCE) {
+                        found = 0.0;
+                    }
+                    travel = hi;   // 命中点射线传播距离（米）：行程越远衰减越强
                     break;
                 }
             }
@@ -287,8 +309,14 @@ void main()
                 refl += texture(hdrColor, hitUV + vec2( r, -r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2(-r,  r)).rgb;
                 refl += texture(hdrColor, hitUV + vec2(-r, -r)).rgb;
+                // 行程衰减：掠射水面反射随射线传播距离平方衰减（雾/水汽吸收 +
+                // 积水不连续性的物理近似）。压掉细长物体（脚手架/杆件）的
+                // 「假命中拉伸残影带」——射线从其上方掠过时深度测试无法区分
+                // 「旁过」与「穿背」，远处假命中随行程归零；近处反射基本不受影响
                 k = smoothness * smoothness
-                    * (SSR_BASE + fresnel * SSR_STRENGTH) * edge;
+                    * (SSR_BASE + fresnel * SSR_STRENGTH) * edge
+                    * clamp(1.0 - travel * travel
+                            / (SSR_MAX_DIST * SSR_MAX_DIST), 0.0, 1.0);
             } else if (skyEnabled == 1) {
                 // 屏内未命中：按反射方向回退采样天空盒——出屏反射也有天空、
                 // 云朵与太阳（画面优先需求：天空中的东西出现在镜面反射中）
@@ -508,25 +536,29 @@ class RoughnessSurface(soup3D.shader.AutoSP):
         void main()
         {
             TexCoord = vec2(VertUV.x, 1 - VertUV.y);
-            gl_Position = projection * view * vec4(VertPos, 1.0);
+            // model 必须参与变换：场景经 model.size(scale) 缩放后，缺失此乘法
+            // 会按原始 OBJ 坐标（大 10 倍、位置错 10 倍）渲染 → 光滑掩膜巨大化
+            // 成「放大版模型蒙板」残影（用户实飞）。引擎 main VS 同序：P·V·M·p
+            gl_Position = projection * view * model * vec4(VertPos, 1.0);
         }
         """
         # 有无贴图用两个 FS 变体（避免占位白贴图管理）；逐像素粗糙度 =
-        # 标量 × (1 - 贴图值)，与 PBRSurface 主通道同语义（map_Ns 白=光滑）
+        # 贴图值直接作为粗糙度（黑=光滑/积水镜面、白=完全粗糙），与
+        # PBRSurface 主通道同语义
         if self._map_tex is not None:
             fragment_shader = """
         #version 330 core
         in vec2 TexCoord;
-        uniform float nsScale;            // map_Ns 贴图值的 shininess 缩放
         uniform sampler2D roughnessMap;
         out vec4 FragColor;
         void main()
         {
-            // map_Ns 规范语义（替换式）：贴图值 × nsScale = 逐像素 shininess，
-            // 白=光滑镜面、黑=完全哑光；调制式（标量×系数）会被材质标量粗糙度
-            // 压死积水镜面，故贴图存在时完全按贴图表达
-            float ns_pix = texture(roughnessMap, TexCoord).r * nsScale;
-            FragColor = vec4(sqrt(2.0 / (ns_pix + 2.0)), 0.0, 0.0, 1.0);
+            // map_Ns 粗糙度语义（替换式）：贴图值即逐像素粗糙度，黑=光滑
+            // 镜面、白=完全粗糙（建模工具把 Blender 粗糙度导出进 map_Ns）。
+            // 采样直接用 TexCoord：引擎 V 约定链 open_obj(u,-v) → rend_cached
+            // 拆分 1-v[4] → VS 1-VertUV.y，三次翻转相消，净映射 =
+            // 标准 OBJ/Blender（v=1=图像顶行），按标准导出的贴图落位正确。
+            FragColor = vec4(texture(roughnessMap, TexCoord).r, 0.0, 0.0, 1.0);
         }
         """
         else:
@@ -543,8 +575,6 @@ class RoughnessSurface(soup3D.shader.AutoSP):
             vertex_shader, fragment_shader,
             vbo_type=[soup3D.FLOAT, soup3D.FLOAT, soup3D.FLOAT])
         shader_program.uniform("roughness", soup3D.FLOAT_VEC1, self._roughness)
-        shader_program.uniform("nsScale", soup3D.FLOAT_VEC1,
-                               NS_MAP_SHININESS_SCALE)
         if self._map_tex is not None:
             shader_program.uniform_tex("roughnessMap", self._map_tex, 1)
         return shader_program
@@ -571,16 +601,14 @@ class PBRSurface(_ShadowSurfaceBase):
         self._last_cam = None
         super().__init__(base_color, normal=normal, emission=emission,
                          double_side=double_side, max_light_count=max_light_count)
-        # map_Ns 逐像素粗糙度：默认 1×1 占位（占位值按材质标量粗糙度反算为
-        # shininess，使无贴图时逐像素通道输出恰为标量粗糙度）；post_load 注入
-        # 真实贴图（rebind_roughness_map）后替换绑定
+        # map_Ns 逐像素粗糙度：默认 1×1 占位（占位值=标量粗糙度，无贴图时
+        # 逐像素通道输出恰为标量粗糙度，行为不变）；post_load 注入真实贴图
+        # （rebind_roughness_map）后替换绑定
         self.roughness_map_tex = None
-        t_star = (2.0 / (self.roughness ** 2) - 2.0) / NS_MAP_SHININESS_SCALE
-        placeholder = soup3D.shader.MixChannel((1, 1), max(0.0, min(1.0, t_star)),
-                                               1.0, 1.0, 1.0)
+        scalar = max(0.0, min(1.0, self.roughness))
+        placeholder = soup3D.shader.MixChannel((1, 1), scalar, scalar,
+                                               scalar, 1.0)
         self.shader_program.uniform_tex("roughnessMap", placeholder, 4)
-        self.shader_program.uniform("nsScale", soup3D.FLOAT_VEC1,
-                                    NS_MAP_SHININESS_SCALE)
 
     def create_shader_program(self):
         vertex_shader = """
@@ -622,10 +650,11 @@ class PBRSurface(_ShadowSurfaceBase):
         uniform sampler2D normal;
         uniform sampler2D shadowMap;
         uniform sampler2D emission;
-        uniform sampler2D roughnessMap;   // 单元4：map_Ns 逐像素粗糙度（白=光滑）
-        uniform float nsScale;            // map_Ns 贴图值的 shininess 缩放
+        uniform sampler2D roughnessMap;   // 单元4：map_Ns 逐像素粗糙度（黑=光滑）
         uniform float roughness;
         uniform float metallic;
+        uniform float nsHasMap;      // 是否注入了 map_Ns 逐像素贴图（0/1，rebind 置 1）
+        uniform float nsWetDarken;   // 积水区反照率乘数（MAP_NS_WET_DARKEN）
         uniform vec3 cameraPos;      // 引擎相机（GGX 视线方向，update 每帧补传）
         uniform mat4 lightSpaceMat;
         uniform int shadowEnabled;
@@ -658,7 +687,16 @@ class PBRSurface(_ShadowSurfaceBase):
             if (uv != clamp(uv, vec2(0.0), vec2(1.0))) {
                 return 0.0;   // 阴影贴图范围外 → 受光
             }
-            float bias = max(0.05 * (1.0 - dot(n, l)), 0.005);
+            // 世界单位 bias（米）：旧 NDC 系数 0.05 在 299.9m 深度范围折算
+            // 约 11m，低太阳角度把物体根部影子吃掉几十米（脱节悬空感、矮物
+            // 体影子全灭）。斜率项按光线入射角自适应：PCF 邻居 texel 的几何
+            // 深度差 = texel尺寸×tanθ，固定小 bias 在斜面上会让 9 采样约半数
+            // 误判遮挡 → 全屏半遮挡雾、影子对比度全毁（调试可视化实测）
+            float dotNL = clamp(dot(n, l), 0.0, 1.0);
+            float slope = sqrt(1.0 - dotNL * dotNL) / max(dotNL, 0.1);
+            float bias_m = min(SHADOW_BIAS_BASE + SHADOW_BIAS_SLOPE * slope,
+                               SHADOW_BIAS_MAX);
+            float bias = bias_m / SHADOW_DEPTH_RANGE;
             float shadowed = 0.0;
             vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
             for (int x = -1; x <= 1; x++) {
@@ -676,6 +714,13 @@ class PBRSurface(_ShadowSurfaceBase):
             %s
 
             vec4 base = texture(baseColor, TexCoord);
+            // map_Ns 兼作湿度遮罩：积水区（贴图黑区）反照率打湿变暗，让镜面
+            // 反射落在可见的湿地上——否则反射悬浮在干燥观感的地面上读作
+            // 「残影」（用户实飞反馈）。仅注入了贴图的材质启用（nsHasMap），
+            // 无贴图材质（占位纹素=标量粗糙度）不受影响
+            float ns_tex = texture(roughnessMap, TexCoord).r;
+            base.rgb *= mix(vec3(1.0), vec3(nsWetDarken),
+                            clamp(nsHasMap * (1.0 - ns_tex), 0.0, 1.0));
             vec4 norm_tex = texture(normal, TexCoord);
             vec3 N = normalize(normalize(SideNormal) + vec3(norm_tex.rg*2-1, norm_tex.b-1));
             vec4 emi = texture(emission, TexCoord);
@@ -722,11 +767,12 @@ class PBRSurface(_ShadowSurfaceBase):
                 float ndv = max(dot(N, V), 0.0);
                 float ndh = max(dot(N, H), 0.0);
                 float vdh = max(dot(V, H), 0.0);
-                // GGX：D = a²/(π((n·h)²(a²-1)+1)²)；材质有 map_Ns 贴图时按其
-                // 规范语义替换式表达逐像素粗糙度（贴图值×nsScale=shininess，
-                // 白=光滑镜面、黑=完全哑光）；无贴图时占位值已反算为标量粗糙度
-                float ns_pix = texture(roughnessMap, TexCoord).r * nsScale;
-                float matRough = sqrt(2.0 / (ns_pix + 2.0));
+                // GGX：D = a²/(π((n·h)²(a²-1)+1)²)；逐像素粗糙度=map_Ns 贴图值
+                // （黑=光滑镜面、白=完全粗糙；贴图值已在 main 顶部采样为 ns_tex，
+                // 采样用 TexCoord——引擎 V 约定链 open_obj(u,-v) → rend_cached
+                // 拆分 1-v[4] → VS 1-VertUV.y，三次翻转相消=标准 OBJ/Blender 向，
+                // 按标准导出的贴图落位正确）；无贴图时占位值=标量粗糙度
+                float matRough = ns_tex;
                 float a = matRough * matRough;
                 float a2 = a * a;
                 float dd = ndh * ndh * (a2 - 1.0) + 1.0;
@@ -749,6 +795,18 @@ class PBRSurface(_ShadowSurfaceBase):
         }
         """
 
+        # 阴影 bias 常量以 #define 注入（插在 #version 行之后——GLSL 要求
+        # #version 必须是着色器源码第一条有效语句，前置任何指令都会编译失败）
+        fragment_shader = fragment_shader.replace(
+            "#version 330 core",
+            "#version 330 core\n"
+            "#define SHADOW_BIAS_BASE %.2f\n"
+            "#define SHADOW_BIAS_SLOPE %.2f\n"
+            "#define SHADOW_BIAS_MAX %.1f\n"
+            "#define SHADOW_DEPTH_RANGE %.1f" % (
+                SHADOW_BIAS_BASE, SHADOW_BIAS_SLOPE, SHADOW_BIAS_MAX,
+                SHADOW_FAR - SHADOW_NEAR),
+            1)
         if self.double_side:
             fragment_shader = fragment_shader % (
                 self.max_light_count,
@@ -789,16 +847,22 @@ class PBRSurface(_ShadowSurfaceBase):
         # 材质参数初始上传
         shader_program.uniform("roughness", soup3D.FLOAT_VEC1, self.roughness)
         shader_program.uniform("metallic", soup3D.FLOAT_VEC1, self.metallic)
+        shader_program.uniform("nsHasMap", soup3D.FLOAT_VEC1, 0.0)
+        shader_program.uniform("nsWetDarken", soup3D.FLOAT_VEC1,
+                               MAP_NS_WET_DARKEN)
         return shader_program
 
     def rebind_roughness_map(self, path):
-        """绑定逐像素粗糙度贴图（MTL map_Ns）：逐像素 shininess = 贴图值 ×
-        nsScale（白=光滑镜面、黑=完全哑光）。供 post_load 场景加载钩子调用。
+        """绑定逐像素粗糙度贴图（MTL map_Ns）：贴图值即逐像素粗糙度（黑=
+        光滑/积水镜面、白=完全粗糙，与建模工具粗糙度导出一致）。供 post_load
+        场景加载钩子调用。
 
         贴图经降采样加载（工具导出的 map_Ns 可达 10400² RGBA ≈ 432MB，部分
         驱动对这种规模的单纹理上传会静默失败→采样恒黑→逐像素失效；1024²
-        对积水斑驳足够，且跨驱动行为一致）。bytes 构造与文件版同一上传路径，
-        UV 语义一致。"""
+        对积水斑驳足够，且跨驱动行为一致）。bytes 直传不翻转，与文件版同一
+        上传路径；引擎 UV 约定链（open_obj(u,-v) → rend_cached 拆分 1-v[4] →
+        VS 1-VertUV.y）净映射 = 标准 OBJ/Blender（v=1=图像顶行），采样端
+        无需任何补偿。"""
         from PIL import Image as _PILImage
         img = _PILImage.open(path)
         img.thumbnail((1024, 1024))
@@ -807,6 +871,7 @@ class PBRSurface(_ShadowSurfaceBase):
             img.tobytes(), width=img.width, height=img.height, format="RGB")
         self.shader_program.uniform_tex("roughnessMap",
                                         self.roughness_map_tex, 4)
+        self.shader_program.uniform("nsHasMap", soup3D.FLOAT_VEC1, 1.0)
 
     def update(self):
         # cameraPos 每帧跟随引擎相机（GGX 视线方向）：相机移动经 set_view_mat
@@ -841,7 +906,8 @@ class QualityFrameRenderer:
         self._composite_prog = _compile_program(
             api.FULLSCREEN_VS,
             _COMPOSITE_FS % (SSR_STEPS, SSR_REFINE, SSR_STRENGTH, SSR_BASE,
-                             SSR_THICKNESS, SSR_MAX_DIST, SSR_BLUR_RADIUS))
+                             SSR_THICKNESS, SSR_MAX_DIST, SSR_BLUR_RADIUS,
+                             SSR_POS_TOLERANCE))
         # 天空：set_sky 按场景配置（自带全景图或程序生成），背景通道与
         # SSR miss 回退消费；未配置（性能优先/未进场景）→ 纯色背景
         self._sky_tex = None
@@ -1140,8 +1206,8 @@ def post_load(model, mtl_path):
     map_Ns 逐像素贴图——标量 Ns/Pr 表达不了。解析 MTL 后以 map_Kd 路径为
     代理键把贴图注入对应 PBRSurface（open_obj 不暴露材质名，Kd 路径是
     face.surface 上唯一稳定的材质标识）。无 map_Ns 的材质不触碰。
-    语义：map_Ns 白=光滑（MTL shininess 贴图规范），逐像素粗糙度 =
-    标量 roughness × (1 - 贴图值)。
+    语义：map_Ns 贴图值即逐像素粗糙度（黑=光滑/积水镜面、白=完全粗糙，
+    与建模工具粗糙度导出一致），贴图存在时完全替换材质标量粗糙度。
     """
     if mtl_path is None:
         return

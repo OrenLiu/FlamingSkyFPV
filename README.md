@@ -23,6 +23,8 @@ python main.py
 
 `sky` 段（可选）：`sun_yaw`/`sun_pitch` 太阳角度（度，同时驱动方向光与画面优先模式的天空盒太阳）、`sun_color` [r,g,b] 太阳颜色、`panorama` 场景目录内等距圆柱全景图文件名（画面优先模式的天空盒；缺省程序生成蓝天渐变+云朵+太阳）。示例：`"sky": {"sun_yaw": 120, "sun_pitch": -30, "sun_color": [1.0, 0.6, 0.2]}`。
 
+顶层快捷字段（可选）：`sun_toward` [yaw, pitch, roll]（度，与引擎光源 toward 参数同语义，roll 对平行光方向无效）等价于 `sky` 段的 `sun_yaw`+`sun_pitch`；`sun_color` [r,g,b]、`ambient` [r,g,b] 分别是太阳颜色与环境光颜色的顶层写法。`sky` 段显式指定时优先于顶层字段。示例：`"sun_toward": [0, -15, 0], "ambient": [0.45, 0.45, 0.45]`。
+
 ## 技术栈
 
 soup3D（渲染）· PyBullet（物理）· pygame（窗口）· imgui（UI）

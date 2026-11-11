@@ -41,11 +41,34 @@ def list_scenes(scene_root: str = "scene") -> list:
             # 天空配置：太阳参数同时驱动方向光与画面优先包的天空盒；panorama
             # 为场景目录内等距圆柱全景图（缺省程序生成默认天空）
             sky = data.get("sky", {})
+            # 太阳方向优先级：sky.sun_yaw/sun_pitch 显式指定 > 顶层
+            # sun_toward（[yaw, pitch, roll] 度，与引擎光源 toward 参数
+            # 同语义，roll 对平行光方向无效，取前两分量）> 默认 30/-60
+            if "sun_yaw" in sky or "sun_pitch" in sky:
+                sun_yaw = float(sky.get("sun_yaw", 30))
+                sun_pitch = float(sky.get("sun_pitch", -60))
+            else:
+                toward = data.get("sun_toward")
+                if toward is not None:
+                    toward = [float(v) for v in toward]
+                    if len(toward) < 2:
+                        raise ValueError(
+                            f"sun_toward 至少需要 [yaw, pitch]: {toward}")
+                    sun_yaw, sun_pitch = toward[0], toward[1]
+                else:
+                    sun_yaw, sun_pitch = 30, -60
             info.sky = {
-                "sun_yaw": float(sky.get("sun_yaw", 30)),
-                "sun_pitch": float(sky.get("sun_pitch", -60)),
+                "sun_yaw": sun_yaw,
+                "sun_pitch": sun_pitch,
+                # 颜色/环境光：sky 段显式优先，顶层 sun_color/ambient 作
+                # 回退（用户按引擎光源参数直觉写的顶层字段），ambient
+                # 缺省与 flight.py 原硬编码一致
                 "sun_color": [float(v) for v in
-                              sky.get("sun_color", [0.8, 0.8, 0.75])],
+                              sky.get("sun_color",
+                                      data.get("sun_color",
+                                               [0.8, 0.8, 0.75]))],
+                "ambient": [float(v) for v in
+                            data.get("ambient", [0.45, 0.45, 0.45])],
                 "panorama": (str(d / sky["panorama"])
                              if sky.get("panorama") else ""),
             }
