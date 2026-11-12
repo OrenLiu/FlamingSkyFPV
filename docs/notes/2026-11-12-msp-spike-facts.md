@@ -26,8 +26,9 @@
 
 ## 2.5 MSPv1 帧格式权威事实（2026-11-12 浏览器实测 + Configurator msp.ts 解码器核实）
 
-- **MSPv1 布局**：`$ M < len(u8) cmd(u8) payload crc8`；**len==255 为 JUMBO 转义**（后续两字节 u16 LE 为真实长度，JUMBO_FRAME_MIN_SIZE=255）；cmd 单字节（CODE_V1 单状态）；CRC8-DWD-SID86 从 dir 字节起覆盖。
-- **实测证据**：浏览器版 Configurator（2026.12.0-alpha）WS 握手成功后发 API_VERSION 请求，按错误布局（len u16+cmd u16）实现的解析器永远判"帧未收全"→ 模拟器全静默、Configurator 500ms×2 超时断开。**教训**：MSPv1 len/cmd 均为 u8，勿凭任何记忆（含"固件 serialHeaderV1_t"转述）——以 msp.ts 解码器状态机/固件 msp.c 为准；自洽 round-trip 单测无法发现外部格式错误，必须有真实对端字节向量。
+- **MSPv1 布局**：`$ M < len(u8) cmd(u8) payload checksum`；**len==255 为 JUMBO 转义**（后续两字节 u16 LE 为真实长度，JUMBO_FRAME_MIN_SIZE=255）；cmd 单字节（CODE_V1 单状态）；**checksum 为 XOR 逐字节异或（从 dir 字节起；CRC8-DWD-SID86 仅 MSPv2 使用）**——权威细节与浏览器实发字节见 §6 附录（§6 为定论，本节概述与其不一致处以下方勘误为准）。
+- **实测证据**：浏览器版 Configurator（2026.12.0-alpha）WS 握手成功后发 API_VERSION 请求（6 字节 `24 4D 3C 00 01 01`），按错误布局（len u16+cmd u16+CRC8）实现的解析器永远判"帧未收全"→ 模拟器全静默、Configurator 500ms×2 超时断开。**教训**：MSPv1 len/cmd 均为 u8、校验和为 XOR，勿凭任何记忆（含"固件 serialHeaderV1_t"转述）——以 msp.ts 解码器状态机/encode_message_v1 为准；自洽 round-trip 单测无法发现外部格式错误，必须有真实对端字节向量。
+- （勘误记录：本节初稿误写"crc8 从 dir 起覆盖"，与 §6 定论矛盾，2026-11-12 由 fix round 2 复审发现并勘误。）
 
 ## 3. 命令号权威事实（在线核实 Configurator master MSPCodes.ts，2026-11-12）
 
