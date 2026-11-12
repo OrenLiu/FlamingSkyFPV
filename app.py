@@ -18,6 +18,8 @@ from shaderpacks.loader import load_pack
 from shaderpacks.registry import list_packs
 from input.keyboard import KeyboardInput
 from input.joystick import JoystickInput
+from msp.handlers import make_identity_handlers
+from msp.server import VfcServer
 
 RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选
 # 配置根/预设目录常量在 config_store 定义（app 与 screens 同源引用，防漂移）
@@ -95,6 +97,9 @@ class App:
         self.clock = pygame.time.Clock()
         self.rc_input = self._make_rc_input()
         pygame.joystick.init()  # 手柄热插拔轮询用
+        # MSP 虚拟飞控服务器（Task 16）：参数页「接入地面站」启动；未启动时
+        # drain() 内部直返（run() 每帧调用无开销）
+        self.msp_server = VfcServer(make_identity_handlers())
 
     # ---- 窗口 ----
     def _open_window(self):
@@ -237,6 +242,10 @@ class App:
             pressed = {i for i, on in enumerate(pygame.key.get_pressed()) if on}
             self.rc_input.set_pressed(pressed)
             self.poll_joysticks()
+
+            # MSP 请求分派（Task 16）：accept 新连接 + 取空队列应答；
+            # 服务器未启动直返，不阻塞主循环
+            self.msp_server.drain()
 
             self.screen.update(dt)
 
