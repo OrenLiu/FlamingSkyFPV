@@ -45,3 +45,14 @@
 - [ ] Setup 页身份显示（验证 BUILD_INFO/BOARD_INFO 载荷形态解析）
 - [ ] 控制台缺失/超时命令清单（M5 命令集优先级依据）
 - [ ] Modes/OSD tab 表现
+
+## 6. 附录（Task 18 fix round 2，2026-11-12）：MSPv1 真实线格式权威事实
+
+浏览器实测（WS 通道）暴露 protocol.py 帧布局实现错误，已修复（fix 提交见 task-18-report.md）。**M5-M7 计划据此为准**：
+
+- **MSPv1 线格式（双向）**：`$M dir len(u8) cmd(u8) payload checksum`，checksum = **XOR** 校验和（len ^ cmd ^ payload 逐字节异或，**非 CRC8**；CRC8-DWD-SID86 仅 MSPv2 使用）。
+- **jumbo 扩展**：`len==0xFF` 为标记，线序 `$M dir FF cmd len(u16LE) payload crc`（cmd 在长度之前），crc 多异或 0xFF 与两个长度字节。
+- **v1 cmd 为 u8**：Configurator `code <= 254 ? encode_message_v1 : encode_message_v2`（msp.ts:484）——命令号 >254 一律走 v2。
+- 权威源：Configurator master `src/js/msp.ts`（encode_message_v1 / encode_message_v2 / 解码器 BYTE_HANDLERS 全状态机，2026-11-12 抓取核对）；msp.js 已在 master 拆分为 msp.ts + msp/ 目录（MSPCodes.ts、MSPHelper.ts、mspBytes.ts 等）。
+- 浏览器实发 MSP_API_VERSION 请求字节：`24 4D 3C 00 01 01`（6 字节）。
+- 重试语义：请求超时 500ms × MAX_RETRIES 重发同一 buffer（用户日志 "MSP: data request timed-out: 1" ×2 即两次重发均石沉大海后断开）。
