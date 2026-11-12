@@ -40,8 +40,10 @@ _UID_PAYLOAD = struct.pack("<3I", 0x46534B59, 0x56464331, 0x32363131)
 assert len(_UID_PAYLOAD) == 12
 
 
-def _get_text(payload: bytes) -> bytes:
-    """MSP2_GET_TEXT 应答：[类型 u8] + 文本；未知/空类型 → 空载荷降级。"""
+def _get_text(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP2_GET_TEXT 应答：[类型 u8] + 文本；未知/空类型 → 空载荷降级。
+
+    state 为 Task 19 二参协议的第二个参数（身份组不消费，带缺省保兼容）。"""
     if not payload:
         return b""
     text_type = payload[0]
@@ -51,26 +53,30 @@ def _get_text(payload: bytes) -> bytes:
     return bytes([text_type]) + text
 
 
-def make_identity_handlers() -> dict[int, Callable[[bytes], bytes]]:
+def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
     """身份组命令表：cmd → payload 载荷生成器。
 
     API_VERSION 自报 mspProtocolVersion=0（v1，引导 Configurator 走 v1 通道，
     与 protocol.py「应答恒走 v1」一致）+ API 1.46。
+
+    handler 协议（Task 19）：``(payload, state=None) -> bytes``——state 为
+    dispatch 注入的运行时状态快照（身份组不消费）；state 缺省保证一期
+    单参调用点保持合法。
     """
     return {
         # 1 MSP_API_VERSION：v1 协议 + API 1.46（4.5.1 对应的 API 版本）
-        1: lambda _payload: bytes([0, 1, 46]),
+        1: lambda _payload, _state=None: bytes([0, 1, 46]),
         # 2 MSP_FC_VARIANT：BTFL → Configurator 走 Betaflight 分支
-        2: lambda _payload: b"BTFL",
+        2: lambda _payload, _state=None: b"BTFL",
         # 3 MSP_FC_VERSION：固件版本 4.5.1
-        3: lambda _payload: b"4.5.1",
+        3: lambda _payload, _state=None: b"4.5.1",
         # 4 MSP_BOARD_INFO：板名 + 板修订 0 + 标志 4 + 保留 8 字节
-        4: lambda _payload: _BOARD_NAME + struct.pack("<H", 0)
-                            + bytes([4]) + b"\0" * 8,
+        4: lambda _payload, _state=None: _BOARD_NAME + struct.pack("<H", 0)
+                                         + bytes([4]) + b"\0" * 8,
         # 5 MSP_BUILD_INFO：构建来源字符串（日期 + 时间 + 修订尾号）
-        5: lambda _payload: b"FSKY sim build 2026-11-12 00:00:00 26",
+        5: lambda _payload, _state=None: b"FSKY sim build 2026-11-12 00:00:00 26",
         # 160 MSP_UID：12 字节固定 unique id
-        MSP_UID: lambda _payload: _UID_PAYLOAD,
+        MSP_UID: lambda _payload, _state=None: _UID_PAYLOAD,
         # 12294 MSP2_GET_TEXT：连接序列的 BUILDKEY/CRAFT_NAME/PILOT_NAME
         MSP2_GET_TEXT: _get_text,
     }

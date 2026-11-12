@@ -20,6 +20,7 @@ from input.keyboard import KeyboardInput
 from input.joystick import JoystickInput
 from msp.handlers import make_identity_handlers
 from msp.server import VfcServer
+from screens.flight import FlightScreen   # _msp_state 的 isinstance 判定（app → screens 单向合法）
 
 RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选
 # 配置根/预设目录常量在 config_store 定义（app 与 screens 同源引用，防漂移）
@@ -97,9 +98,14 @@ class App:
         self.clock = pygame.time.Clock()
         self.rc_input = self._make_rc_input()
         pygame.joystick.init()  # 手柄热插拔轮询用
-        # MSP 虚拟飞控服务器（Task 16）：参数页「接入地面站」启动；未启动时
-        # drain() 内部直返（run() 每帧调用无开销）
-        self.msp_server = VfcServer(make_identity_handlers())
+        # MSP 虚拟飞控服务器（Task 16/19）：参数页「接入地面站」启动；未启动时
+        # drain() 内部直返（run() 每帧调用无开销）。state_provider 每请求供
+        # 参数/飞行遥测快照（GET 组读运行时状态），on_change 是 SET 写信号
+        # （置脏标志 → 飞行帧首重建飞控参数，即时生效）
+        self.msp_params_dirty = False   # MSP SET 写参数脏标志（FlightScreen 消费）
+        self.msp_server = VfcServer(make_identity_handlers(),
+                                    state_provider=self._msp_state,
+                                    on_change=self._msp_on_change)
 
     # ---- 窗口 ----
     def _open_window(self):
@@ -190,6 +196,23 @@ class App:
             self.screen.exit()
         self.screen = screen
         screen.enter(self)
+
+    # ---- MSP 状态源（Task 19） ----
+    def _msp_state(self) -> dict:
+        """MSP handler 状态快照：当前机参数 + 预设代号恒在（基础字段）；
+        飞行页在场且在飞时附 "flight" 遥测（flight_snapshot None 则省略键）"""
+        state = {"params": self.drone_params,
+                 "preset_id": self.settings.current_drone_id}
+        if isinstance(self.screen, FlightScreen):
+            snap = self.screen.flight_snapshot()
+            if snap is not None:
+                state["flight"] = snap
+        return state
+
+    def _msp_on_change(self) -> None:
+        """MSP SET 写信号：置脏标志；FlightScreen.update 帧首消费（重建
+        飞控参数即时生效）。飞行页不在场时标志滞留，进飞行页首帧生效"""
+        self.msp_params_dirty = True
 
     # ---- 主循环 ----
     def run(self, max_frames=None):
