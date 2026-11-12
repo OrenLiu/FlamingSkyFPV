@@ -67,6 +67,7 @@ class FlightWorld:
     """PyBullet DIRECT 世界：地面 + 场景网格 + 无人机盒形刚体"""
     def __init__(self, params):
         self._params = params
+        self._last_step_h = None   # 上次 setTimeStep 的步长（变化才重设）
         self._cid = p.connect(p.DIRECT)
         p.setGravity(0, 0, -9.81, physicsClientId=self._cid)
         p.createCollisionShape(p.GEOM_PLANE, planeNormal=(0, 0, 1),
@@ -104,8 +105,12 @@ class FlightWorld:
         阻力是两回事（作用角速度、保 rate 跟踪稳定），不可调"""
         h = dt / SUBSTEPS
         drag_k = self._params.drag_k
-        for _ in range(SUBSTEPS):
+        # setTimeStep 只在步长变化时设置（原每子步重复调用 PyBullet 包装，
+        # 每帧 4 次冗余 C 包装调用与 tuple 分配；步长不变时 GL 不变）
+        if h != self._last_step_h:
             p.setTimeStep(h, physicsClientId=self._cid)
+            self._last_step_h = h
+        for _ in range(SUBSTEPS):
             pos, quat = p.getBasePositionAndOrientation(
                 self._body, physicsClientId=self._cid)
             rot = glm.quat(quat[3], quat[0], quat[1], quat[2])  # bullet (x,y,z,w)→glm(w,x,y,z)
