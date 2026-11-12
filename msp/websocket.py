@@ -25,6 +25,13 @@ import struct
 # RFC6455 §1.3 握手 GUID（协议常量，全部实现必须一致）
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+# 子协议 token 合法字符集（RFC2616 token：alnum + 保留符号，不含
+# separators/CTL——回显值直接拼入应答头，非法字符即潜在头注入）
+_TOKEN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    "!#$%&'*+-.^_`|~"
+)
+
 # 操作码（RFC6455 §5.2）
 OP_CONT = 0x0     # continuation（分片续帧）
 OP_TEXT = 0x1     # 文本帧（Configurator 不用，服务器侧忽略）
@@ -44,6 +51,12 @@ def websocket_handshake(request: bytes) -> bytes | None:
     仅要求 GET 起始、Upgrade: websocket、含 Sec-WebSocket-Key（其余头
     宽松忽略，浏览器实况冗余头多）。应答含 RFC 规定的
     Sec-WebSocket-Accept = base64(sha1(key + GUID))。
+
+    子协议协商：请求带 Sec-WebSocket-Protocol（逗号分隔列表）时回显
+    第一个 token——浏览器按规范强制：请求非空而应答缺失则拒绝连接
+    （code 1006，Configurator 以 ``new WebSocket(addr, ["binary"])``
+    发起，实测踩中）。回显值校验 RFC2616 token 字符集（防头注入），
+    非法或不含该头则应答不出现该头。
     """
     try:
         text = request.decode("latin-1")
@@ -68,13 +81,17 @@ def websocket_handshake(request: bytes) -> bytes | None:
     accept = base64.b64encode(
         hashlib.sha1((key + _WS_GUID).encode("ascii")).digest()
     ).decode("ascii")
-    return (
+    resp = (
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         f"Sec-WebSocket-Accept: {accept}\r\n"
-        "\r\n"
-    ).encode("ascii")
+    )
+    first_protocol = headers.get("sec-websocket-protocol",
+                                 "").split(",")[0].strip()
+    if first_protocol and set(first_protocol) <= _TOKEN_CHARS:
+        resp += f"Sec-WebSocket-Protocol: {first_protocol}\r\n"
+    return (resp + "\r\n").encode("ascii")
 
 
 def build_binary_frame(payload: bytes, fin: bool = True) -> bytes:
