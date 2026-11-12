@@ -22,6 +22,9 @@ ARM_THROTTLE_MAX = 0.10
 ANGLE_MAX_DEG = 45.0
 ANGLE_P = 8.0
 
+# HORIZON 混合过渡带：|rc| ≥ 该值后自稳权重降为 0（杆外纯 acro/rate 区）
+HORIZON_TRANSITION = 0.6
+
 def eval_boxes(mode_ranges, aux_us) -> frozenset:
     """求值激活的模式集合（纯函数，Betaflight 语义简化版）。
     mode_ranges 条目 (box_id, aux_index, lo_us, hi_us)：aux_us[aux_index] 落入
@@ -47,6 +50,18 @@ def rate_setpoint(rc: float, rate: RateParams, rate_type: str) -> float:
     super_rate = min(rate.super_rate, 0.99)
     super_factor = 1.0 / max(1.0 - a * super_rate, 0.01)
     return 200.0 * rate.rc_rate * rc * super_factor
+
+def _angle_loop(rc: float, current_deg: float) -> float:
+    """ANGLE/HORIZON 共用自稳外环（纯函数）：杆位→目标倾角（±ANGLE_MAX_DEG），
+    角度误差×ANGLE_P → 内环 rate setpoint（°/s）"""
+    return (rc * ANGLE_MAX_DEG - current_deg) * ANGLE_P
+
+def _horizon_mix(rc: float, current_deg: float, rate_sp: float) -> float:
+    """HORIZON 混合 setpoint（纯函数）：w×自稳外环 + (1−w)×rate 曲线输出。
+    w = clamp(1−|rc|/HORIZON_TRANSITION)：中位 w=1 纯自稳（退化为 ANGLE），
+    |rc|≥HORIZON_TRANSITION w=0 纯 rate（杆外 acro），之间线性过渡"""
+    w = _clamp(1.0 - abs(rc) / HORIZON_TRANSITION, 0.0, 1.0)
+    return w * _angle_loop(rc, current_deg) + (1.0 - w) * rate_sp
 
 # PID 增益刻度换算（类比 Betaflight PID_MIXER_SCALING）：增益入参/存档为 BF 量级
 # 刻度（P≈40 量级，二期地面站 MSP 协议同单位），控制器内部换算到电机油门域
@@ -146,9 +161,9 @@ class FlightController:
         （eval_boxes 求值结果）。virtual_fc=True 时 ARM 门控生效——ARM 激活且油门
         <ARM_THROTTLE_MAX 才解锁，加锁期间电机归零、每帧清 PID；virtual_fc=False
         门控整段跳过（一期行为不变）。angles_deg = (roll, pitch, yaw) 杆义姿态角
-        度（与 gyro_dps 同义系），ANGLE 模式外环消费，None 且 ANGLE 激活时防御性
-        退化 rate 输出（飞行接线层保证传入）。aux_us 为 MSP 任务预留，本任务不
-        消费。"""
+        度（与 gyro_dps 同义系），ANGLE/HORIZON 模式外环消费，None 且模式激活时
+        防御性退化 rate 输出（飞行接线层保证传入）。aux_us 为 MSP 任务预留，本
+        任务不消费。"""
         if self._virtual_fc:
             if BOX_ARM in boxes:
                 if not self.armed:
@@ -171,11 +186,19 @@ class FlightController:
         targets = (rate_setpoint(ch.roll, self._tune.rate["roll"], rt),
                    rate_setpoint(ch.pitch, self._tune.rate["pitch"], rt),
                    rate_setpoint(ch.yaw, self._tune.rate["yaw"], rt))
-        # ANGLE 自稳外环：杆位→目标倾角（±ANGLE_MAX_DEG），角度误差×ANGLE_P 替换
-        # roll/pitch 内环 setpoint；yaw 恒 rate 曲线（自稳不掺 yaw 偏航语义）
-        if BOX_ANGLE in boxes and angles_deg is not None:
-            targets = ((ch.roll * ANGLE_MAX_DEG - angles_deg[0]) * ANGLE_P,
-                       (ch.pitch * ANGLE_MAX_DEG - angles_deg[1]) * ANGLE_P,
+        # ANGLE 自稳外环 / HORIZON 混合：替换 roll/pitch 内环 setpoint；yaw 恒
+        # rate 曲线（自稳不掺 yaw 偏航语义）。合取 self.armed——模式只在解锁后
+        # 生效（virtual_fc 加锁期上方提前 return 已隐式保证，此处显式化防御加固；
+        # virtual_fc=False 时 armed 恒 False，模式分支天然不进入，一期路径不变）。
+        # ANGLE 优先于 HORIZON：同激活取纯外环
+        if BOX_ANGLE in boxes and angles_deg is not None and self.armed:
+            targets = (_angle_loop(ch.roll, angles_deg[0]),
+                       _angle_loop(ch.pitch, angles_deg[1]),
+                       targets[2])
+        elif BOX_HORIZON in boxes and angles_deg is not None and self.armed:
+            # HORIZON：中位自稳、杆外 acro（加权式见 _horizon_mix）
+            targets = (_horizon_mix(ch.roll, angles_deg[0], targets[0]),
+                       _horizon_mix(ch.pitch, angles_deg[1], targets[1]),
                        targets[2])
         # TPA：衰减因子乘到三轴 PID 输出后进混控。油门取上一帧四电机均值——比杆量
         # 多含饱和信息（饱和时均值≠杆量），且用历史值无代数环。真实 BF 只衰减 P/I
