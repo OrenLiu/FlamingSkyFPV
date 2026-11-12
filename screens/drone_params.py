@@ -403,10 +403,11 @@ class DroneParamsScreen(Screen):
             imgui.end_popup()
 
     # ---- 地面站（VfcServer 由 Task 16 挂接 app.msp_server，本类只按
-    # start/stop/tcp_address/slave_path 契约调用，属性缺失全防御） ----
+    # start/stop/tcp_address/websocket_address/slave_path 契约调用，
+    # 属性缺失全防御） ----
     def _gs_start(self):
-        """接入地面站：启动 VfcServer（TCP + PTY 双传输）；未挂接或端口占用
-        （OSError）→ 错误提示，不崩溃不改变连接状态"""
+        """接入地面站：启动 VfcServer（TCP + PTY + WS 三传输）；未挂接或
+        端口占用（OSError）→ 错误提示，不崩溃不改变连接状态"""
         srv = getattr(self.app, "msp_server", None)
         if srv is None:
             self._gs_error = "地面站服务尚未接入，请等待后续版本"
@@ -432,8 +433,9 @@ class DroneParamsScreen(Screen):
         self._gs_active = False
 
     def _render_gs_panel(self):
-        """地面站连接提示框（非模态小窗，不挡表单交互）：TCP 地址 + PTY
-        slave 路径（无 PTY 省略）+ 断开按钮；stop 或 server 消失后收起"""
+        """地面站连接提示框（非模态小窗，不挡表单交互）：TCP 地址 + WS
+        地址（浏览器版地面站用，Task 18 起）+ PTY slave 路径（无 PTY 省略）
+        + 断开按钮；stop 或 server 消失后收起"""
         if not self._gs_active:
             return
         srv = getattr(self.app, "msp_server", None)
@@ -445,6 +447,9 @@ class DroneParamsScreen(Screen):
         imgui.begin("地面站连接", flags=imgui.WINDOW_NO_COLLAPSE)
         imgui.text("地面站已接入，在地面站软件中连接以下任一地址：")
         imgui.text(str(getattr(srv, "tcp_address", "")))
+        ws_addr = getattr(srv, "websocket_address", "")
+        if ws_addr:
+            imgui.text(str(ws_addr))
         slave = getattr(srv, "slave_path", None)
         if slave:
             imgui.text(str(slave))
