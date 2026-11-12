@@ -25,6 +25,15 @@ ANGLE_P = 8.0
 # HORIZON 混合过渡带：|rc| ≥ 该值后自稳权重降为 0（杆外纯 acro/rate 区）
 HORIZON_TRANSITION = 0.6
 
+# 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13）：120°/90° 双阈值迟滞防抖 + 油门门控。
+# 进入：box 激活 + armed + 未翻正 + (|roll|>120° 或 |pitch|>120°) + 油门<0.35；
+# 退出：两轴均 <90°（严格）。翻正 = 主导轴 setpoint 叠加 ±FLIP_OVER_RATE 朝
+# 0° 最短方向（角 >90° 取负、<−90° 取正）
+FLIP_OVER_RATE = 400.0    # °/s 主导轴叠加的翻正角速度
+FLIP_ENTER_DEG = 120.0    # 进入阈值：任一姿态轴绝对值严格超过
+FLIP_EXIT_DEG = 90.0      # 退出阈值：两轴均严格低于；叠加方向判据同值
+FLIP_MAX_THROTTLE = 0.35  # 进入允许的最高油门（≥ 该值拒绝，防误触发）
+
 def eval_boxes(mode_ranges, aux_us) -> frozenset:
     """求值激活的模式集合（纯函数，Betaflight 语义简化版）。
     mode_ranges 条目 (box_id, aux_index, lo_us, hi_us)：aux_us[aux_index] 落入
@@ -62,6 +71,16 @@ def _horizon_mix(rc: float, current_deg: float, rate_sp: float) -> float:
     |rc|≥HORIZON_TRANSITION w=0 纯 rate（杆外 acro），之间线性过渡"""
     w = _clamp(1.0 - abs(rc) / HORIZON_TRANSITION, 0.0, 1.0)
     return w * _angle_loop(rc, current_deg) + (1.0 - w) * rate_sp
+
+def _flip_over_dir(angle_deg: float) -> int:
+    """翻正方向符号（纯函数）：|角|>90° 时朝 0° 最短——正角 −1（回滚）、
+    负角 +1；|角|≤90° 返回 0 不叠加（翻正态中主导轴必 ≥90°——退出条件为两轴
+    均 <90°，≤90° 仅 |roll|=|pitch| 平手时理论可达，防御兜底）"""
+    if angle_deg > FLIP_EXIT_DEG:
+        return -1
+    if angle_deg < -FLIP_EXIT_DEG:
+        return 1
+    return 0
 
 # PID 增益刻度换算（类比 Betaflight PID_MIXER_SCALING）：增益入参/存档为 BF 量级
 # 刻度（P≈40 量级，二期地面站 MSP 协议同单位），控制器内部换算到电机油门域
@@ -153,6 +172,7 @@ class FlightController:
         self._virtual_fc = params.virtual_fc
         self.armed = False
         self.arm_denied_once = False
+        self._flipping = False   # 反乌龟翻正态（Task 13）：重建回未翻正
 
     def update(self, ch: Channels, gyro_dps: tuple, dt: float,
                aux_us=None, boxes=frozenset(), angles_deg=None) -> list:
@@ -161,9 +181,9 @@ class FlightController:
         （eval_boxes 求值结果）。virtual_fc=True 时 ARM 门控生效——ARM 激活且油门
         <ARM_THROTTLE_MAX 才解锁，加锁期间电机归零、每帧清 PID；virtual_fc=False
         门控整段跳过（一期行为不变）。angles_deg = (roll, pitch, yaw) 杆义姿态角
-        度（与 gyro_dps 同义系），ANGLE/HORIZON 模式外环消费，None 且模式激活时
-        防御性退化 rate 输出（飞行接线层保证传入）。aux_us 为 MSP 任务预留，本
-        任务不消费。"""
+        度（与 gyro_dps 同义系），ANGLE/HORIZON 模式外环与反乌龟倒置检测消费，
+        None 且相关模式激活时防御性跳过对应逻辑（飞行接线层保证传入）。aux_us
+        为 MSP 任务预留，本任务不消费。"""
         if self._virtual_fc:
             if BOX_ARM in boxes:
                 if not self.armed:
@@ -177,10 +197,11 @@ class FlightController:
                 self.armed = False    # 撤 ARM → 立即加锁
             if not self.armed:
                 # 加锁期每帧重置（幂等）：解锁瞬间 = 干净初态——三轴 PID 积分/D
-                # 状态清零 + TPA 油门记忆回悬停初值，等价全新飞控
+                # 状态清零 + TPA 油门记忆回悬停初值 + 翻正态复位，等价全新飞控
                 for pid in self._pid.values():
                     pid.reset()
                 self._tpa_throttle = TPA_THROTTLE_INIT
+                self._flipping = False
                 return [0.0, 0.0, 0.0, 0.0]
         rt = self._tune.rate_type
         targets = (rate_setpoint(ch.roll, self._tune.rate["roll"], rt),
@@ -200,6 +221,28 @@ class FlightController:
             targets = (_horizon_mix(ch.roll, angles_deg[0], targets[0]),
                        _horizon_mix(ch.pitch, angles_deg[1], targets[1]),
                        targets[2])
+        # 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13）：倒置检测状态机 + 主导轴最短
+        # 方向翻正叠加，120°/90° 迟滞防抖、油门 ≥0.35 拒进（常量注释含语义）。
+        # overlay 在 setpoint 管线末端（上述模式之后、PID 之前）只加主导轴；
+        # 进入检测与退出同帧完成先于叠加。合取 self.armed 沿模式分支惯例；
+        # angles 缺失整段跳过（防御，状态保持不动）
+        if angles_deg is not None and self.armed:
+            roll_a, pitch_a = angles_deg[0], angles_deg[1]
+            if self._flipping:
+                if abs(roll_a) < FLIP_EXIT_DEG and abs(pitch_a) < FLIP_EXIT_DEG:
+                    self._flipping = False
+            elif (BOX_FLIP_OVER_AFTER_CRASH in boxes
+                    and ch.throttle < FLIP_MAX_THROTTLE
+                    and (abs(roll_a) > FLIP_ENTER_DEG
+                         or abs(pitch_a) > FLIP_ENTER_DEG)):
+                self._flipping = True
+            if self._flipping:
+                if abs(roll_a) > abs(pitch_a):
+                    targets = (targets[0] + _flip_over_dir(roll_a) * FLIP_OVER_RATE,
+                               targets[1], targets[2])
+                else:
+                    targets = (targets[0], targets[1] + _flip_over_dir(pitch_a)
+                               * FLIP_OVER_RATE, targets[2])
         # TPA：衰减因子乘到三轴 PID 输出后进混控。油门取上一帧四电机均值——比杆量
         # 多含饱和信息（饱和时均值≠杆量），且用历史值无代数环。真实 BF 只衰减 P/I
         # （真机 D 项重滤波、噪声主导，衰减反放大噪声）；本仿真 gyro 干净、D 无滤波，
