@@ -169,10 +169,11 @@ class App:
                 j = pygame.joystick.Joystick(i)
                 if j.get_name() == self.rc_config.device_name:
                     j.init()
-                    # 二期 AUX：按钮源 + 轴数传入（越界防御换设备回中）
+                    # 二期 AUX：按钮源 + 轴数/按钮数传入（越界防御换设备回中）
                     return JoystickInput(j.get_axis, self.rc_config.mappings,
                                          get_button_fn=j.get_button,
-                                         num_axes=j.get_numaxes())
+                                         num_axes=j.get_numaxes(),
+                                         num_buttons=j.get_numbuttons())
         return KeyboardInput()  # 无手柄/未配置 → 键盘兜底（UI 明示）
 
     def poll_joysticks(self):
