@@ -4,7 +4,7 @@ import imgui
 import pygame
 import soup3D
 from .base import Screen
-from physics.drone import FlightController
+from physics.drone import FlightController, eval_boxes
 from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
 from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
                          COVER_BOX_W, COVER_BOX_H)
@@ -190,7 +190,18 @@ class FlightScreen(Screen):
         # 物理步长钳位到 33ms（仿真常规做法；不动 PID/物理参数）。
         dt = min(dt, 1.0 / 30.0)
         ch = self.app.rc_input.read(dt)
-        motors = self._fc.update(ch, self._world.gyro_dps, dt)
+        if self.app.drone_params.virtual_fc:
+            # 虚拟飞控接线（Task 14）：aux [-1,1] → µs（1500 中位 ±500）、
+            # mode_ranges 求值激活 box 集、杆义姿态角随帧传递（自稳外环/反乌龟
+            # 倒置检测消费）。无 ARM box 配置时 eval_boxes 恒空 → 永不解锁（零推）
+            aux_us = [1500.0 + v * 500.0 for v in ch.aux]
+            boxes = eval_boxes(self.app.drone_params.virtual.mode_ranges, aux_us)
+            motors = self._fc.update(ch, self._world.gyro_dps, dt,
+                                     aux_us=aux_us, boxes=boxes,
+                                     angles_deg=self._world.euler_stick_deg)
+        else:
+            # 参数模式：一期三参调用形态，行为零修改
+            motors = self._fc.update(ch, self._world.gyro_dps, dt)
         self._world.step(self._fc.motor_thrusts(motors), dt)
         # 相机同步：位姿 + 机头对齐 + 摄像头仰角合成（纯函数在 physics.world）
         cam = compose_camera_quat(self._world.quat,
@@ -273,6 +284,7 @@ class FlightScreen(Screen):
                 imgui.close_current_popup()
             if imgui.button("重置位置", 220, 44):
                 self._world.reset(self._scene.spawn)
+                self._fc.disarm()   # 位置重置联动加锁（Task 14）：重置后须重新解锁
                 self._esc_open = False; self._paused = False
                 imgui.close_current_popup()
             if imgui.button("返回主菜单", 220, 44):

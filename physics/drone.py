@@ -262,6 +262,16 @@ class FlightController:
         self._tpa_throttle = sum(motors) / len(motors)
         return motors
 
+    def disarm(self) -> None:
+        """外部强制加锁（Esc 重置位置联动，Task 14）：armed=False + 三轴 PID
+        reset + TPA 油门记忆回悬停初值 + 翻正态复位——清理集与 update() 加锁帧
+        等价（等价全新飞控），但由外部事件即时触发而非等待下一帧"""
+        self.armed = False
+        for pid in self._pid.values():
+            pid.reset()
+        self._tpa_throttle = TPA_THROTTLE_INIT
+        self._flipping = False
+
     def motor_thrusts(self, motors: list) -> list:
         """单电机最大推力 = 推重比(参考电压下)×重量/4 × (V/REF_VOLTAGE)²；实际 = T_max×motor²。
         电池电压越高推力越大（满电 4S 16.8V → ×1.288、3S 11.1V → ×0.563），
