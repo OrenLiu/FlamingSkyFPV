@@ -73,7 +73,9 @@ def build_v1_frame(direction: str, cmd: int, payload: bytes) -> bytes:
 
     checksum = XOR(len[, jumbo 标记与长度字节], cmd, payload)。
     """
-    assert 0 <= cmd <= 0xFF, f"v1 命令号须 u8：{cmd}"
+    if not 0 <= cmd <= 0xFF:
+        # v1 命令号 u8；Configurator 对 >254 的命令一律走 v2（msp.ts:484）
+        raise ValueError(f"v1 命令号须 u8 域（0-255）：{cmd}")
     n = len(payload)
     if n < _JUMBO_MARKER:
         head = (b"$M" + direction.encode("ascii")
