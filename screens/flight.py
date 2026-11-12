@@ -252,6 +252,13 @@ class FlightScreen(Screen):
         imgui.text(f"横滚 {roll:5.0f}° 俯仰 {pitch:5.0f}° 偏航 {yaw:5.0f}°")
         if ch:
             imgui.text(f"油门 {ch.throttle * 100:3.0f}%")
+        # 输入来源徽标（一期遗留 minor）：键盘显示固定文案，手柄显示设备名；
+        # 主四通道有未绑定路数时追加计数提示（全绑定不显示）
+        rc = self.app.rc_config
+        src = "键盘" if rc.mode == "keyboard" else (rc.device_name or "手柄")
+        n = sum(1 for c in ("throttle", "yaw", "roll", "pitch")
+                if rc.mappings[c].axis < 0)
+        imgui.text(f"输入: {src}" + (f"（{n} 路未绑定）" if n else ""))
         imgui.text("Esc 暂停菜单")
         imgui.end()
         imgui.pop_style_color(1)
