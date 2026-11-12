@@ -227,11 +227,15 @@ class FlightScreen(Screen):
         self._flight_time_s += dt   # 与物理同步（同钳位后 dt）
         ch = self.app.rc_input.read(dt)
         if self.app.drone_params.virtual_fc:
-            # MSP SET 写参数即时生效（Task 19）：地面站写参数 → on_change 置
-            # 脏标志 → 此处帧首重建飞控参数（set_params 语义：重建即回锁定态，
-            # 与参数页「保存应用」一致）
+            # MSP SET 写参数即时生效（Task 19/21）：地面站写参数 → on_change 置
+            # 脏标志 → 此处帧首重建飞控参数。真机写 PID 不 disarm——set_params
+            # 重建后回写 armed（armed 为普通逐帧标志，回写无不变量破坏；重建清
+            # PID 积分按重建语义保留：参数已变清零合理）。换预设路径
+            # （app.select_drone → 新 fc 实例）不在此列，保持回锁定态
             if self.app.msp_params_dirty:
+                was_armed = self._fc.armed
                 self._fc.set_params(self.app.drone_params)
+                self._fc.armed = was_armed
                 self.app.msp_params_dirty = False
             # 虚拟飞控接线（Task 14）：aux [-1,1] → µs（1500 中位 ±500）、
             # mode_ranges 求值激活 box 集、杆义姿态角随帧传递（自稳外环/反乌龟
