@@ -36,10 +36,52 @@ class RateParams:
     expo: float = 0.32
     linear_max_deg: float = 360.0      # linear 模式满杆角速度 °/s
 
-# 参数 schema 版本：4 = PID 刻度对齐 Betaflight 量级（P≈40，见 physics.drone.
-# PID_MIX_SCALING）。3 = 三轴 rate + 小刻度 PID（仅 pid 过时）；缺失/更早 = 旧量级
-# PID 或全局单份 rate。加载时按版本重置（见 ConfigStore.load）
-PARAMS_SCHEMA = 4
+def _default_rate() -> dict:
+    """三轴 rate 默认（DroneParams 平铺与 TuneParams 共用，防两处默认漂移）"""
+    return {k: RateParams() for k in ("roll", "pitch", "yaw")}
+
+def _default_pid() -> dict:
+    """三轴 PID 默认（BF 量级刻度；DroneParams 平铺与 TuneParams 共用）"""
+    # PID 量纲：误差 °/s → 电机油门单位。开环增益实测 roll/pitch ≈ 6.8e4、yaw ≈ 6.7e3
+    # °/s²/单位输出，帧长 1/30 时临界 P（电机域）：roll/pitch ≈ 9e-4、yaw ≈ 9e-3（test/
+    # manual/calibrate.py 无头闭环标定，双 dt 稳定、阶跃无过冲、悬停零饱和）。
+    # 存档/展示为 BF 量级刻度（PIDController 内 ÷PID_MIX_SCALING=1e5 换算）：
+    # 由电机域标定值 4e-4/4e-4/4e-6（roll/pitch）与 4e-3/1e-3/0（yaw）×1e5 换算而来；
+    # yaw P 偏大是桨反扭矩权限弱的诚实物理结果
+    return {
+        "roll": PIDGains(40.0, 40.0, 0.4),
+        "pitch": PIDGains(40.0, 40.0, 0.4),
+        "yaw": PIDGains(400.0, 100.0, 0.0),
+    }
+
+@dataclass
+class TuneParams:
+    """调参域快照——与 DroneParams 平铺调参字段同构（二期 MSP 地面站调参用）：
+    virtual_fc=True 时飞控仿真消费 virtual.tune，参数页消费平铺字段，两者经
+    snapshot_tune/sync_tune_to_ui 互相同步"""
+    rate_type: str = "betaflight_actual"  # "betaflight_actual" | "linear"
+    rate: dict = field(default_factory=_default_rate)
+    pid: dict = field(default_factory=_default_pid)
+    tpa_percent: float = 65.0          # 满油门衰减 %（语义同 DroneParams 同名字段）
+    tpa_breakpoint: float = 0.30       # 断点油门比例
+
+@dataclass
+class VirtualFCParams:
+    """虚拟飞控域（二期 MSP 打通后地面站可调项；一期 UI 不触碰）"""
+    tune: TuneParams = field(default_factory=TuneParams)
+    # 模式开关区间：条目 (box_id, aux_index, lo_us, hi_us)——BETAFLIGHT 调参步骤
+    # （如 ARM/MODE 分支设置）写入；MSP 打通任务消费。JSON round-trip 后元组成 list
+    mode_ranges: list = field(default_factory=list)
+    osd_layout: dict = field(default_factory=dict)    # OSD 元素坐标（元素 id → 坐标）
+    osd_enabled: dict = field(default_factory=dict)   # OSD 元素开关（元素 id → bool）
+    craft_name: str = ""               # 机名（MSP Craft Name）
+    cells: int = 4                     # 电芯节数（电池电压计算基准，默认 4S）
+
+# 参数 schema 版本：5 = 虚拟飞控域（DroneParams 新增 virtual_fc/virtual 字段，
+# additive 迁移：pid/rate 不重置）。4 = PID 刻度对齐 Betaflight 量级（P≈40，见
+# physics.drone.PID_MIX_SCALING）。3 = 三轴 rate + 小刻度 PID（仅 pid 过时）；
+# 缺失/更早 = 旧量级 PID 或全局单份 rate。加载时按版本迁移（见 ConfigStore.load）
+PARAMS_SCHEMA = 5
 
 @dataclass
 class DroneParams:
@@ -50,19 +92,9 @@ class DroneParams:
     camera_angle_deg: float = 20.0    # 摄像头仰角
     rate_type: str = "betaflight_actual"  # "betaflight_actual" | "linear"
     # rate 曲线三轴独立（用户裁定）：横滚/俯仰/偏航各自可调
-    rate: dict = field(default_factory=lambda: {
-        k: RateParams() for k in ("roll", "pitch", "yaw")})
-    # PID 量纲：误差 °/s → 电机油门单位。开环增益实测 roll/pitch ≈ 6.8e4、yaw ≈ 6.7e3
-    # °/s²/单位输出，帧长 1/30 时临界 P（电机域）：roll/pitch ≈ 9e-4、yaw ≈ 9e-3（test/
-    # manual/calibrate.py 无头闭环标定，双 dt 稳定、阶跃无过冲、悬停零饱和）。
-    # 存档/展示为 BF 量级刻度（PIDController 内 ÷PID_MIX_SCALING=1e5 换算）：
-    # 由电机域标定值 4e-4/4e-4/4e-6（roll/pitch）与 4e-3/1e-3/0（yaw）×1e5 换算而来；
-    # yaw P 偏大是桨反扭矩权限弱的诚实物理结果
-    pid: dict = field(default_factory=lambda: {
-        "roll": PIDGains(40.0, 40.0, 0.4),
-        "pitch": PIDGains(40.0, 40.0, 0.4),
-        "yaw": PIDGains(400.0, 100.0, 0.0),
-    })
+    rate: dict = field(default_factory=_default_rate)
+    # PID 三轴增益，默认见 _default_pid（BF 量级刻度，标定来源注释在彼处）
+    pid: dict = field(default_factory=_default_pid)
     # TPA（Throttle PID Attenuation，油门 PID 衰减）：推力∝油门² → 控制权限随油门
     # 线性上升（满油门 ≈ 2.9× 悬停值），悬停标定的 PID 在高油门越过稳定边界——高油门
     # 段按此参数衰减 PID 增益（Betaflight 同名机制）。默认 65%/0.30 为无头闭环标定
@@ -79,7 +111,41 @@ class DroneParams:
     # （physics.drone.REF_VOLTAGE）。默认 14.8（4S 标称）保持既有行为；参考：满电
     # 4S = 16.8（推力 ×1.288）、3S = 11.1（×0.563）。additive 字段不升 schema
     battery_voltage: float = 14.8
-    params_schema: int = PARAMS_SCHEMA  # 参数版本：不匹配的存档加载时重置 pid+rate
+    # 虚拟飞控开关（二期 MSP 打通）：True = 飞控仿真消费 virtual.tune（地面站调参
+    # 生效）；False = 消费上方平铺调参字段（一期行为）
+    virtual_fc: bool = False
+    # 虚拟飞控域（TuneParams 调参快照 + MSP mode_ranges/OSD/机名/电芯数）
+    virtual: VirtualFCParams = field(default_factory=VirtualFCParams)
+    params_schema: int = PARAMS_SCHEMA  # 参数版本：不匹配的存档加载时按版本迁移
+
+    # ---- 调参域同步三方法（平铺字段 ↔ virtual.tune） ----
+    # 逐轴 dataclass 重建实现深拷贝（同 screens/drone_params._clone_params 手法），
+    # 两域互不共享嵌套实例
+
+    def snapshot_tune(self) -> TuneParams:
+        """平铺调参字段 → TuneParams 深拷贝快照（改快照不影响平铺字段）"""
+        return TuneParams(
+            rate_type=self.rate_type,
+            rate={k: RateParams(**vars(v)) for k, v in self.rate.items()},
+            pid={k: PIDGains(**vars(v)) for k, v in self.pid.items()},
+            tpa_percent=self.tpa_percent,
+            tpa_breakpoint=self.tpa_breakpoint,
+        )
+
+    def active_tune(self) -> TuneParams:
+        """当前生效调参域：virtual_fc=True → virtual.tune；False → 平铺字段快照"""
+        if self.virtual_fc:
+            return self.virtual.tune
+        return self.snapshot_tune()
+
+    def sync_tune_to_ui(self) -> None:
+        """virtual.tune 深拷贝回写平铺字段（地面站调参后同步参数页；回写后脱钩）"""
+        t = self.virtual.tune
+        self.rate_type = t.rate_type
+        self.rate = {k: RateParams(**vars(v)) for k, v in t.rate.items()}
+        self.pid = {k: PIDGains(**vars(v)) for k, v in t.pid.items()}
+        self.tpa_percent = t.tpa_percent
+        self.tpa_breakpoint = t.tpa_breakpoint
 
 @dataclass
 class AxisBinding:
@@ -104,15 +170,21 @@ def default_rc_config() -> RCConfig:
 
 # dataclass 字段名 → 嵌套 dataclass 类型表（重建用）
 _NESTED = {"pid": PIDGains, "rate": RateParams, "mappings": AxisBinding}
+# 字段值整体为单个 dataclass 的字段名 → 类型表（DroneParams.virtual →
+# VirtualFCParams，VirtualFCParams.tune → TuneParams；递归重建用）
+_NESTED_ONE = {"virtual": VirtualFCParams, "tune": TuneParams}
 
 def _rebuild(cls, data: dict):
-    """dict → dataclass 实例，递归重建嵌套 dict[str, dataclass] 字段（缺失键用默认值补齐）"""
+    """dict → dataclass 实例，递归重建嵌套 dict[str, dataclass] 与单 dataclass
+    字段（缺失键用默认值补齐）"""
     kwargs = {}
     for f in dataclasses.fields(cls):
         if f.name not in data:
             continue
         v = data[f.name]
-        if f.name in _NESTED and isinstance(v, dict):
+        if f.name in _NESTED_ONE and isinstance(v, dict):
+            v = _rebuild(_NESTED_ONE[f.name], v)
+        elif f.name in _NESTED and isinstance(v, dict):
             # 以默认实例的同名字典为基底，JSON 数据覆盖——仅保存了部分键（如只绑定了
             # throttle）时，其余通道回落默认 AxisBinding()，避免 round-trip 丢键
             base = {k: dataclasses.asdict(inst)
@@ -142,16 +214,20 @@ class ConfigStore:
         except (json.JSONDecodeError, TypeError, KeyError):
             shutil.copy2(path, path + ".bak")  # 备份损坏文件
             return cls()
-        # 参数版本迁移：v3 档仅 PID 小刻度过时（rate 语义未变）→ 只重置 pid；
-        # 缺失/更早版本量级/结构与现行不符（PID 旧量级加载即 bang-bang、rate 为
-        # 全局单份标量）→ pid 与 rate 整体重置。其余字段均保留。
+        # 参数版本迁移（三档）：v4 档 additive——pid/rate 自调保留，仅升版本
+        # （缺失的 virtual_fc/virtual 键 _rebuild 已补默认）；v3 档仅 PID 小刻度
+        # 过时（rate 语义未变）→ 只重置 pid；缺失/更早版本量级/结构与现行不符
+        # （PID 旧量级加载即 bang-bang、rate 为全局单份标量）→ pid 与 rate 整体
+        # 重置。其余字段均保留。
         # 注意须查原始 JSON：_rebuild 对缺失键会补 dataclass 默认值，查对象会漏掉旧档
         if cls is DroneParams and isinstance(data, dict) \
                 and data.get("params_schema") != PARAMS_SCHEMA:
-            d = default_drone_params()
-            obj.pid = d.pid
-            if data.get("params_schema") != 3:
-                obj.rate = d.rate
+            ver = data.get("params_schema")
+            if ver != 4:                    # v4 档 additive：不重置任何字段
+                d = default_drone_params()
+                obj.pid = d.pid
+                if ver != 3:                # v3 档仅 pid 过时，rate 语义未变
+                    obj.rate = d.rate
             obj.params_schema = PARAMS_SCHEMA
         return obj
 
