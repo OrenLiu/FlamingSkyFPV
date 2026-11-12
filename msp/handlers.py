@@ -5,6 +5,11 @@
 1=MSP_API_VERSION、2=MSP_FC_VARIANT、3=MSP_FC_VERSION、4=MSP_BOARD_INFO、
 5=MSP_BUILD_INFO、160=MSP_UID（v1 惯例值）。204=MSP_SET_RC_TUNING 为写
 命令，身份组不应答（计划简报起草时误记 4/204 的映射，已修正）。
+
+MSP2_GET_TEXT(0x3006=12294) 为 v2 命令（fix round 3）：连接序列在身份组
+之后请求 BUILDKEY(5)/CRAFT_NAME(2)/PILOT_NAME(1)（serial_backend.ts
+processBuildConfiguration/processCraftName），无应答会被判超时断开。
+请求 payload=[类型 u8]，应答 payload=[类型 u8]+文本。
 """
 import struct
 from typing import Callable
@@ -12,12 +17,38 @@ from typing import Callable
 # MSP_UID：Configurator MSPCodes.js 定义为 160（v1 惯例，已在线核对）
 MSP_UID = 160
 
+# MSP2_GET_TEXT（MSPCodes.ts MSP2_GET_TEXT = 0x3006；0x3007 为 SET_TEXT）
+MSP2_GET_TEXT = 0x3006
+
+# MSP2TextType（MSPCodes.ts MSP2TextType 枚举，2026-11 核对）：GET 方向
+# 合法类型 → 应答文本（空串即 [类型字节] 单字节载荷）
+_TEXT_TYPES: dict[int, bytes] = {
+    1: b"",            # PILOT_NAME
+    2: b"FSKY-SIM",    # CRAFT_NAME（Setup 页机名显示）
+    3: b"",            # PID_PROFILE_NAME
+    4: b"",            # RATE_PROFILE_NAME
+    5: b"",            # BUILDKEY（非 32 字长 → Configurator 跳过云构建选项）
+    6: b"",            # RELEASENAME（GET 方向固件支持）
+    11: b"",           # BATTERY_PROFILE_NAME
+}
+
 # 板名/构建自报（设计文档规定值；25 尾号预留扩展）
 _BOARD_NAME = b"FSKY"
 
 # UID 应答：12 字节固定值（三个 u32，模拟固定硬件 unique id；每次启动一致）
 _UID_PAYLOAD = struct.pack("<3I", 0x46534B59, 0x56464331, 0x32363131)
 assert len(_UID_PAYLOAD) == 12
+
+
+def _get_text(payload: bytes) -> bytes:
+    """MSP2_GET_TEXT 应答：[类型 u8] + 文本；未知/空类型 → 空载荷降级。"""
+    if not payload:
+        return b""
+    text_type = payload[0]
+    text = _TEXT_TYPES.get(text_type)
+    if text is None:
+        return b""
+    return bytes([text_type]) + text
 
 
 def make_identity_handlers() -> dict[int, Callable[[bytes], bytes]]:
@@ -40,4 +71,6 @@ def make_identity_handlers() -> dict[int, Callable[[bytes], bytes]]:
         5: lambda _payload: b"FSKY sim build 2026-11-12 00:00:00 26",
         # 160 MSP_UID：12 字节固定 unique id
         MSP_UID: lambda _payload: _UID_PAYLOAD,
+        # 12294 MSP2_GET_TEXT：连接序列的 BUILDKEY/CRAFT_NAME/PILOT_NAME
+        MSP2_GET_TEXT: _get_text,
     }
