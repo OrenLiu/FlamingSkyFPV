@@ -17,12 +17,12 @@
 WebSocket（浏览器版 Configurator）：读线程内完成 RFC6455 握手后，二进制
 帧 payload 剥壳喂 MSP 解析器（等价 TCP 字节流），应答按连接类型包 WS 帧。
 """
+import logging
 import os
 import pty
 import queue
 import select
 import socket
-import sys
 import threading
 import tty
 from typing import Callable
@@ -48,6 +48,12 @@ _TCP_HOST = "127.0.0.1"
 _TCP_BACKLOG = 4
 _WS_PORT_DEFAULT = 5762      # 浏览器版 WS 默认端口（与 TCP 5761 并存）
 _WS_HANDSHAKE_MAX = 8192     # 握手请求字节上限（超限视为恶意/坏连接）
+
+# 模块级 logger（Task 24 print→logging；不调 basicConfig——根 logger 默认
+# 态 debug/info 丢弃、warning 经 lastResort 落 stderr，stdout 保持干净）。
+# 分级：handler 缺席→debug、handler/state_provider 异常→warning、传输
+# 降级/连接清理→info、握手拒绝（恶意/非法请求）→warning
+log = logging.getLogger(__name__)
 
 
 class _Transport:
@@ -140,8 +146,7 @@ class VfcServer:
         try:
             self.start_websocket()
         except OSError as e:
-            print(f"[msp] WebSocket 启动失败，仅 TCP/PTY 接入：{e}",
-                  file=sys.stderr)
+            log.info("WebSocket 启动失败，仅 TCP/PTY 接入：%s", e)
 
     def start_tcp(self, port: int = 5761) -> None:
         """TCP 传输：bind 127.0.0.1:port（port=0 内核分配）；占用抛 OSError"""
@@ -167,7 +172,7 @@ class VfcServer:
         try:
             master_fd, slave_fd = pty.openpty()
         except OSError as e:
-            print(f"[msp] PTY 创建失败，仅 TCP 接入：{e}", file=sys.stderr)
+            log.info("PTY 创建失败，仅 TCP 接入：%s", e)
             return
         # slave_fd 由服务器自持：外部地面站断开后 master 读不会陷入 EIO 忙转
         self._master_fd, self._slave_fd = master_fd, slave_fd
@@ -291,15 +296,15 @@ class VfcServer:
             try:
                 state = self._state_provider()
             except Exception as e:  # provider 故障不中断主循环（按无状态分派）
-                print(f"[msp] state_provider 异常：{e}", file=sys.stderr)
+                log.warning("state_provider 异常：%s", e)
         if handler is None:
-            print(f"[msp] 未实现命令 {req.cmd}，空载荷应答", file=sys.stderr)
+            log.debug("未实现命令 %s，空载荷应答", req.cmd)
             payload = b""
         else:
             try:
                 payload = handler(req.payload, state)
             except Exception as e:  # handler 故障不得中断主循环
-                print(f"[msp] 命令 {req.cmd} handler 异常：{e}", file=sys.stderr)
+                log.warning("命令 %s handler 异常：%s", req.cmd, e)
                 payload = b""
                 state = None   # 异常路径不产生变更信号（半途置 changed 亦无效）
         frame = (build_v2_frame(">", req.cmd, payload) if req.v2
@@ -308,7 +313,7 @@ class VfcServer:
             transport.send(frame)
         except OSError as e:
             # 对端已断：清死连接（读线程随后 recv 出错自行退出）
-            print(f"[msp] 应答发送失败，清理连接：{e}", file=sys.stderr)
+            log.info("应答发送失败，清理连接：%s", e)
             sock = transport.sock
             if sock is not None:
                 try:
@@ -411,7 +416,7 @@ class VfcServer:
                     closing = True
                 # OP_TEXT/OP_PONG：Configurator 二进制透传不用，忽略
             if error is not None:
-                print(f"[msp] {error}，断开 WS 连接", file=sys.stderr)
+                log.info("%s，断开 WS 连接", error)
                 break
             if closing:
                 break
@@ -434,7 +439,7 @@ class VfcServer:
             if b"\r\n\r\n" in data:
                 break
             if len(data) > _WS_HANDSHAKE_MAX:
-                print("[msp] WS 握手请求超限，拒绝", file=sys.stderr)
+                log.warning("WS 握手请求超限，拒绝")
                 return None
             try:
                 chunk = sock.recv(_CHUNK)
@@ -452,7 +457,7 @@ class VfcServer:
             return None  # 停止时跳出循环无终止符
         resp = websocket_handshake(head)
         if resp is None:
-            print("[msp] 非法 WS 握手请求，拒绝连接", file=sys.stderr)
+            log.warning("非法 WS 握手请求，拒绝连接")
             try:
                 sock.sendall(b"HTTP/1.1 400 Bad Request\r\n"
                              b"Connection: close\r\n\r\n")

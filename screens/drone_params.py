@@ -113,6 +113,8 @@ class DroneParamsScreen(Screen):
         imgui.separator()
         if imgui.button("返回", 180, 40):
             self._back()
+        if self._gs_error:
+            imgui.text(self._gs_error)   # 列表态错误可见（与编辑态同形态）
         imgui.end()
         # 模态弹窗在主窗口 end 之后、栈根处开（flight.py _render_esc_menu 同位置）
         self._render_copy_modal()
@@ -364,9 +366,10 @@ class DroneParamsScreen(Screen):
         imgui.text("虚拟飞控模式：调参请接入地面站调整")
         imgui.separator()
         self._render_body_form(p)
-        # 电池节数（virtual 域，MSP 电池配置同源）：地面站电压计算基准
+        # 电池节数（virtual 域，MSP 电池配置同源）：地面站电压计算基准；
+        # 手输 0/负数钳到 1（节数下限，防电压计算除零/失真）
         _, cells = imgui.input_int("电池节数", int(p.virtual.cells), 1, 10)
-        p.virtual.cells = int(cells)
+        p.virtual.cells = max(1, int(cells))
 
     def _render_body_form(self, p):
         """机体硬件参数（两模式共用段，控件同一期）"""

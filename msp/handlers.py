@@ -32,6 +32,11 @@ processBuildConfiguration/processCraftName），无应答会被判超时断开�
 readU8 越界 null||0 容错）；类型 2 CRAFT_NAME 为 state 感知（Task 23：
 virtual.craft_name → preset_id → FSKY-SIM 兜底）。
 
+固化组（Task 24，Configurator 保存/连接序列杂音）：250=MSP_EEPROM_WRITE
+（落盘当前预设）、54=MSP_CF_SERIAL_CONFIG / 55=MSP_SET_CF_SERIAL_CONFIG
+（串口配置，GET 单端口恒值、SET 整体忽略）、208=MSP_RESET_CONF /
+246=MSP_SET_RTC（显式 no-op 静音）。
+
 状态组载荷布局经外部源码核对（2026-11-12 GitHub 取 tag 4.5.1 的
 src/main/msp/msp.c L1080-1133 与 Configurator src/js/msp/MSPHelper.ts
 L841-903）：STATUS_EX 与固件写序逐字段一致；STATUS 应答 11 字节止于
@@ -39,12 +44,14 @@ profile（Configurator 解码器只读 11 字节即停、尾字节忽略——�
 load/gyroCycleTime/禁锁段共 24 字节，本表从简，差异记录于 Task 20 提交）。
 
 import 约定：除标准库外仅 import 根目录 osd.py（纯数据表模块，无渲染/
-UI 依赖）——OSD 元素表单一来源，handlers 与飞行页 OSD 渲染共用一份。
+UI 依赖）与 config_store（数据层；EEPROM_WRITE 落盘消费其 DRONES_DIR/
+save_preset——msp → config_store 方向允许，见设计依赖图）。
 """
 import struct
 from typing import Callable
 
 import osd
+from config_store import DRONES_DIR, save_preset
 
 # MSP_UID：Configurator MSPCodes.js 定义为 160（v1 惯例，已在线核对）
 MSP_UID = 160
@@ -575,6 +582,39 @@ def _set_text(payload: bytes, state: "dict | None" = None) -> bytes:
     return b""
 
 
+# ---- 固化组（Task 24） ----
+
+# CF_SERIAL_CONFIG 单端口应答（外部源码核对 2026-11-12：固件 4.5.1 msp.c
+# L1669-1681 MSP_CF_SERIAL_CONFIG 写序无 count 前导，Configurator
+# MSPHelper.ts L1703 按 bytesPerPort=1+2+1×4=7 解码——简报「8 字节」标注
+# 系笔误，count 前导属 MSP2_COMMON_SERIAL_CONFIG(0x1009) 形态）：
+# identifier 0 = UART1（固件 serial.h:81-99 portIdentifiers_e 首 Entry）；
+# functionMask u16 = 1 = MSP 位（serial.h:37 FUNCTION_MSP = 1<<0）；
+# 四个 baud 索引 5 = 115200（MSPHelper.ts BAUD_RATES 数组第 5 项）
+_SERIAL_CONFIG_PAYLOAD = struct.pack("<BHBBBB", 0, 1, 5, 5, 5, 5)
+assert len(_SERIAL_CONFIG_PAYLOAD) == 7
+
+
+def _eeprom_write(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_EEPROM_WRITE(250)：空载荷 ack + 落盘当前预设（save_preset 沿用
+    config_store 的 sanitize/schema 容错）。
+
+    落盘不置 changed（落盘非参数变更信号——dispatch 的 changed 语义是
+    「参数被写、飞行帧需 set_params」，保存动作本身不触发）。state 缺
+    params/preset_id 任一键（或 preset_id 空串）→ 只回 ack 不落盘。"""
+    params = (state or {}).get("params")
+    preset_id = (state or {}).get("preset_id")
+    if params is None or not preset_id:
+        return b""
+    save_preset(DRONES_DIR, preset_id, params)
+    return b""
+
+
+def _noop(payload: bytes, state: "dict | None" = None) -> bytes:
+    """显式 no-op：恒空载荷应答（连接序列杂音静音，见模块 docstring）。"""
+    return b""
+
+
 def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
     """命令表（身份组 + 状态组）：cmd → payload 载荷生成器。
 
@@ -641,4 +681,15 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         85: _set_osd_config,
         # 0x3007 MSP2_SET_TEXT：craft name 写入（[类型][长度][文本]）
         0x3007: _set_text,
+        # ---- 固化组（Task 24，保存/连接序列杂音） ----
+        # 54 MSP_CF_SERIAL_CONFIG：单端口 UART1 恒含 MSP 位（7 字节）
+        54: lambda _payload, _state=None: _SERIAL_CONFIG_PAYLOAD,
+        # 55 MSP_SET_CF_SERIAL_CONFIG：载荷整体忽略（UART1 恒含 MSP 位，
+        # Ports 页保存无法误关，设计 §8.3）
+        55: _noop,
+        # 208 MSP_RESET_CONF / 246 MSP_SET_RTC：显式 no-op 静音
+        208: _noop,
+        246: _noop,
+        # 250 MSP_EEPROM_WRITE：落盘当前预设（不置 changed）
+        250: _eeprom_write,
     }

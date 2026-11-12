@@ -139,7 +139,9 @@ class DroneParams:
         )
 
     def active_tune(self) -> TuneParams:
-        """当前生效调参域：virtual_fc=True → virtual.tune；False → 平铺字段快照"""
+        """当前生效调参域：virtual_fc=True → virtual.tune 本体（非拷贝——
+        MSP SET 路径为唯一合法写方，直接改返回值即改 virtual 域）；False →
+        平铺字段深拷贝快照（snapshot_tune，改快照不影响平铺字段）"""
         if self.virtual_fc:
             return self.virtual.tune
         return self.snapshot_tune()
@@ -257,9 +259,22 @@ class ConfigStore:
         return obj
 
     def save(self, name: str, obj):
+        """原子写：先写 <name>.json.tmp 再 os.replace 覆盖——写中途失败
+        （磁盘满/进程被杀）不损坏旧档，tmp 残留时清理后原样抛异常"""
         os.makedirs(self.config_dir, exist_ok=True)
-        with open(self._path(name), "w", encoding="utf-8") as f:
-            json.dump(dataclasses.asdict(obj), f, ensure_ascii=False, indent=2)
+        path = self._path(name)
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(dataclasses.asdict(obj), f, ensure_ascii=False,
+                          indent=2)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass            # tmp 未创建/已清理：无需处理
+            raise
 
 # ---- 预设存储函数集（二期多预设管理数据层：drones_dir = DRONES_DIR，每机一文件） ----
 # 六个函数全部经 ConfigStore(drones_dir) 复用 load/save：损坏备份 .bak 与
@@ -300,9 +315,11 @@ def save_preset(drones_dir: str, preset_id: str, params: DroneParams) -> None:
     ConfigStore(drones_dir).save(sanitize_preset_id(preset_id), params)
 
 def delete_preset(drones_dir: str, preset_id: str) -> None:
-    """删除预设文件；不存在静默返回"""
+    """删除预设文件；id 先 sanitize 兜底（与 save_preset 同一清洗，非法
+    id 永不逃逸出预设目录）；不存在静默返回"""
     try:
-        os.remove(os.path.join(drones_dir, f"{preset_id}.json"))
+        os.remove(os.path.join(
+            drones_dir, f"{sanitize_preset_id(preset_id)}.json"))
     except FileNotFoundError:
         pass
 
