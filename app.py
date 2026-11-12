@@ -9,7 +9,8 @@ from OpenGL.GL import glActiveTexture, GL_TEXTURE0
 import soup3D
 
 from config_store import (ConfigStore, Settings, DroneParams, RCConfig,
-                          default_drone_params, default_rc_config)
+                          DEFAULT_PRESET_ID, list_preset_ids, load_preset,
+                          save_preset, migrate_legacy_drone)
 from scene_loader import list_scenes
 from shaderpacks import runtime
 from shaderpacks.loader import load_pack
@@ -18,6 +19,9 @@ from input.keyboard import KeyboardInput
 from input.joystick import JoystickInput
 
 RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选
+
+# 预设目录（config_store 预设函数集的消费路径：每机一 json，见二期设计文档）
+DRONES_DIR = "config/drones"
 
 # 中文字体候选（spike 验证过的顺序）
 FONT_PATHS = [
@@ -44,7 +48,17 @@ class App:
     def __init__(self):
         self.store = ConfigStore("config")
         self.settings = self.store.load("settings", Settings)
-        self.drone_params = self.store.load("drone", DroneParams)
+        # 二期多预设接线（App 生命周期三步）：一期 drone.json 存量档先迁移为
+        # 默认机预设；预设目录空 → 自动建默认机；current_drone_id 失效（旧档
+        # "default"/预设被删）→ 回落列表第一台（下次 save_all 落盘）
+        migrate_legacy_drone("config")
+        ids = list_preset_ids(DRONES_DIR)
+        if not ids:
+            save_preset(DRONES_DIR, DEFAULT_PRESET_ID, DroneParams())
+            ids = [DEFAULT_PRESET_ID]
+        if self.settings.current_drone_id not in ids:
+            self.settings.current_drone_id = ids[0]
+        self.drone_params = load_preset(DRONES_DIR, self.settings.current_drone_id)
         self.rc_config = self.store.load("rc", RCConfig)
         self.scenes = list_scenes("scene")
         self.restart_needed = False   # 热重建失败的降级标记
@@ -347,7 +361,17 @@ class App:
         imgui.end()
         imgui.pop_style_color(1)
 
-    def save_all(self):
+    # ---- 多预设（二期：config/drones/<代号>.json，Task 5 UI 消费） ----
+    def select_drone(self, preset_id: str) -> None:
+        """切换当前机：加载预设为新 DroneParams 对象（参数页编辑对象随之换） +
+        current_drone_id 记忆即时落盘（仅 settings，整机参数由 save_all/save_preset）"""
+        self.drone_params = load_preset(DRONES_DIR, preset_id)
+        self.settings.current_drone_id = preset_id
         self.store.save("settings", self.settings)
-        self.store.save("drone", self.drone_params)
+
+    def save_all(self):
+        """退出/手动保存：settings + rc + 当前机预设（一期 store.save("drone")
+        路径至此退役；参数页保存按钮的旧路径 Task 5 移除）"""
+        self.store.save("settings", self.settings)
+        save_preset(DRONES_DIR, self.settings.current_drone_id, self.drone_params)
         self.store.save("rc", self.rc_config)
