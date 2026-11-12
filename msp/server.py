@@ -3,9 +3,12 @@
 
 线程模型（设计 §10，状态单线程访问）：
 - 每连接一个读线程：TCP/WS ``socket.settimeout(0.05)`` 循环 recv / PTY
-  ``select`` 超时轮询 ``os.read(master_fd)`` → ``CrcMspStreamParser.feed``
+  ``select`` 超时轮询 ``os.read(master_fd)`` → ``MspCliDemux.feed``
+  （Task 34 起 MSP/CLI 双模式分配；MSP 路径内部即
+  ``CrcMspStreamParser.feed``）
   → ``(发送器, 请求)`` 入队；读线程只读不写（除 dropped 计数聚合
-  int 自增 GIL 下原子，及 WS 例外：握手应答/pong/close 控制帧在线程内
+  int 自增 GIL 下原子，CLI 文本应答经 transport 锁内即时回写，及 WS
+  例外：握手应答/pong/close 控制帧在线程内
   回写，与主线程应答共用 per-transport 锁防交织）。
 - ``drain()`` 由主循环每帧调用（未启动直返）：非阻塞 accept 新连接 →
   取空请求队列 → 分派 ``handlers[cmd]`` → 应答 sendall/写 master；
@@ -27,8 +30,8 @@ import threading
 import tty
 from typing import Callable
 
-from msp.protocol import (CrcMspStreamParser, MspRequest, build_v1_frame,
-                          build_v2_frame)
+from msp.cli import MspCliDemux
+from msp.protocol import MspRequest, build_v1_frame, build_v2_frame
 from msp.websocket import (
     OP_BINARY,
     OP_CLOSE,
@@ -327,9 +330,14 @@ class VfcServer:
             self._on_change()
 
     def _tcp_reader(self, sock: socket.socket) -> None:
-        """TCP 读线程：超时循环 recv → parser → 入队（只读不写状态）"""
+        """TCP 读线程：超时循环 recv → demux → 入队（只读不写状态）。
+
+        Task 34：MSP/CLI 双模式经 ``MspCliDemux`` 分配——CLI 文本应答由
+        demux 经 transport 即时回写（读线程直发，静态内容无共享状态）。
+        """
         sock.settimeout(_RECV_TIMEOUT)
-        parser = CrcMspStreamParser()
+        transport = _Transport(sock=sock)
+        demux = MspCliDemux(transport.send)
         last_dropped = 0
         while not self._stopping.is_set():
             try:
@@ -340,21 +348,25 @@ class VfcServer:
                 break  # 连接关闭/出错
             if not chunk:
                 break  # 对端关闭
-            transport = _Transport(sock=sock)
-            for req in parser.feed(chunk):
-                self._queue.put((transport, req))
-            if parser.dropped_frames > last_dropped:
+            try:
+                for req in demux.feed(chunk):
+                    self._queue.put((transport, req))
+            except OSError:
+                break  # CLI 应答发送失败：对端已断（与 recv 出错同途退出）
+            if demux.dropped_frames > last_dropped:
                 # GIL 下 int 自增原子；读线程唯一的共享写（计数聚合）
-                self._dropped += parser.dropped_frames - last_dropped
-                last_dropped = parser.dropped_frames
+                self._dropped += demux.dropped_frames - last_dropped
+                last_dropped = demux.dropped_frames
         try:
             sock.close()  # 自清理；注册表残留由 stop/drain 兜底（close 幂等）
         except OSError:
             pass
 
     def _pty_reader(self, master_fd: int) -> None:
-        """PTY 读线程：select 超时轮询 master → parser → 入队"""
-        parser = CrcMspStreamParser()
+        """PTY 读线程：select 超时轮询 master → demux → 入队（Task 34
+        起 MSP/CLI 双模式分配，CLI 应答经 transport 即时写 master）"""
+        transport = _Transport(fd=master_fd)
+        demux = MspCliDemux(transport.send)
         last_dropped = 0
         while not self._stopping.is_set():
             r, _, _ = select.select([master_fd], [], [], _RECV_TIMEOUT)
@@ -366,12 +378,14 @@ class VfcServer:
                 break  # master 已关（stop）
             if not chunk:
                 break
-            transport = _Transport(fd=master_fd)
-            for req in parser.feed(chunk):
-                self._queue.put((transport, req))
-            if parser.dropped_frames > last_dropped:
-                self._dropped += parser.dropped_frames - last_dropped
-                last_dropped = parser.dropped_frames
+            try:
+                for req in demux.feed(chunk):
+                    self._queue.put((transport, req))
+            except OSError:
+                break  # CLI 应答写 master 失败：线路已断
+            if demux.dropped_frames > last_dropped:
+                self._dropped += demux.dropped_frames - last_dropped
+                last_dropped = demux.dropped_frames
 
     # ---- WebSocket 读线程（浏览器版 Configurator） ----
 
@@ -384,7 +398,7 @@ class VfcServer:
             self._ws_cleanup(sock)
             return
         transport = _Transport(sock=sock, ws=True)
-        parser = CrcMspStreamParser()
+        demux = MspCliDemux(transport.send)
         last_dropped = 0
         buf = bytearray(leftover)  # 客户端握手后立发的首帧字节
         closing = False
@@ -402,13 +416,18 @@ class VfcServer:
                 opcode, payload, consumed = frame
                 del buf[:consumed]
                 if opcode in (OP_BINARY, OP_CONT):
-                    # 二进制透传：MSP 流自身可跨帧分片，无需等 FIN 重组
-                    for req in parser.feed(payload):
-                        self._queue.put((transport, req))
-                    if parser.dropped_frames > last_dropped:
-                        self._dropped += (parser.dropped_frames
+                    # 二进制透传：MSP 流自身可跨帧分片，无需等 FIN 重组；
+                    # CLI 文本字节同途进 demux（Task 34，双模式分配）
+                    try:
+                        for req in demux.feed(payload):
+                            self._queue.put((transport, req))
+                    except OSError:
+                        closing = True  # CLI 应答发送失败：对端已断
+                        break
+                    if demux.dropped_frames > last_dropped:
+                        self._dropped += (demux.dropped_frames
                                           - last_dropped)
-                        last_dropped = parser.dropped_frames
+                        last_dropped = demux.dropped_frames
                 elif opcode == OP_PING:
                     self._ws_send(transport, build_pong(payload))
                 elif opcode == OP_CLOSE:

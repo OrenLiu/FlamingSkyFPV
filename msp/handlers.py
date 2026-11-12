@@ -178,8 +178,11 @@ _TEXT_TYPES: dict[int, bytes] = {
     11: b"",           # BATTERY_PROFILE_NAME
 }
 
-# 板名/构建自报（设计文档规定值；25 尾号预留扩展）
-_BOARD_NAME = b"FSKY"
+# 板名/固件版本/构建自报（设计文档规定值；25 尾号预留扩展）。Task 34 起
+# 为公开常量——msp/cli.py 的 CLI version 输出复用同一身份源（单一来源）
+BOARD_NAME = b"FSKY"
+FC_VERSION = b"4.5.1"
+FC_BUILD_INFO = b"FSKY sim build 2026-11-12 00:00:00 26"
 
 # UID 应答：12 字节固定值（三个 u32，模拟固定硬件 unique id；每次启动一致）
 _UID_PAYLOAD = struct.pack("<3I", 0x46534B59, 0x56464331, 0x32363131)
@@ -733,12 +736,12 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         # 2 MSP_FC_VARIANT：BTFL → Configurator 走 Betaflight 分支
         2: lambda _payload, _state=None: b"BTFL",
         # 3 MSP_FC_VERSION：固件版本 4.5.1
-        3: lambda _payload, _state=None: b"4.5.1",
+        3: lambda _payload, _state=None: FC_VERSION,
         # 4 MSP_BOARD_INFO：板名 + 板修订 0 + 标志 4 + 保留 8 字节
-        4: lambda _payload, _state=None: _BOARD_NAME + struct.pack("<H", 0)
+        4: lambda _payload, _state=None: BOARD_NAME + struct.pack("<H", 0)
                                          + bytes([4]) + b"\0" * 8,
         # 5 MSP_BUILD_INFO：构建来源字符串（日期 + 时间 + 修订尾号）
-        5: lambda _payload, _state=None: b"FSKY sim build 2026-11-12 00:00:00 26",
+        5: lambda _payload, _state=None: FC_BUILD_INFO,
         # 160 MSP_UID：12 字节固定 unique id
         MSP_UID: lambda _payload, _state=None: _UID_PAYLOAD,
         # 12294 MSP2_GET_TEXT：连接序列的 BUILDKEY/CRAFT_NAME/PILOT_NAME

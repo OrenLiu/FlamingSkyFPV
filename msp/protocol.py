@@ -123,11 +123,17 @@ class CrcMspStreamParser:
 
     坏帧（校验失败 / len 超限，v1 v2 同规则）丢弃并计入
     ``dropped_frames``，同时 resync 到缓冲中下一个 ``$``。
+
+    ``on_garbage``（Task 34，可选）：帧外丢弃字节（无 ``$`` 前导段/
+    未知前导/resync 丢弃段）原样交给回调——CLI 进入检测据此扫描帧外
+    ``#``（固件 msp.c evaluateOtherData 同构）；缺省 None 行为不变。
+    帧内字节（含载荷 0x23）永不进回调，MSP 解析路径零改动。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_garbage=None) -> None:
         self._buf = bytearray()
         self.dropped_frames = 0
+        self._on_garbage = on_garbage
 
     def feed(self, chunk: bytes) -> list[MspRequest]:
         """送入一段字节流，返回本轮完整解析出的请求列表。"""
@@ -138,15 +144,30 @@ class CrcMspStreamParser:
             pass
         return requests
 
+    def reset(self) -> None:
+        """清空重组缓冲（丢弃滞留半帧），保留 dropped_frames 计数。
+
+        Task 34：CLI 进入/退出共用——半帧残骸不得泄漏进切换后的模式。
+        """
+        self._buf.clear()
+
     # ---- 内部状态机 -------------------------------------------------
+
+    def _emit_garbage(self, data: bytes) -> None:
+        """帧外丢弃字节交回调（缺省无人接收，纯透传零行为差）"""
+        if self._on_garbage is not None:
+            self._on_garbage(data)
 
     def _parse_one(self, requests: list[MspRequest]) -> bool:
         """尝试从缓冲解析一帧。返回是否取得进展（可继续循环）。"""
         buf = self._buf
         start = buf.find(b"$")
         if start < 0:
+            self._emit_garbage(bytes(buf))
             buf.clear()  # 无 $ 前导的纯垃圾，直接丢弃（不计坏帧）
             return False
+        if start > 0:
+            self._emit_garbage(bytes(buf[:start]))  # $ 前垃圾字节
         del buf[:start]  # 丢弃 $ 前的垃圾字节
         if len(buf) < 2:
             return False  # 只有孤立的 $，等下一字节判定版本
@@ -154,7 +175,8 @@ class CrcMspStreamParser:
             return self._parse_v1(requests)
         if buf[1] == 0x58:  # 'X'
             return self._parse_v2(requests)
-        del buf[:1]  # 未知前导（$ 后非 M/X），跳过该 $ 继续找
+        self._emit_garbage(bytes(buf[:1]))  # 未知前导（$ 后非 M/X）
+        del buf[:1]  # 跳过该 $ 继续找
         return True
 
     def _parse_v1(self, requests: list[MspRequest]) -> bool:
@@ -228,6 +250,8 @@ class CrcMspStreamParser:
         """丢弃坏帧剩余部分：跳过当前 $，保留缓冲中下一个 $ 起的内容"""
         nxt = self._buf.find(b"$", 1)
         if nxt < 0:
+            self._emit_garbage(bytes(self._buf))
             self._buf.clear()
         else:
+            self._emit_garbage(bytes(self._buf[:nxt]))
             del self._buf[:nxt]
