@@ -37,6 +37,19 @@ virtual.craft_name → preset_id → FSKY-SIM 兜底）。
 （串口配置，GET 单端口恒值、SET 整体忽略）、208=MSP_RESET_CONF /
 246=MSP_SET_RTC（显式 no-op 静音）。
 
+RX 配置组（Task 33，接收机识别——Task 25 实测「连接遥控后地面站识别
+不到接收机」的对症组）：Receiver 页「Receiver Mode」下拉取值为
+MSP_FEATURE_CONFIG(36) u32 掩码中已置位的 rxMode 组功能位（空应答=全 0=
+None）；恒报 RX_MSP(bit14)|OSD(bit18)（固件 feature.h ↔ Configurator
+Features 位表互证；RX_MSP=「遥控经 MSP 注入」即虚拟飞控实况，OSD 位
+同时解锁侧边栏 OSD 页）。44=MSP_RX_CONFIG（38B，API 1.46；fpvCamAngle
+↔ 平铺 camera_angle_deg 真映射，其余固件默认参考值）、64=MSP_RX_MAP
+（恒 [0,1,2,3] AERT 固定接线）、50=MSP_RSSI_CONFIG（恒 0 无 RSSI 源）、
+125=MSP_RC_DEADBAND（固件默认只读）；37/45/51/65/218 SET 均诚实降级
+（45 仅消费 fpvCamAngle → camera_angle_deg）。MSP_RC(105) 通道序同步
+对齐固件内部序 [roll,pitch,yaw,throttle,AUX..]（Configurator 通道条
+标签固定 RPYT——Task 20 权宜序 [油门,yaw,roll,pitch] 废弃）。
+
 状态组载荷布局经外部源码核对（2026-11-12 GitHub 取 tag 4.5.1 的
 src/main/msp/msp.c L1080-1133 与 Configurator src/js/msp/MSPHelper.ts
 L841-903）：STATUS_EX 与固件写序逐字段一致；STATUS 应答 11 字节止于
@@ -70,6 +83,42 @@ _CYCLE_TIME_US = 500
 
 # MSP2_GET_TEXT（MSPCodes.ts MSP2_GET_TEXT = 0x3006；0x3007 为 SET_TEXT）
 MSP2_GET_TEXT = 0x3006
+
+# ---- RX 配置组常量（Task 33） ----
+# MSP_FEATURE_CONFIG 功能位（固件 4.5.1 config/feature.h ↔ Configurator
+# Features.js/ts 位表互证，2026-11-12 在线核对）：
+# FEATURE_RX_MSP = 1<<14——固件 rxInit 该位 → RX_PROVIDER_MSP（「遥控经
+# MSP 注入」），即虚拟飞控实况语义（模拟器输入系统注入通道、地面站经
+# MSP_RC 可读）；serialrx_provider 枚举无 MSP 类型（API 1.46 起
+# index0="NONE"），接收机识别看的是本功能位而非 provider 值。
+# FEATURE_OSD = 1<<18——侧边栏 OSD 页由该位门控（sidebar_items.js
+# `feature: "OSD"`），与 MSP_OSD_CONFIG osdFlags 恒报 0x31（含
+# FEATURE_OSD 位）自洽；掩码不置位时 OSD 页在 Configurator 隐藏
+_FEATURES_MASK = (1 << 14) | (1 << 18)
+
+# MSP_RX_CONFIG 只读参考值（固件 4.5.1 pg/rx.c pgResetFn_rxConfig 核对）：
+_RX_STICK_MIN = 1050     # mincheck（低位判定阈值 µs）
+_RX_STICK_CENTER = 1500  # midrc（RX_MID_USEC）
+_RX_STICK_MAX = 1900     # maxcheck（高位判定阈值 µs）
+_RX_MIN_USEC = 885       # rx 有效性窗口下限（CLI 文档经典默认；接收机
+_RX_MAX_USEC = 2115      #   判定不消费该字段，GitHub 限流未核 define 源）
+_RX_AIRMODE_US = 1250    # airModeActivateThreshold=25 的 MSP 线值（×10+1000）
+_RX_SMOOTH_AUTO_FACTOR = 30   # rc_smoothing_auto_factor_rpy 默认
+_RX_SMOOTH_MODE = 1      # rc_smoothing_mode 默认（1=自动平滑）
+
+# MSP_RX_MAP 恒值：rcmap[内部通道]=接收机物理通道号（固件 rx.c
+# rcChannelLetters="AERT12345678" + parseRcChannels/readRxChannels）。
+# 模拟器输入域固定接线 ch1=roll/2=pitch/3=yaw/4=throttle → 恒 [0,1,2,3]
+# （Configurator 显示 map 串 "AERT1234"）
+_RX_MAP_PAYLOAD = bytes([0, 1, 2, 3])
+
+# MSP_RSSI_CONFIG：rssi_channel=0（禁用——模拟器无 RSSI 源，诚实降级）
+_RSSI_CHANNEL_PAYLOAD = b"\x00"
+
+# MSP_RC_DEADBAND（固件 4.5.1 fc/rc_controls.c PG_RESET_TEMPLATE 核对）：
+# deadband/yaw_deadband 默认 0、alt_hold_deadband 默认 40；deadband3d_
+# throttle=0（模拟器无 3D 模式，诚实降级）
+_RC_DEADBAND_PAYLOAD = bytes([0, 0, 40]) + struct.pack("<H", 0)
 
 # ---- 参数读写组常量（Task 21，Configurator PID tab） ----
 # 仿真 D 标定域与 BF 展示域差百倍（config_store._default_pid 注释：存档/
@@ -241,13 +290,16 @@ def _raw_imu_payload(payload: bytes, state: "dict | None" = None) -> bytes:
 
 
 def _rc_payload(payload: bytes, state: "dict | None" = None) -> bytes:
-    """MSP_RC(105)：8×u16 µs = [油门, yaw, roll, pitch, AUX1..AUX4]
-    （通道序为本虚拟飞控的固定接线，语义标签由后续 RX_MAP 任务对齐）。
+    """MSP_RC(105)：8×u16 µs = [roll, pitch, yaw, throttle, AUX1..AUX4]
+    （Betaflight 内部通道序 rc_alias_e：ROLL=0/PITCH/YAW/THROTTLE/AUX1..，
+    固件 fc/rc_controls.h——Configurator 接收机页通道条标签固定
+    [Roll,Pitch,Yaw,Throttle]，Task 33 起按该序发送；RX_MAP 恒 [0,1,2,3]
+    AERT 接线与本序自洽）。
 
     stick_us 为快照 4 元组 (roll, pitch, yaw, throttle)（flight_snapshot
     文档序），缺省中位 1500；油门通道取 throttle 键换算 1000+v×1000
     （MSP 油门标度，非 stick_us[3] 的 1500±500 标度）；AUX 不足 4 个补
-    1500。无飞行快照 → 油门 1000、其余 1500。"""
+    1500。无飞行快照 → 摇杆三轴 1500、油门 1000。"""
     flight = (state or {}).get("flight") or {}
     sticks = flight.get("stick_us") or ()
     roll_us = sticks[0] if len(sticks) > 0 else 1500.0
@@ -256,7 +308,7 @@ def _rc_payload(payload: bytes, state: "dict | None" = None) -> bytes:
     throttle = flight.get("throttle") or 0.0
     aux = list(flight.get("aux_us") or ())[:4]
     aux += [1500.0] * (4 - len(aux))
-    channels = [1000.0 + throttle * 1000.0, yaw_us, roll_us, pitch_us, *aux]
+    channels = [roll_us, pitch_us, yaw_us, 1000.0 + throttle * 1000.0, *aux]
     return struct.pack("<8H", *(_u16(v) for v in channels))
 
 
@@ -615,6 +667,55 @@ def _noop(payload: bytes, state: "dict | None" = None) -> bytes:
     return b""
 
 
+# ---- RX 配置组（Task 33） ----
+
+def _rx_config_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_RX_CONFIG(44)：38 字节（API 1.46 布局：固件 4.5.1 msp.c L1583
+    写序 ↔ Configurator MSPHelper 解码逐字段互证；自报 API 1.46 → 不写
+    1.47 分支的 throttle/autoFactor 双字节与 elrsModelId 尾字节）。
+
+    布局：provider u8=0(NONE)/maxcheck u16/midrc u16/mincheck u16/
+    sat_bind u8/rx_min-max_usec u16×2/2 pad/airMode 线值 u16/rxSpi 段
+    (u8+u32+u8) 恒 0/fpvCamAngle u8/其后 7 零字节（2 pad + setpoint/
+    ff cutoff 恒 0 + 2 pad + usbCdcHidType=0）/auto_factor u8/
+    smoothing_mode u8/elrsUid 6B。
+
+    provider=NONE 诚实（模拟器无串口接收机——识别走 FEATURE_RX_MSP 位，
+    且 provider 下拉仅 RX_SERIAL 开启时显示）；stick 阈值等只读参考值取
+    固件默认（仿真无对应，SET 忽略）；**fpvCamAngleDegrees ← 平铺
+    params.camera_angle_deg 真映射**（Receiver 页摄像头角度滑杆，飞行
+    视景直接消费平铺字段——与 tune 域无关）。无参数源 → 空载荷降级。"""
+    params = (state or {}).get("params")
+    if params is None:
+        return b""
+    return (struct.pack(
+                "<BHHHBHH", 0, _RX_STICK_MAX, _RX_STICK_CENTER,
+                _RX_STICK_MIN, 0, _RX_MIN_USEC, _RX_MAX_USEC)
+            + b"\x00\x00" + struct.pack("<H", _RX_AIRMODE_US)
+            + struct.pack("<BIB", 0, 0, 0)          # rxSpi proto/id/count
+            + bytes([_u8(params.camera_angle_deg)])  # fpvCamAngleDegrees
+            + b"\x00" * 7                            # 2 pad + setpoint/ff cutoff + 2 pad + HidType
+            + bytes([_RX_SMOOTH_AUTO_FACTOR, _RX_SMOOTH_MODE])
+            + b"\x00" * 6)                           # elrsUid
+
+
+def _set_rx_config(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_SET_RX_CONFIG(45)：Configurator crunch 发 GET 同款 38 字节；
+    len≥23 消费（fpvCamAngleDegrees 在 offset 22——固件 msp.c 同位读）。
+
+    仅取 fpvCamAngle u8 → 平铺 params.camera_angle_deg（真映射，置
+    changed 经 set_params 即时生效于飞行视景）；provider/stick 阈值/
+    smoothing 等字段忽略（仿真无对应域，GET 报参考值——诚实降级）。"""
+    if state is None or len(payload) < 23:
+        return b""
+    params = state.get("params")
+    if params is None:
+        return b""
+    params.camera_angle_deg = float(payload[22])
+    _set_changed(state)
+    return b""
+
+
 def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
     """命令表（身份组 + 状态组）：cmd → payload 载荷生成器。
 
@@ -649,7 +750,7 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         150: lambda _payload, state=None: _status_payload(state, extended=True),
         # 102 MSP_RAW_IMU：acc 静态 1g + gyro dps×4.1 + mag 0
         102: _raw_imu_payload,
-        # 105 MSP_RC：[油门, yaw, roll, pitch, AUX1-4] µs
+        # 105 MSP_RC：[roll, pitch, yaw, throttle, AUX1-4] µs（内部通道序）
         105: _rc_payload,
         # 108 MSP_ATTITUDE：姿态角 decidegree
         108: _attitude_payload,
@@ -692,4 +793,26 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         246: _noop,
         # 250 MSP_EEPROM_WRITE：落盘当前预设（不置 changed）
         250: _eeprom_write,
+        # ---- RX 配置组（Task 33，接收机识别） ----
+        # 36 MSP_FEATURE_CONFIG：u32 掩码 = RX_MSP(bit14)|OSD(bit18)——
+        # Receiver Mode 下拉据此识别「MSP RX Input」（空应答=全 0=None）
+        36: lambda _payload, _state=None: struct.pack("<I", _FEATURES_MASK),
+        # 37 MSP_SET_FEATURE_CONFIG：整体忽略（功能位恒值——接收链路/
+        # OSD 为模拟器固有，与 SET_CF_SERIAL_CONFIG 同款诚实降级）
+        37: _noop,
+        # 44 MSP_RX_CONFIG / 45 MSP_SET_RX_CONFIG：38B；fpvCamAngle ↔
+        # 平铺 camera_angle_deg 真映射，其余参考值/忽略
+        44: _rx_config_payload,
+        45: _set_rx_config,
+        # 50 MSP_RSSI_CONFIG / 51 MSP_SET_RSSI_CONFIG：恒 0（无 RSSI 源）
+        50: lambda _payload, _state=None: _RSSI_CHANNEL_PAYLOAD,
+        51: _noop,
+        # 64 MSP_RX_MAP / 65 MSP_SET_RX_MAP：恒 [0,1,2,3]（模拟器输入域
+        # 固定接线 AERT；改 map 不改模拟器接线，SET 忽略）
+        64: lambda _payload, _state=None: _RX_MAP_PAYLOAD,
+        65: _noop,
+        # 125 MSP_RC_DEADBAND / 218 MSP_SET_RC_DEADBAND：固件默认值只读
+        # （仿真无死区域，SET 忽略）
+        125: lambda _payload, _state=None: _RC_DEADBAND_PAYLOAD,
+        218: _noop,
     }
