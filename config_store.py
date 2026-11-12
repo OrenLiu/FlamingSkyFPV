@@ -235,3 +235,64 @@ class ConfigStore:
         os.makedirs(self.config_dir, exist_ok=True)
         with open(self._path(name), "w", encoding="utf-8") as f:
             json.dump(dataclasses.asdict(obj), f, ensure_ascii=False, indent=2)
+
+# ---- 预设存储函数集（二期多预设管理数据层：drones_dir = "config/drones"，每机一文件） ----
+# 六个函数全部经 ConfigStore(drones_dir) 复用 load/save：损坏备份 .bak 与
+# params_schema 三档迁移自动继承，无需各自重写容错逻辑
+
+def sanitize_preset_id(name: str) -> str:
+    """预设 id 清洗：strip；"/" "\\" 与控制字符（ord<32）替换 "_"；空 → "default" """
+    cleaned = "".join("_" if ch in ("/", "\\") or ord(ch) < 32 else ch
+                      for ch in name.strip())
+    return cleaned or "default"
+
+def list_preset_ids(drones_dir: str) -> list[str]:
+    """预设目录枚举：.json 文件名去后缀 sorted 返回；目录不存在 → []
+    （.bak 以 .bak 结尾不匹配 .json 后缀，天然不入列表）"""
+    try:
+        names = os.listdir(drones_dir)
+    except OSError:
+        return []
+    return sorted(name[:-len(".json")] for name in names if name.endswith(".json"))
+
+def load_preset(drones_dir: str, preset_id: str) -> DroneParams:
+    """读取预设为 DroneParams（无文件 → 默认；损坏 → 备份 .bak 回默认；
+    旧 schema → 迁移；均由 ConfigStore.load 继承）"""
+    return ConfigStore(drones_dir).load(preset_id, DroneParams)
+
+def save_preset(drones_dir: str, preset_id: str, params: DroneParams) -> None:
+    """落盘预设；id 先 sanitize 兜底（非法字符/空名不产生坏路径）"""
+    ConfigStore(drones_dir).save(sanitize_preset_id(preset_id), params)
+
+def delete_preset(drones_dir: str, preset_id: str) -> None:
+    """删除预设文件；不存在静默返回"""
+    try:
+        os.remove(os.path.join(drones_dir, f"{preset_id}.json"))
+    except FileNotFoundError:
+        pass
+
+def copy_preset(drones_dir: str, src_id: str, new_name: str) -> str:
+    """复制预设：new_name sanitize 后为目标 id，已存在则追加 -2/-3 序号至空闲。
+    深拷贝语义由 save 的 asdict 序列化天然保证（load→save 后两预设互不影响）"""
+    params = load_preset(drones_dir, src_id)
+    base = sanitize_preset_id(new_name)
+    existing = set(list_preset_ids(drones_dir))
+    new_id, n = base, 2
+    while new_id in existing:
+        new_id = f"{base}-{n}"
+        n += 1
+    ConfigStore(drones_dir).save(new_id, params)
+    return new_id
+
+def migrate_legacy_drone(config_dir: str) -> None:
+    """一期存量档迁移：<config_dir>/drone.json 存在且 drones/默认机.json 不存在
+    → 逐字深拷贝为默认机预设 + 旧档改名 drone.json.migrated 归档；否则不操作
+    （幂等：二次调用时旧档已不在，默认机参数不被覆盖）"""
+    legacy = os.path.join(config_dir, "drone.json")
+    drones_dir = os.path.join(config_dir, "drones")
+    target = os.path.join(drones_dir, "默认机.json")
+    if not os.path.exists(legacy) or os.path.exists(target):
+        return
+    os.makedirs(drones_dir, exist_ok=True)
+    shutil.copy2(legacy, target)
+    os.replace(legacy, legacy + ".migrated")
