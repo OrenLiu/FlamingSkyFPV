@@ -27,7 +27,8 @@ import threading
 import tty
 from typing import Callable
 
-from msp.protocol import CrcMspStreamParser, MspRequest, build_v1_frame
+from msp.protocol import (CrcMspStreamParser, MspRequest, build_v1_frame,
+                          build_v2_frame)
 from msp.websocket import (
     OP_BINARY,
     OP_CLOSE,
@@ -269,7 +270,8 @@ class VfcServer:
     # ---- 内部：分派与读线程 ----
 
     def _dispatch(self, transport: _Transport, req: MspRequest) -> None:
-        """单条请求分派：handler 缺席/抛错 → 空载荷应答（不断连不崩主循环）"""
+        """单条请求分派：handler 缺席/抛错 → 空载荷应答（不断连不崩主循环）；
+        应答按请求协议版本包帧（v1 请求→v1 帧，v2 请求→v2 帧）"""
         handler = self._handlers.get(req.cmd)
         if handler is None:
             print(f"[msp] 未实现命令 {req.cmd}，空载荷应答", file=sys.stderr)
@@ -280,8 +282,10 @@ class VfcServer:
             except Exception as e:  # handler 故障不得中断主循环
                 print(f"[msp] 命令 {req.cmd} handler 异常：{e}", file=sys.stderr)
                 payload = b""
+        frame = (build_v2_frame(">", req.cmd, payload) if req.v2
+                 else build_v1_frame(">", req.cmd, payload))
         try:
-            transport.send(build_v1_frame(">", req.cmd, payload))
+            transport.send(frame)
         except OSError as e:
             # 对端已断：清死连接（读线程随后 recv 出错自行退出）
             print(f"[msp] 应答发送失败，清理连接：{e}", file=sys.stderr)

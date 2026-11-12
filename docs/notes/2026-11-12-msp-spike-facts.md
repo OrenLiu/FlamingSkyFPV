@@ -56,4 +56,13 @@
 - **v1 cmd 为 u8**：Configurator `code <= 254 ? encode_message_v1 : encode_message_v2`（msp.ts:484）——命令号 >254 一律走 v2。
 - 权威源：Configurator master `src/js/msp.ts`（encode_message_v1 / encode_message_v2 / 解码器 BYTE_HANDLERS 全状态机，2026-11-12 抓取核对）；msp.js 已在 master 拆分为 msp.ts + msp/ 目录（MSPCodes.ts、MSPHelper.ts、mspBytes.ts 等）。
 - 浏览器实发 MSP_API_VERSION 请求字节：`24 4D 3C 00 01 01`（6 字节）。
-- 重试语义：请求超时 500ms × MAX_RETRIES 重发同一 buffer（用户日志 "MSP: data request timed-out: 1" ×2 即两次重发均石沉大海后断开）。
+- 重试语义：请求超时 TIMEOUT=1000ms × MAX_RETRIES=3 重发同一 buffer（msp.ts constants；用户日志 "MSP: data request timed-out" 为重试日志）。
+
+## 7. 附录（Task 18 fix round 3，2026-11-12）：MSPv2 与连接序列权威事实
+
+浏览器重测确认 v1 身份组打通（握手链 1/2/3/4/5/160 全部成功）后，连接收尾卡在 v2 命令。已修复并提交（见 task-18-report.md）：
+
+- **MSPv2 线格式（双向）**：`$X dir flag(u8) cmd(u16LE) len(u16LE) payload crc8`——**len 是 u16LE 不是 u24**（encode_message_v2 与解码器 PAYLOAD_LENGTH_V2_LOW/HIGH 两态一致；任务早期 u24 读法系误记）。crc8-DWD-SID86 覆盖 flag+cmd+len+payload（不含 `$X`/dir）。v2 无 jumbo。
+- **12294 = MSP2_GET_TEXT（0x3006），不是 BUILD_KEY**——MSPCodes.ts 无 BUILD_KEY 命令；build key / craft name / pilot name 都是 MSP2_GET_TEXT 的类型字节区分（MSP2TextType：PILOT_NAME=1、CRAFT_NAME=2、PID_PROFILE_NAME=3、RATE_PROFILE_NAME=4、BUILDKEY=5、RELEASENAME=6、BATTERY_PROFILE_NAME=11）。请求 payload=[类型 u8]，应答 payload=[类型 u8]+文本。
+- **连接序列全貌**（serial_backend.ts）：身份组 → MSP_UID(160) → MSP2_GET_TEXT[BUILDKEY=5] → MSP2_GET_TEXT[CRAFT_NAME=2] → MSP2_GET_TEXT[PILOT_NAME=1] → disableArming → MSP_SET_RTC → finishOpen（connectionValid=true，Setup 页完成）。BUILDKEY 应答非 32 字长则跳过云构建选项拉取。
+- **v2 必答**：v2 请求被静默丢弃（旧策略）会被 Configurator 判超时（"stopped responding"）断开——修复后 v2 解析入队、应答按请求版本包 v2 帧、未知 v2 命令空载荷降级。

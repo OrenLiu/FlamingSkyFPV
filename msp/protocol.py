@@ -15,9 +15,17 @@ MSPv1 真实线格式（权威源：Configurator master ``src/js/msp.ts``
 - v1 的 cmd 为 u8：命令号 >254 时 Configurator 走 v2
   （``code <= 254 ? encode_message_v1 : encode_message_v2``）
 
-MSPv2 识别丢弃：``$X dir flag cmd(u16LE) len(u24LE) payload crc`` 读出长度后
-整帧跳过、不计坏帧——应答恒走 v1（API_VERSION 的 mspProtocolVersion=0
-引导 Configurator 用 v1）。
+MSPv2（fix round 3 起解析并应答，替代旧的"识别后整帧丢弃"策略）：
+
+``$X dir flag(u8) cmd(u16LE) len(u16LE) payload crc8``
+
+- crc8 = CRC-8-DWD-SID86，覆盖 flag + cmd + len + payload（不含
+  ``$X`` 前导与 dir，对齐 ``encode_message_v2`` 的
+  ``crc8_dvb_s2_data(bufView, 3, end)``）
+- len 为 **u16LE**（Configurator 编解码器各状态机一致；任务早期按
+  u24 读系误记，弃用）
+- 连接序列中的 ``MSP2_GET_TEXT(0x3006=12294)`` 走本格式（v2 命令
+  >254），无应答会被 Configurator 判超时断开——v2 必须应答
 
 > 布局勘误（fix round 2，Task 18 浏览器实测）：本模块曾实现
 > ``len/cmd 均 u16 + CRC8`` 的变体，浏览器实发的 6 字节
@@ -31,7 +39,7 @@ import struct
 from dataclasses import dataclass
 
 # v1 payload 上限：超限视为坏帧丢弃并计数（真实 jumbo 上限 65535，
-# Configurator 实际请求远小于此，4096 为防滥用上限）
+# Configurator 实际请求远小于此，4096 为防滥用上限；v2 同限）
 MSP_V1_MAX_PAYLOAD = 4096
 
 # jumbo 标记：len 字节 0xFF 表示真实长度在 cmd 后的 u16LE
@@ -40,15 +48,20 @@ _JUMBO_MARKER = 0xFF
 # 头部长度（字节）：$M + dir + len(u8) + cmd(u8)；jumbo 头再加 u16
 _V1_HEADER_LEN = 2 + 1 + 1 + 1
 _V1_JUMBO_HEADER_LEN = _V1_HEADER_LEN + 2
-_V2_HEADER_LEN = 2 + 1 + 1 + 2 + 3  # $X + dir + flag + cmd(u16) + len(u24)
+_V2_HEADER_LEN = 2 + 1 + 1 + 2 + 2  # $X + dir + flag + cmd(u16) + len(u16)
 
 
 @dataclass
 class MspRequest:
-    """一条解析出的 MSP 请求（direction "<" 主机→FC / ">" FC 侧帧）"""
+    """一条解析出的 MSP 请求（direction "<" 主机→FC / ">" FC 侧帧）。
+
+    ``v2`` 标记请求来自 MSPv2 帧（应答须按 ``build_v2_frame`` 包帧）；
+    默认 False 兼容既有 v1 调用点。
+    """
     direction: str
     cmd: int
     payload: bytes
+    v2: bool = False
 
 
 def crc8(data: bytes, crc: int = 0) -> int:
@@ -90,14 +103,26 @@ def build_v1_frame(direction: str, cmd: int, payload: bytes) -> bytes:
     return head + payload + bytes([checksum & 0xFF])
 
 
+def build_v2_frame(direction: str, cmd: int, payload: bytes,
+                   flag: int = 0) -> bytes:
+    """构造 MSPv2 帧：``$X dir flag(u8) cmd(u16LE) len(u16LE) payload
+    crc8``。crc8 覆盖 flag+cmd+len+payload（不含前导与 dir）。"""
+    if not 0 <= cmd <= 0xFFFF:
+        raise ValueError(f"v2 命令号须 u16 域（0-65535）：{cmd}")
+    if len(payload) > 0xFFFF:
+        raise ValueError(f"v2 载荷超 u16 长度域：{len(payload)}")
+    body = struct.pack("<BHH", flag, cmd, len(payload)) + payload
+    return (b"$X" + direction.encode("ascii") + body
+            + bytes([crc8(body)]))
+
+
 class CrcMspStreamParser:
     """跨 feed 分段重组的 MSP 流式解析器（bytearray 状态机）。
 
     类名中的 Crc 为 Task 15 接口历史命名（v1 实为 XOR 校验和）。
 
-    坏帧（校验失败 / v1 len 超限）丢弃并计入 ``dropped_frames``，
-    同时 resync 到缓冲中下一个 ``$``；MSPv2 帧识别长度后整帧丢弃、
-    不计坏帧。
+    坏帧（校验失败 / len 超限，v1 v2 同规则）丢弃并计入
+    ``dropped_frames``，同时 resync 到缓冲中下一个 ``$``。
     """
 
     def __init__(self) -> None:
@@ -128,7 +153,7 @@ class CrcMspStreamParser:
         if buf[1] == 0x4D:  # 'M'
             return self._parse_v1(requests)
         if buf[1] == 0x58:  # 'X'
-            return self._parse_v2()
+            return self._parse_v2(requests)
         del buf[:1]  # 未知前导（$ 后非 M/X），跳过该 $ 继续找
         return True
 
@@ -170,15 +195,32 @@ class CrcMspStreamParser:
         del buf[:total]
         return True
 
-    def _parse_v2(self) -> bool:
-        # MSPv2：识别长度后整帧丢弃，不计坏帧（应答恒走 v1）
+    def _parse_v2(self, requests: list[MspRequest]) -> bool:
+        """MSPv2 帧解析（fix round 3：由丢弃改为解析入队）：
+        ``$X dir flag cmd(u16LE) len(u16LE) payload crc8``，
+        crc8 覆盖 flag+cmd+len+payload。"""
         buf = self._buf
         if len(buf) < _V2_HEADER_LEN:
-            return False
-        plen = buf[6] | (buf[7] << 8) | (buf[8] << 16)
+            return False  # 头部未收全
+        plen = buf[6] | (buf[7] << 8)
+        if plen > MSP_V1_MAX_PAYLOAD:
+            self.dropped_frames += 1
+            self._resync()
+            return True
         total = _V2_HEADER_LEN + plen + 1
         if len(buf) < total:
-            return False
+            return False  # 等 payload + crc 收全
+        # crc8 覆盖 flag+cmd+len+payload：即 buf[3] 起至 payload 末
+        if crc8(bytes(buf[3:_V2_HEADER_LEN + plen])) != buf[total - 1]:
+            self.dropped_frames += 1
+            self._resync()
+            return True
+        requests.append(MspRequest(
+            direction=chr(buf[2]),
+            cmd=buf[4] | (buf[5] << 8),
+            payload=bytes(buf[_V2_HEADER_LEN:_V2_HEADER_LEN + plen]),
+            v2=True,
+        ))
         del buf[:total]
         return True
 
