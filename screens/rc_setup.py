@@ -9,16 +9,17 @@ from input.wizard import AxisCapture, MODE_STICKS, DIRECTION, channel_inverted
 CHANNELS = ["throttle", "yaw", "roll", "pitch"]
 CHANNEL_CN = {"throttle": "油门", "yaw": "偏航", "roll": "横滚", "pitch": "俯仰"}
 
+AUX_KEYS = ("aux1", "aux2", "aux3", "aux4")
+AUX_KINDS = ["none", "button", "axis3"]   # AuxBinding.kind 取值（与 config_store 对应）
+AUX_KIND_CN = {"none": "未绑定", "button": "手柄按钮", "axis3": "手柄轴三段"}
+# 键盘模式 AUX 拨动键提示（input/keyboard.py 的 F1/F2/F4 键位）
+AUX_KEYBOARD_HINT = "键盘模式 AUX 拨动键：F1 解锁 / F2 自稳 / F4 反乌龟"
+
 def joystick_devices():
     """枚举当前手柄 [(index, name)]"""
     pygame.joystick.init()
     return [(i, pygame.joystick.Joystick(i).get_name())
             for i in range(pygame.joystick.get_count())]
-
-def _preview_channels(app, dt: float = 0.0) -> tuple:
-    """读当前 RCInput 四通道值（主界面预览条用）；dt 推进键盘油门积分器"""
-    ch = app.rc_input.read(dt)
-    return (ch.throttle, ch.yaw, ch.roll, ch.pitch)
 
 def _bar(label, value, lo, hi):
     """通道预览条"""
@@ -55,6 +56,9 @@ class RCSetupScreen(Screen):
         imgui.set_next_window_size(560, 0)
         imgui.begin("遥控通道设置", flags=imgui.WINDOW_NO_COLLAPSE)
 
+        # 每帧只读一次输入（AUX 行与预览区共用）：KeyboardInput.read 有油门积分
+        # 副作用，多处各调一次会把油门加速 N 倍
+        ch = self.app.rc_input.read(self._dt)
         mode = self.app.rc_config.mode
         imgui.text(f"当前模式: {'手柄' if mode == 'joystick' else '键盘（兜底）'}")
         if getattr(self.app, "joystick_lost", False):
@@ -68,6 +72,7 @@ class RCSetupScreen(Screen):
         joy = self._safe_joystick()
         if joy is None:
             imgui.text("未检测到手柄（插入后自动出现）")
+            imgui.text(AUX_KEYBOARD_HINT)   # 键盘模式 AUX 区替换为键位提示
             # 无手柄：向导按钮保持不可用（裸按钮，无点击分支）
             imgui.button("启动配置向导", 180, 40)
         else:
@@ -82,6 +87,16 @@ class RCSetupScreen(Screen):
                 _, b.axis = imgui.slider_int(f"{CHANNEL_CN[c]} 轴",
                                              b.axis, -1, axis_count - 1)
                 _, b.inverted = imgui.checkbox(f"{CHANNEL_CN[c]} 反向", b.inverted)
+
+            imgui.separator()
+            imgui.text("AUX 开关绑定（模式开关等）")
+            if mode != "joystick":
+                # 插着手柄但当前仍键盘模式：键盘拨动键仍生效，键位提示一并给出
+                imgui.text(AUX_KEYBOARD_HINT)
+            n_btn = joy.get_numbuttons()
+            for i, key in enumerate(AUX_KEYS, start=1):
+                self._render_aux_row(i, key, n_btn, axis_count, ch)
+
             if imgui.button("应用并保存", 180, 40):
                 self.app.rc_config.mode = "joystick"
                 self.app.rc_config.device_name = devs[self._dev_index][1]
@@ -95,11 +110,10 @@ class RCSetupScreen(Screen):
 
         imgui.separator()
         imgui.text("通道实时预览")
-        t, y, r, p = _preview_channels(self.app, self._dt)
-        _bar("油门", t, 0, 1)
-        _bar("偏航", y, -1, 1)
-        _bar("横滚", r, -1, 1)
-        _bar("俯仰", p, -1, 1)
+        _bar("油门", ch.throttle, 0, 1)
+        _bar("偏航", ch.yaw, -1, 1)
+        _bar("横滚", ch.roll, -1, 1)
+        _bar("俯仰", ch.pitch, -1, 1)
         if self._msg:
             imgui.text(self._msg)
         if imgui.button("返回主菜单", 180, 40):
@@ -117,13 +131,44 @@ class RCSetupScreen(Screen):
         except pygame.error:
             return None
 
+    def _render_aux_row(self, i: int, key: str, n_btn: int, n_axis: int, ch):
+        """单行 AUX 绑定：kind 下拉 + 编号滑条 + 实时预览条（读当帧缓存的 ch）"""
+        b = self.app.rc_config.mappings[key]   # AuxBinding（kind/index）
+        imgui.push_id(key)   # 四行同标签「类型/编号」，须隔离 ID 防状态串扰
+        kind_idx = AUX_KINDS.index(b.kind) if b.kind in AUX_KINDS else 0   # 坏值按未绑定
+        imgui.set_next_item_width(120)
+        changed, picked = imgui.combo("类型", kind_idx,
+                                      [AUX_KIND_CN[k] for k in AUX_KINDS])
+        if changed:
+            b.kind = AUX_KINDS[picked]
+            b.index = -1 if b.kind == "none" else 0   # 换类型重置编号，防 -1 残留
+        imgui.same_line()
+        if b.kind != "none":
+            n = n_btn if b.kind == "button" else n_axis
+            if n <= 0:
+                imgui.text("（设备无按钮）" if b.kind == "button" else "（设备无轴）")
+            else:
+                b.index = min(max(b.index, 0), n - 1)   # 换设备后编号越界自愈
+                imgui.set_next_item_width(140)
+                _, b.index = imgui.slider_int("编号", b.index, 0, n - 1)
+        imgui.same_line()
+        imgui.text(f"AUX{i}")
+        imgui.same_line()
+        # 预览条：aux ∈ {-1,0,1} → fraction ∈ [0,1]（同 _bar 手法）
+        imgui.progress_bar((ch.aux[i - 1] + 1.0) / 2.0)
+        imgui.pop_id()
+
     def _make_joystick_input(self):
         joy = self._safe_joystick()
         if joy is None:
             # 同帧拔柄的极小概率兜底：回落键盘，避免 rc_input 悬空（同 App 层策略）
             from input.keyboard import KeyboardInput
             return KeyboardInput()
-        return JoystickInput(joy.get_axis, self.app.rc_config.mappings)
+        # AUX 按钮源 + 轴数必须传入（同 App._make_rc_input），旧两参构造下
+        # button 绑定的 AUX 求值恒 0、无越界防御
+        return JoystickInput(joy.get_axis, self.app.rc_config.mappings,
+                             get_button_fn=joy.get_button,
+                             num_axes=joy.get_numaxes())
 
     def _render_wizard(self):
         wz = self._wizard
