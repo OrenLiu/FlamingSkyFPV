@@ -26,6 +26,9 @@ class FlightScreen(Screen):
         self._fc = None
         self._paused = False
         self._esc_open = False
+        self._flight_time_s = 0.0   # 飞行计时（MSP 快照/OSD 消费，暂停不累计）
+        self._aux_us = []           # 本帧 AUX µs 缓存（快照消费；非 virtual_fc 恒空）
+        self._boxes = frozenset()   # 本帧激活模式 box 缓存（同上）
 
     def exit(self):
         self._teardown_scene()      # 离开飞行必须清理 GL 与物理资源
@@ -174,6 +177,38 @@ class FlightScreen(Screen):
             self._paused = self._esc_open
 
     # ---- 每帧 ----
+    def flight_snapshot(self) -> "dict | None":
+        """MSP 状态源飞行遥测快照（Task 19）：flying 未暂停且世界/飞控/杆量
+        在位时返回，其余态返回 None（App._msp_state 消费）。字段：
+        armed=飞控解锁态；boxes/aux_us=本帧模式求值结果（update 缓存）；
+        stick_us 顺序 (roll, pitch, yaw, throttle)，全通道 1500 中心 ±500
+        （throttle∈[0,1] 映射 1500-2000，MSP 线上格式由 handler 换算）；
+        attitude_deg 为 bullet 语义 world.euler_deg（roll右/pitch抬头/yaw右），
+        非杆义 euler_stick_deg；vario_mps 取 velocity[2]（正=上升）。"""
+        if (self.stage != "flying" or self._paused
+                or self._world is None or self._fc is None):
+            return None
+        ch = getattr(self, "_ch", None)
+        if ch is None:
+            return None   # update 尚未求值杆量（进入 flying 的首帧边缘）
+        v = self._world.velocity
+        return {
+            "armed": self._fc.armed,
+            "boxes": self._boxes,
+            "aux_us": list(self._aux_us),
+            "stick_us": (1500.0 + ch.roll * 500.0,
+                         1500.0 + ch.pitch * 500.0,
+                         1500.0 + ch.yaw * 500.0,
+                         1500.0 + ch.throttle * 500.0),
+            "throttle": ch.throttle,
+            "attitude_deg": self._world.euler_deg,
+            "gyro_dps": self._world.gyro_dps,
+            "speed_mps": math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]),
+            "alt_m": self._world.pos[2],
+            "vario_mps": v[2],
+            "flight_time_s": self._flight_time_s,
+        }
+
     def update(self, dt: float):
         if self.stage == "loading":
             try:
@@ -189,13 +224,22 @@ class FlightScreen(Screen):
         # 2 秒巨型物理步会使机体穿透地面平面坠入世界下方（bullet 平面碰撞单面）。
         # 物理步长钳位到 33ms（仿真常规做法；不动 PID/物理参数）。
         dt = min(dt, 1.0 / 30.0)
+        self._flight_time_s += dt   # 与物理同步（同钳位后 dt）
         ch = self.app.rc_input.read(dt)
         if self.app.drone_params.virtual_fc:
+            # MSP SET 写参数即时生效（Task 19）：地面站写参数 → on_change 置
+            # 脏标志 → 此处帧首重建飞控参数（set_params 语义：重建即回锁定态，
+            # 与参数页「保存应用」一致）
+            if self.app.msp_params_dirty:
+                self._fc.set_params(self.app.drone_params)
+                self.app.msp_params_dirty = False
             # 虚拟飞控接线（Task 14）：aux [-1,1] → µs（1500 中位 ±500）、
             # mode_ranges 求值激活 box 集、杆义姿态角随帧传递（自稳外环/反乌龟
             # 倒置检测消费）。无 ARM box 配置时 eval_boxes 恒空 → 永不解锁（零推）
             aux_us = [1500.0 + v * 500.0 for v in ch.aux]
             boxes = eval_boxes(self.app.drone_params.virtual.mode_ranges, aux_us)
+            self._aux_us = aux_us    # 快照缓存（flight_snapshot 消费）
+            self._boxes = boxes
             motors = self._fc.update(ch, self._world.gyro_dps, dt,
                                      aux_us=aux_us, boxes=boxes,
                                      angles_deg=self._world.euler_stick_deg)

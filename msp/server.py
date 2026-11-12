@@ -76,10 +76,20 @@ class _Transport:
 
 
 class VfcServer:
-    """虚拟飞控 MSP 服务器骨架：双传输 + 身份组命令分派"""
+    """虚拟飞控 MSP 服务器骨架：双传输 + 身份组命令分派。
 
-    def __init__(self, handlers: dict[int, Callable[[bytes], bytes]]):
+    Task 19 状态源：``state_provider`` 每次 dispatch 前调用一次，返回的
+    快照 dict 作 handler 第二参（GET 命令读运行时状态）；handler 在 dict
+    置 ``state["changed"] = True`` 即声明写操作（SET 命令），dispatch 末尾
+    回调 ``on_change`` 一次（pop 防快照 dict 复用残留；异常路径不触发）。
+    """
+
+    def __init__(self, handlers: dict[int, Callable[..., bytes]],
+                 state_provider: Callable[[], "dict | None"] | None = None,
+                 on_change: Callable[[], None] | None = None):
         self._handlers = handlers
+        self._state_provider = state_provider   # () → 状态快照（缺省无状态）
+        self._on_change = on_change             # SET 写信号（缺省忽略）
         self._listen_sock: socket.socket | None = None
         self._tcp_port: int | None = None
         self._ws_listen_sock: socket.socket | None = None
@@ -271,17 +281,27 @@ class VfcServer:
 
     def _dispatch(self, transport: _Transport, req: MspRequest) -> None:
         """单条请求分派：handler 缺席/抛错 → 空载荷应答（不断连不崩主循环）；
-        应答按请求协议版本包帧（v1 请求→v1 帧，v2 请求→v2 帧）"""
+        应答按请求协议版本包帧（v1 请求→v1 帧，v2 请求→v2 帧）。
+        Task 19：dispatch 前取一次 state_provider() 快照作 handler 第二参；
+        handler 置 state["changed"]=True → 末尾回调 on_change 一次（pop 弹
+        键防快照 dict 复用残留；handler 异常路径不产生变更信号）"""
         handler = self._handlers.get(req.cmd)
+        state = None
+        if self._state_provider is not None:
+            try:
+                state = self._state_provider()
+            except Exception as e:  # provider 故障不中断主循环（按无状态分派）
+                print(f"[msp] state_provider 异常：{e}", file=sys.stderr)
         if handler is None:
             print(f"[msp] 未实现命令 {req.cmd}，空载荷应答", file=sys.stderr)
             payload = b""
         else:
             try:
-                payload = handler(req.payload)
+                payload = handler(req.payload, state)
             except Exception as e:  # handler 故障不得中断主循环
                 print(f"[msp] 命令 {req.cmd} handler 异常：{e}", file=sys.stderr)
                 payload = b""
+                state = None   # 异常路径不产生变更信号（半途置 changed 亦无效）
         frame = (build_v2_frame(">", req.cmd, payload) if req.v2
                  else build_v1_frame(">", req.cmd, payload))
         try:
@@ -297,6 +317,9 @@ class VfcServer:
                     pass
                 if sock in self._conns:
                     self._conns.remove(sock)
+        if (state is not None and state.pop("changed", False)
+                and self._on_change is not None):
+            self._on_change()
 
     def _tcp_reader(self, sock: socket.socket) -> None:
         """TCP 读线程：超时循环 recv → parser → 入队（只读不写状态）"""
