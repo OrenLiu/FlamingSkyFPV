@@ -116,14 +116,14 @@ v4 档加载：缺 `virtual_fc`/`virtual` 键时补默认值（additive，不重
 - **未解锁**：四电机输出 0（杆量无响应），每帧重置 PID。
 - **自稳 ANGLE**：roll/pitch 外环姿态闭环：目标倾角 = rc×45°，外环输出 = (目标角 − 当前角) × 8 °/s/°，替换内环 rate setpoint；yaw 保持 rate 闭环。外环增益不暴露 UI（YAGNI）。
 - **HORIZON**：中位自稳、杆外 acro：自稳权重 w = clamp(1 − |rc|/0.6, 0, 1)，setpoint = w×自稳外环输出 + (1−w)×rate 曲线输出。
-- **反乌龟 FLIP_OVER_AFTER_CRASH**：armed 且 (|roll|>120° 或 |pitch|>120°) 且油门 < 0.35 且 box 激活 → 内环 setpoint 叠加朝最短翻正方向 ±400°/s；脱离倒置姿态后恢复普通控制。物理简化实现（真机逐电机反转甩正），明示偏离。
+- **反乌龟 FLIP_OVER_AFTER_CRASH**：armed 且 (|roll|>120° 或 |pitch|>120°) 且油门 < 0.35 且 box 激活 → 进入翻正态，主导轴（|roll|>|pitch| 取 roll 否则 pitch）内环 setpoint 叠加朝最短翻正方向 ±400°/s。**退出为三路析取**（实现期与实测共同裁定，对齐真机"撤 box 即停"语义与接管直觉）：角度迟滞（|roll|<90° 且 |pitch|<90°）**或** FLIP box 撤销**或**油门 ≥ 0.35（进入侧 <0.35 严格、退出侧 ≥0.35 互补无重叠）。物理简化实现（真机逐电机反转甩正），明示偏离。
 - 虚拟飞控模式下 `drone_params.camera_angle_deg` 等硬件参数仍即时生效（参数页编辑）。
 
 ## 8. MSP 服务器（msp/）
 
 ### 8.1 传输层（server.py）
 
-- **TCP 传输**：监听 `127.0.0.1:5761`（默认，接入提示框可改端口重开）。
+- **TCP 传输**：监听 `127.0.0.1:5761`（默认固定端口；端口占用时报错提示，修订：一期实现不提供面板改端口 UI，措辞以实现为准——改端口属 M5 可选项）。
 - **WebSocket 传输**（用户裁定扩展，2026-11-12）：监听 `127.0.0.1:5762`（默认）。依据：Configurator 浏览器形态的 "tcp" 槽位即 WebSocket（serial.ts 注释原文），`WebSocket.ts` 为 MSP 字节流二进制透传——浏览器版 Configurator「手动选择」输入 `ws://127.0.0.1:5762` 即可连接。实现为 RFC6455 最小子集（握手 SHA1/base64、二进制帧收发、ping/pong、close、分片重组），msp/ 保持纯标准库；MSP 协议层零改动。
 - **PTY 传输**：`pty.openpty()`，master 由服务器读线程持有，slave 路径显示给用户（旧版 Electron Configurator 兼容通道；新版枚举不到 PTY 时 UI 明示用 TCP）。
 - **线程模型**：每连接一个读线程（字节流 → 帧解析 → 请求入队）；主循环每帧 drain 请求队列并在主线程生成应答（写回发送队列，读线程刷出）。≤1 帧延迟（60fps 下 16ms），状态访问全单线程，无锁竞争。
