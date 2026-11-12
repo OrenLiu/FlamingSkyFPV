@@ -27,12 +27,13 @@ HORIZON_TRANSITION = 0.6
 
 # 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13）：120°/90° 双阈值迟滞防抖 + 油门门控。
 # 进入：box 激活 + armed + 未翻正 + (|roll|>120° 或 |pitch|>120°) + 油门<0.35；
-# 退出：两轴均 <90°（严格）。翻正 = 主导轴 setpoint 叠加 ±FLIP_OVER_RATE 朝
-# 0° 最短方向（角 >90° 取负、<−90° 取正）
+# 退出（析取，fix round 1 controller 裁定）：两轴均 <90°（严格）或 box 撤销
+# 或油门 ≥0.35。翻正 = 主导轴 setpoint 叠加 ±FLIP_OVER_RATE 朝 0° 最短方向
+# （角 >90° 取负、<−90° 取正）
 FLIP_OVER_RATE = 400.0    # °/s 主导轴叠加的翻正角速度
 FLIP_ENTER_DEG = 120.0    # 进入阈值：任一姿态轴绝对值严格超过
 FLIP_EXIT_DEG = 90.0      # 退出阈值：两轴均严格低于；叠加方向判据同值
-FLIP_MAX_THROTTLE = 0.35  # 进入允许的最高油门（≥ 该值拒绝，防误触发）
+FLIP_MAX_THROTTLE = 0.35  # 进入侧须严格低于；退出侧 ≥ 即接管（互补无重叠）
 
 def eval_boxes(mode_ranges, aux_us) -> frozenset:
     """求值激活的模式集合（纯函数，Betaflight 语义简化版）。
@@ -223,13 +224,18 @@ class FlightController:
                        targets[2])
         # 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13）：倒置检测状态机 + 主导轴最短
         # 方向翻正叠加，120°/90° 迟滞防抖、油门 ≥0.35 拒进（常量注释含语义）。
-        # overlay 在 setpoint 管线末端（上述模式之后、PID 之前）只加主导轴；
-        # 进入检测与退出同帧完成先于叠加。合取 self.armed 沿模式分支惯例；
-        # angles 缺失整段跳过（防御，状态保持不动）
+        # 退出为析取式（fix round 1 controller 裁定）：角度迟滞（两轴均 <90°，
+        # 自动翻正完成）或 FLIP box 撤销（真机肌肉记忆：撤 box 即停）或油门
+        # ≥0.35（用户接管意图，不被 ±400°/s 对抗）。overlay 在 setpoint 管线
+        # 末端（上述模式之后、PID 之前）只加主导轴；进入检测与退出同帧完成
+        # 先于叠加。合取 self.armed 沿模式分支惯例；angles 缺失整段跳过（防御，
+        # 状态保持不动）
         if angles_deg is not None and self.armed:
             roll_a, pitch_a = angles_deg[0], angles_deg[1]
             if self._flipping:
-                if abs(roll_a) < FLIP_EXIT_DEG and abs(pitch_a) < FLIP_EXIT_DEG:
+                if ((abs(roll_a) < FLIP_EXIT_DEG and abs(pitch_a) < FLIP_EXIT_DEG)
+                        or BOX_FLIP_OVER_AFTER_CRASH not in boxes
+                        or ch.throttle >= FLIP_MAX_THROTTLE):
                     self._flipping = False
             elif (BOX_FLIP_OVER_AFTER_CRASH in boxes
                     and ch.throttle < FLIP_MAX_THROTTLE
