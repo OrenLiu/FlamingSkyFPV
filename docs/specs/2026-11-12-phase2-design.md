@@ -41,7 +41,7 @@ osd.py                     # 新增：OSD 内容生成（纯函数：状态 → 
 physics/drone.py           # 扩展：FlightController 消费 boxes（ARM/ANGLE/HORIZON/FLIP_OVER_AFTER_CRASH）
 input/channels.py          # 扩展：Channels + aux: list[float]（4 路，[-1,1]）
 input/joystick.py          # 扩展：AUX 绑定（按钮两档/轴三段）+ 未绑定轴回中位
-input/keyboard.py          # 扩展：F1/F2/F3 边缘检测 toggle AUX1/2/3
+input/keyboard.py          # 扩展：F1/F2/F4 边缘检测 toggle AUX1/2/3
 screens/drone_params.py    # 重构：列表 → 编辑（参数模式/虚拟飞控模式）子状态机
 config/drones/<代号>.json  # 新增：每台预设一个文件
 ```
@@ -103,8 +103,8 @@ v4 档加载：缺 `virtual_fc`/`virtual` 键时补默认值（additive，不重
 
 - `Channels` 加 `aux: list[float]`（4 路 AUX，`[-1,1]`，0=中位）。映射 MSP RC 通道 5–8：µs = 1500 + 值×500。
 - `RCConfig.mappings` 加 `aux1..aux4: AuxBinding(kind, index)`：`kind="button"` 两档（未按 −1 / 按下 +1）；`kind="axis3"` 三段（轴值 <−1/3 / 中间 / >1/3 → −1/0/+1）；`kind="none"` 恒中位。主四通道绑定结构不变。
-- 键盘兜底：**F1/F2/F3 = AUX1/2/3 拨动键**（KeyboardInput 内做上升沿检测），F1 解锁 / F2 自稳 / F3 反乌龟的推荐用法在虚拟飞控参数页与 HUD 指引文案中说明（用户在地面站 Modes 页把功能绑到 AUX1/2/3 即可）。
-- **一期 minor 顺手纳入**：JoystickInput 未绑定主轴回中位（0.0），防姿态漂移；飞行 HUD 增加输入来源徽标（键盘 / 手柄名）。
+- 键盘兜底：**F1/F2/F4 = AUX1/2/3 拨动键**（KeyboardInput 内做上升沿检测；**裁定：避开 F3**——app.py 全局 F3 调试覆盖层热键与 AUX3 拨动同键会双触发，飞行中误触调试层），F1 解锁 / F2 自稳 / F4 反乌龟的推荐用法在虚拟飞控参数页与 HUD 指引文案中说明（用户在地面站 Modes 页把功能绑到 AUX1/2/3 即可）。
+- **一期 minor 顺手纳入**：JoystickInput 轴越界防御（绑定轴号超出设备实测轴数时按未绑定处理返回中位，防换设备后 `get_axis` 异常或读错轴）；飞行 HUD 增加输入来源徽标（键盘 / 手柄名）。
 - rc_setup 页增加 AUX 绑定区（来源下拉 + 对象选择），向导不变（仍只配主四通道）。
 
 ## 7. 虚拟飞控运行时（physics/drone.py 扩展）
@@ -112,7 +112,7 @@ v4 档加载：缺 `virtual_fc`/`virtual` 键时补默认值（additive，不重
 `FlightController.update(ch, gyro_dps, dt, aux_us, boxes)`（boxes 由调用方按 mode_ranges 评估传入；评估函数 `eval_boxes(mode_ranges, aux_us) -> set` 是 **physics/drone.py 纯函数**，飞行每帧与 MSP STATUS 应答共用同一实现）。
 
 - **暴露的 box（permanentId 以 BF 源码为准）**：ARM、ANGLE、HORIZON、FLIP_OVER_AFTER_CRASH。
-- **ARM 状态机**：ARM ∈ boxes 且油门 < 0.10 → armed；ARM ∈ boxes 但油门 ≥ 0.10 → 保持加锁（HUD/OSD 提示一次）。ARM ∉ boxes → disarm + 三轴 PID 积分清零。Esc「重置位置」→ 自动 disarm。**模拟器偏离真机 BF（无油门保护）**：防误触弹射破坏体验，设计文档明示。
+- **ARM 状态机**：**仅在 virtual_fc=True 时启用**（参数模式无模式系统，保持一期行为）。ARM ∈ boxes 且油门 < 0.10 → armed；ARM ∈ boxes 但油门 ≥ 0.10 → 保持加锁（HUD/OSD 提示一次）。ARM ∉ boxes → disarm + 三轴 PID 积分清零。Esc「重置位置」→ 自动 disarm。**模拟器偏离真机 BF（无油门保护）**：防误触弹射破坏体验，设计文档明示。
 - **未解锁**：四电机输出 0（杆量无响应），每帧重置 PID。
 - **自稳 ANGLE**：roll/pitch 外环姿态闭环：目标倾角 = rc×45°，外环输出 = (目标角 − 当前角) × 8 °/s/°，替换内环 rate setpoint；yaw 保持 rate 闭环。外环增益不暴露 UI（YAGNI）。
 - **HORIZON**：中位自稳、杆外 acro：自稳权重 w = clamp(1 − |rc|/0.6, 0, 1)，setpoint = w×自稳外环输出 + (1−w)×rate 曲线输出。
