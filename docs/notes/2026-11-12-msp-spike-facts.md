@@ -41,7 +41,14 @@
 - TCP/PTY 双传输 loopback 单测 10 项全绿（243 项套件）；X 下端到端：真实主循环 drain 应答 6 条身份握手（tcp://127.0.0.1:5761 + /dev/pts/N）。
 - 身份组应答：API_VERSION(1)=[0,1,46]（mspProtocolVersion=0 → v1）、FC_VARIANT(2)=BTFL、FC_VERSION(3)=4.5.1、BUILD_INFO(5)、BOARD_INFO(4)、UID(160)。
 
-## 5. 待桌面版重测后补充
+## 5. 最终验证结果（2026-11-12，用户浏览器实测定论）
+
+- **✅ 连接序列走完**：WS 通道（ws://127.0.0.1:5762）→ 身份组（v1）→ GET_TEXT 三连（v2：BUILDKEY 空 / CRAFT_NAME="FSKY-SIM" / PILOT_NAME）→ v1 空载荷降级命令 → **Configurator 成功进入 Setup 页**（2026.12.0-alpha 浏览器形态）。
+- **✅ 身份显示**：`Fw git rev: -11-12`（解析自我方 BUILD_INFO build 串）。
+- **Setup 页数据为空 = 预期**：实时数据（姿态/仪表）来自 MSP_STATUS(101)/ATTITUDE(81)/RAW_IMU(102) 等状态轮询——M5 范围（空载荷→显示空）。
+-历经三轮实测驱动的协议修复：子协议协商（binary）→ MSPv1 帧布局（len/cmd u8 + XOR）→ MSPv2 解析与应答（GET_TEXT）。全部教训与权威线格式见 §2.5/§6/§7。
+
+## 5.1 待桌面版重测后补充（TCP 通道同栈，非阻塞）
 
 - [ ] Setup 页身份显示（验证 BUILD_INFO/BOARD_INFO 载荷形态解析）
 - [ ] 控制台缺失/超时命令清单（M5 命令集优先级依据）
