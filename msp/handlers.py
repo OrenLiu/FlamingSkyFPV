@@ -27,8 +27,10 @@ _osd_config_payload docstring（简报 194/81 与固件写序不符，按外部�
 MSP2_GET_TEXT(0x3006=12294) 为 v2 命令（fix round 3）：连接序列在身份组
 之后请求 BUILDKEY(5)/CRAFT_NAME(2)/PILOT_NAME(1)（serial_backend.ts
 processBuildConfiguration/processCraftName），无应答会被判超时断开。
-请求 payload=[类型 u8]，应答 payload=[类型 u8]+文本；类型 2 CRAFT_NAME
-为 state 感知（Task 23：virtual.craft_name → preset_id → FSKY-SIM 兜底）。
+请求 payload=[类型 u8]，应答 payload=[类型 u8][长度 u8]+文本（fix round 1
+对齐固件/Configurator 的 getText 帧；空文本保持单字节，Configurator
+readU8 越界 null||0 容错）；类型 2 CRAFT_NAME 为 state 感知（Task 23：
+virtual.craft_name → preset_id → FSKY-SIM 兜底）。
 
 状态组载荷布局经外部源码核对（2026-11-12 GitHub 取 tag 4.5.1 的
 src/main/msp/msp.c L1080-1133 与 Configurator src/js/msp/MSPHelper.ts
@@ -96,9 +98,14 @@ _OSD_FLAGS = 0x31
 # NTSC 13 行受限，PAL 为 BF 默认）
 _OSD_VIDEO_SYSTEM = 1
 
-# 统计/计时器/警告段条目计数（固件 4.5.1 osd.h 枚举计数，Configurator
-# decode 为 count 驱动循环——条目全 0 时循环 0 次，仅 console.error 告警）
-_OSD_STAT_COUNT = 31      # osd_stats_e（RTC_DATE_TIME..AVG_THROTTLE）
+# 统计/计时器/警告段条目计数（固件 4.5.1 osd.h 枚举计数）。警告段结构
+# 本身即 count+flags u32（无逐条字节，Configurator 按 flags 位解析）→ 报
+# 固件语义计数；计时器段 count+u16×2 逐条全 0；统计段 GET 恒 count=0
+# （fix round 1 裁定：固件写 count 后逐条写 31×u8，Configurator
+# decodeStatItems 是无边界守卫的 count 驱动循环——只报 count 不发条目会
+# 把后续段字节吃成统计项；模拟器无统计屏功能，count=0 最简且解码干净）
+_OSD_STAT_COUNT = 31      # osd_stats_e（RTC_DATE_TIME..AVG_THROTTLE）；仅
+                          # SET_OSD_CONFIG 侧统计开关形态判定（addr<31）用
 _OSD_TIMER_COUNT = 2      # osd_timer_e（TIMER_1/TIMER_2；简报写 3 系笔误）
 _OSD_WARNING_COUNT = 19   # osdWarningsFlags_e（4.5.1：ARMING_DISABLE..LOAD）
 
@@ -135,7 +142,10 @@ def _craft_name_text(state: "dict | None") -> bytes:
 
 
 def _get_text(payload: bytes, state: "dict | None" = None) -> bytes:
-    """MSP2_GET_TEXT 应答：[类型 u8] + 文本；未知/空类型 → 空载荷降级。
+    """MSP2_GET_TEXT 应答：非空文本 [类型 u8][长度 u8][文本]（固件 msp.c
+    写长度字节、Configurator getText 先 readU8 当长度再循环收字符——fix
+    round 1 对齐）；空文本保持 [类型] 单字节（getText 的 readU8 越界
+    null||0=0 容错，Task 19 行为不变）；未知类型 → 空载荷降级。
 
     state 为 Task 19 二参协议的第二个参数；类型 2 CRAFT_NAME 消费 state
     （Task 23：地面站写入/预设代号可回显），其余类型查静态表。"""
@@ -143,11 +153,14 @@ def _get_text(payload: bytes, state: "dict | None" = None) -> bytes:
         return b""
     text_type = payload[0]
     if text_type == 2:
-        return bytes([text_type]) + _craft_name_text(state)
-    text = _TEXT_TYPES.get(text_type)
-    if text is None:
-        return b""
-    return bytes([text_type]) + text
+        text = _craft_name_text(state)
+    else:
+        text = _TEXT_TYPES.get(text_type)
+        if text is None:
+            return b""
+    if not text:
+        return bytes([text_type])
+    return bytes([text_type, len(text)]) + text
 
 
 # ---- 状态组（Task 20） ----
@@ -476,18 +489,21 @@ def _osd_config_payload(payload: bytes, state: "dict | None" = None) -> bytes:
     头部 10 字节：osdFlags u8=0x31、video_system u8=1(PAL)、units u8=0、
     rssi_alarm u8=0、cap_alarm u16=0、obsolete u8=0、item_count u8=80、
     alt_alarm u16=0；item_pos u16×80（位置/可见位合成见 _elem_pos）；
-    统计段 count u8=31 条目全 0；计时器段 count u8=2 + u16×2=0；警告段
-    obsolete u16=0 + count u8=19 + flags u32=0；OSD profile 段 number=1/
-    selected=1（单 profile 模拟器）；overlay_radio_mode u8=0；camera_frame
-    w/h=24/11；link_quality_alarm u16=0（API 1.46 尾）。总长
+    统计段 count u8=0（fix round 1 裁定：固件写 count 后逐条写 31×u8，
+    只报 count 不发条目会被 Configurator 无守卫的 count 循环吃掉后续段
+    字节；模拟器无统计屏，count=0 循环 0 次解码干净）；计时器段
+    count u8=2 + u16×2=0；警告段 obsolete u16=0 + count u8=19 + flags
+    u32=0（警告段固件结构本身即 count+flags，无逐条字节，Configurator
+    按 flags 位解析）；OSD profile 段 number=1/selected=1（单 profile
+    模拟器）；overlay_radio_mode u8=0；camera_frame w/h=24/11；
+    link_quality_alarm u16=0（API 1.46 尾）。总长
     10+160+1+5+7+2+1+2+2=190。
 
     与简报参考布局的差异（按外部源码实现，2026-11-12 GitHub 取固件 4.5.1
     tag 与 Configurator master 互证）：item_count 80 非 81（osd.h osd_items_e
     机械计数 0..79，与 Configurator chooseDisplayFields API 1.46 数组 80 项
-    一致）；计时器段 count=2+u16×2 非 3+u16×3（osd.h osd_timer_e=2）；统计/
-    警告条目全 0 时 Configurator decode count 驱动循环 0 次（仅 console.error
-    告警），缩骨架应答合法。无参数源 → 空载荷降级。"""
+    一致）；计时器段 count=2+u16×2 非 3+u16×3（osd.h osd_timer_e=2）。
+    无参数源 → 空载荷降级。"""
     params = (state or {}).get("params")
     if params is None:
         return b""
@@ -497,7 +513,7 @@ def _osd_config_payload(payload: bytes, state: "dict | None" = None) -> bytes:
     virtual = params.virtual
     for i in range(osd.OSD_ITEM_COUNT):
         out += struct.pack("<H", _elem_pos(virtual, i))
-    out += bytes([_OSD_STAT_COUNT])                          # 统计段（条目全 0）
+    out += bytes([0])                                        # 统计段 count=0
     out += bytes([_OSD_TIMER_COUNT]) + b"\x00\x00" * _OSD_TIMER_COUNT
     out += struct.pack("<HBI", 0, _OSD_WARNING_COUNT, 0)     # 警告段
     out += bytes([1, 1])                                     # profile：单 profile 选中 1
