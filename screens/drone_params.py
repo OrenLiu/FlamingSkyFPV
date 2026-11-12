@@ -1,13 +1,24 @@
-"""无人机参数界面：全部飞行参数可调（设计文档第 6 节），保存即时生效。
-用户裁定：PID 与 rate 三轴独立 + 全参数数值输入框（量级跨度大，滑条精度不足）。"""
+"""无人机参数界面：二期列表/编辑子状态机（设计文档第 6 节 + 二期预设管理）。
+列表态：预设清单 + 整行选中当前机 + 编辑/复制/删除；编辑态暂用一期表单
+（Task 5 重构为双模式表单）。参数保存即时生效。
+用户裁定（一期沿用）：PID 与 rate 三轴独立 + 全参数数值输入框（量级跨度大，
+滑条精度不足）。"""
 import imgui
 import pygame
 from .base import Screen
-from config_store import DroneParams, PIDGains, RateParams, default_drone_params
+from config_store import (DroneParams, PIDGains, RateParams, default_drone_params,
+                          DEFAULT_PRESET_ID, copy_preset, delete_preset,
+                          list_preset_ids, load_preset, save_preset)
+
+# 预设目录：与 app.DRONES_DIR 同值（screens 不 import app，保持依赖单向）
+DRONES_DIR = "config/drones"
 
 RATE_TYPES = ["betaflight_actual", "linear"]
 AXES = ["roll", "pitch", "yaw"]
 AXIS_CN = {"roll": "横滚", "pitch": "俯仰", "yaw": "偏航"}
+
+ROW_H = 36        # 列表行高（行内按钮同高对齐）
+ROW_BTN_W = 64    # 行内按钮宽（编辑/复制/删除）
 
 def _input(label, v, step, fmt="%.5g"):
     """数值输入框助手：pyimgui 2.0 返回 (changed, value)，changed=False 时回写幂等"""
@@ -24,27 +35,170 @@ def _clone_params(src: DroneParams) -> DroneParams:
     return p
 
 class DroneParamsScreen(Screen):
+    """stage 子状态机（FlightScreen 同款）："list" 预设列表 | "edit" 参数表单"""
+
     def enter(self, app):
         self.app = app
-        self._p = _clone_params(app.drone_params)   # 工作副本
+        self.stage = "list"       # enter 默认列表态；主菜单入口不变
+        self._ids = list_preset_ids(DRONES_DIR)   # 列表缓存，操作后重取
+        self._edit_id = None      # 编辑态目标预设 id
+        self._p = None            # 编辑态工作副本
+        self._copy_src = None     # 复制弹窗源 id（None=弹窗未开）
+        self._copy_buf = ""       # 复制弹窗新代号输入缓冲
+        self._del_target = None   # 删除弹窗目标 id（None=弹窗未开）
 
     def handle_event(self, event):
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-            self._back()
+            if self._copy_src is not None or self._del_target is not None:
+                # 弹窗开时 Esc 只关弹窗：清标记后不再提交 begin_popup_modal，
+                # imgui 帧末回收未提交弹窗（flight.py Esc 关「暂停」同机制）
+                self._copy_src = None
+                self._del_target = None
+            elif self.stage == "edit":
+                self.stage = "list"
+                self._refresh_ids()
+            else:
+                self._back()
 
     def _back(self):
         from .main_menu import MainMenuScreen
         self.app.switch(MainMenuScreen())
 
+    def _refresh_ids(self):
+        """复制/删除/编辑返回后重取列表（数据层以目录文件为准）"""
+        self._ids = list_preset_ids(DRONES_DIR)
+
     def render_ui(self):
+        if self.stage == "list":
+            self._render_list()
+        else:
+            self._render_edit()
+
+    # ---- 列表态 ----
+    def _render_list(self):
         imgui.set_next_window_position(30, 30)
         io = imgui.get_io()
         # 高度必须固定为视口可用高度（上 30 + 下 30 边距）：0=自适应时 imgui
-        # 把窗口钳到视口高减安全边距，顶部又偏移 30 → 底部永远压出屏幕外，
-        # 且底部按钮以下内容不可见；固定高度后 imgui 自动为溢出内容出滚动条
+        # 把窗口钳到视口高减安全边距，顶部又偏移 30 → 底部永远压出屏幕外；
+        # 固定高度后 imgui 自动为溢出内容出滚动条（一期参数窗口同做法）
+        imgui.set_next_window_size(620, io.display_size[1] - 60)
+        imgui.begin("无人机参数", flags=imgui.WINDOW_NO_COLLAPSE)
+        imgui.text("点击行选中当前无人机；复制可新建预设")
+        imgui.separator()
+        avail = imgui.get_content_region_available_width()
+        for pid in self._ids:
+            self._preset_row(pid, avail)
+        imgui.separator()
+        if imgui.button("返回", 180, 40):
+            self._back()
+        imgui.end()
+        # 模态弹窗在主窗口 end 之后、栈根处开（flight.py _render_esc_menu 同位置）
+        self._render_copy_modal()
+        self._render_delete_modal()
+
+    def _preset_row(self, pid, avail):
+        """单行：左段 invisible_button 承接整行选中点击，draw list 直绘底色/
+        代号/标签（直绘不产生 imgui item，不与按钮抢点击；flight.py _scene_card
+        同手法）；右段编辑/复制/删除三按钮。push_id 隔离各行同名控件"""
+        gap = imgui.get_style().item_spacing.x
+        sel_w = max(80.0, avail - (ROW_BTN_W * 3 + gap * 3))
+        imgui.push_id(pid)
+        is_cur = pid == self.app.settings.current_drone_id
+        clicked = imgui.invisible_button("##sel", sel_w, ROW_H)
+        hovered = imgui.is_item_hovered()
+        p = imgui.get_item_rect_min()
+        e = imgui.get_item_rect_max()
+        dl = imgui.get_window_draw_list()
+        # 当前机绿底高亮，悬停亮边
+        if is_cur:
+            bg = imgui.get_color_u32_rgba(0.13, 0.30, 0.16, 1.0)
+        elif hovered:
+            bg = imgui.get_color_u32_rgba(0.16, 0.16, 0.19, 1.0)
+        else:
+            bg = imgui.get_color_u32_rgba(0.10, 0.10, 0.12, 1.0)
+        edge = 0.7 if is_cur else (0.45 if hovered else 0.2)
+        dl.add_rect_filled(p.x, p.y, e.x, e.y, bg)
+        dl.add_rect(p.x, p.y, e.x, e.y, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, edge))
+        # 代号 +「当前无人机」标签垂直居中
+        name_size = imgui.calc_text_size(pid)
+        ty = p.y + (ROW_H - name_size.y) / 2
+        dl.add_text(p.x + 10, ty, imgui.get_color_u32_rgba(0.92, 0.92, 0.95, 1.0), pid)
+        if is_cur:
+            dl.add_text(p.x + 10 + name_size.x + 12, ty,
+                        imgui.get_color_u32_rgba(0.45, 0.90, 0.55, 1.0), "当前无人机")
+        if clicked and not is_cur:
+            self.app.select_drone(pid)   # 换机 + current_drone_id 落盘（Task 3 接口）
+        imgui.same_line()
+        if imgui.button("编辑", ROW_BTN_W, ROW_H):
+            self._edit_id = pid
+            self._p = _clone_params(load_preset(DRONES_DIR, pid))
+            self.stage = "edit"
+        imgui.same_line()
+        if imgui.button("复制", ROW_BTN_W, ROW_H):
+            self._copy_src = pid
+            self._copy_buf = pid    # 预填源代号：直接确认即得 -2 序号新预设
+        imgui.same_line()
+        if imgui.button("删除", ROW_BTN_W, ROW_H):
+            self._del_target = pid
+        imgui.pop_id()
+
+    def _render_copy_modal(self):
+        if self._copy_src is None:
+            return
+        imgui.open_popup("复制无人机") if not imgui.is_popup_open("复制无人机") else None
+        if imgui.begin_popup_modal("复制无人机", flags=imgui.WINDOW_ALWAYS_AUTO_RESIZE)[0]:
+            imgui.text(f"复制「{self._copy_src}」为新预设")
+            _, self._copy_buf = imgui.input_text("新代号", self._copy_buf, 64)
+            imgui.text("重名时自动追加 -2/-3 序号")
+            name_ok = bool(self._copy_buf.strip())
+            if not name_ok:
+                imgui.text("代号不能为空")
+            if imgui.button("确认", 160, 40) and name_ok:
+                copy_preset(DRONES_DIR, self._copy_src, self._copy_buf)
+                self._refresh_ids()
+                self._copy_src = None
+                imgui.close_current_popup()
+            imgui.same_line()
+            if imgui.button("取消", 160, 40):
+                self._copy_src = None
+                imgui.close_current_popup()
+            imgui.end_popup()
+
+    def _render_delete_modal(self):
+        if self._del_target is None:
+            return
+        imgui.open_popup("删除无人机") if not imgui.is_popup_open("删除无人机") else None
+        if imgui.begin_popup_modal("删除无人机", flags=imgui.WINDOW_ALWAYS_AUTO_RESIZE)[0]:
+            imgui.text(f"删除无人机：{self._del_target}？")
+            if imgui.button("确认删除", 160, 40):
+                pid = self._del_target
+                delete_preset(DRONES_DIR, pid)
+                if pid == self.app.settings.current_drone_id:
+                    # 删当前机 → 回落列表第一台；列表删空 → 重建默认机
+                    # （App.__init__ 空列表同语义）
+                    ids = list_preset_ids(DRONES_DIR)
+                    if not ids:
+                        save_preset(DRONES_DIR, DEFAULT_PRESET_ID, DroneParams())
+                        ids = [DEFAULT_PRESET_ID]
+                    self.app.select_drone(ids[0])   # 回落 + 记忆落盘
+                self._refresh_ids()
+                self._del_target = None
+                imgui.close_current_popup()
+            imgui.same_line()
+            if imgui.button("取消", 160, 40):
+                self._del_target = None
+                imgui.close_current_popup()
+            imgui.end_popup()
+
+    # ---- 编辑态（一期表单暂留为编辑内容，Task 5 重构为双模式） ----
+    def _render_edit(self):
+        imgui.set_next_window_position(30, 30)
+        io = imgui.get_io()
+        # 高度固定理由同列表态：0=自适应会把底部按钮压出屏幕外
         imgui.set_next_window_size(620, io.display_size[1] - 60)
         imgui.begin("无人机参数", flags=imgui.WINDOW_NO_COLLAPSE)
 
+        imgui.text(f"正在编辑：{self._edit_id}")
         p = self._p
         imgui.text("Rate（遥控曲线，三轴独立）")
         cur = RATE_TYPES.index(p.rate_type) if p.rate_type in RATE_TYPES else 0
@@ -96,6 +250,8 @@ class DroneParamsScreen(Screen):
         p.camera_angle_deg = _input("摄像头角度 (°)", p.camera_angle_deg, 1.0)
         imgui.separator()
 
+        # 过渡期保存路径（一期遗留，Task 5 改为按 _edit_id 落预设文件）：
+        # 更新运行中参数 + 写旧 drone.json
         if imgui.button("保存", 180, 40):
             # 保存独立快照：工作副本继续编辑互不影响
             self.app.drone_params = _clone_params(p)
@@ -104,6 +260,7 @@ class DroneParamsScreen(Screen):
         if imgui.button("恢复默认", 180, 40):
             self._p = default_drone_params()
         imgui.same_line()
-        if imgui.button("返回", 180, 40):
-            self._back()
+        if imgui.button("返回列表", 180, 40):
+            self.stage = "list"
+            self._refresh_ids()
         imgui.end()
