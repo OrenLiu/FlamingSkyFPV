@@ -158,12 +158,24 @@ class AxisBinding:
     inverted: bool = False
 
 @dataclass
+class AuxBinding:
+    """AUX 通道绑定（二期模式开关等）。kind："none" 未绑定 / "button" 按钮两档 /
+    "axis3" 轴三段（阈值 ±1/3）"""
+    kind: str = "none"
+    index: int = -1                   # 按钮号或轴号，-1 表示未绑定
+
+def _default_mappings() -> dict:
+    """mappings 默认工厂：主四通道 AxisBinding + aux1..aux4 AuxBinding（均未绑定）"""
+    m = {k: AxisBinding() for k in ("throttle", "yaw", "roll", "pitch")}
+    m.update({f"aux{i}": AuxBinding() for i in range(1, 5)})
+    return m
+
+@dataclass
 class RCConfig:
-    """遥控配置：键盘或手柄 + 四通道绑定"""
+    """遥控配置：键盘或手柄 + 四通道绑定 + 四路 AUX 绑定"""
     mode: str = "keyboard"            # "keyboard" | "joystick"
     device_name: str = ""
-    mappings: dict = field(default_factory=lambda: {
-        k: AxisBinding() for k in ("throttle", "yaw", "roll", "pitch")})
+    mappings: dict = field(default_factory=_default_mappings)
 
 def default_drone_params() -> DroneParams:
     """出厂默认（参数页"恢复默认"用）"""
@@ -190,11 +202,18 @@ def _rebuild(cls, data: dict):
             v = _rebuild(_NESTED_ONE[f.name], v)
         elif f.name in _NESTED and isinstance(v, dict):
             # 以默认实例的同名字典为基底，JSON 数据覆盖——仅保存了部分键（如只绑定了
-            # throttle）时，其余通道回落默认 AxisBinding()，避免 round-trip 丢键
+            # throttle）时，其余通道回落默认绑定，避免 round-trip 丢键
             base = {k: dataclasses.asdict(inst)
                     for k, inst in getattr(cls(), f.name).items()}
             base.update(v)
-            v = {k: _rebuild(_NESTED[f.name], sub) for k, sub in base.items()}
+            # mappings 值类型按键名选：aux 前缀键 → AuxBinding（kind/index），
+            # 其余 → AxisBinding（axis/inverted）——同一 dict 两种绑定类型并存，
+            # 统一按 AxisBinding 重建会丢 aux 的 kind/index 字段
+            if f.name == "mappings":
+                v = {k: _rebuild(AuxBinding if k.startswith("aux") else AxisBinding,
+                                 sub) for k, sub in base.items()}
+            else:
+                v = {k: _rebuild(_NESTED[f.name], sub) for k, sub in base.items()}
         kwargs[f.name] = v
     return cls(**kwargs)
 
