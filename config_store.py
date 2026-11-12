@@ -74,8 +74,10 @@ class VirtualFCParams:
     """虚拟飞控域（二期 MSP 打通后地面站可调项；一期 UI 不触碰）"""
     tune: TuneParams = field(default_factory=TuneParams)
     # 模式开关区间：条目 (box_id, aux_index, lo_us, hi_us)——BETAFLIGHT 调参步骤
-    # （如 ARM/MODE 分支设置）写入；MSP 打通任务消费。JSON round-trip 后元组成 list
-    mode_ranges: list = field(default_factory=list)
+    # （如 ARM/MODE 分支设置）写入；MSP 打通任务消费。JSON round-trip 后元组成 list。
+    # 出厂默认 ARM=AUX1 高段（1700-2100µs，box 0）：地面站 Modes 页开箱即见 ARM
+    # 开关（MSP Task 22；eval_boxes 求值，AUX 未接线时条目不激活）
+    mode_ranges: list = field(default_factory=lambda: [(0, 0, 1700, 2100)])
     osd_layout: dict = field(default_factory=dict)    # OSD 元素坐标（元素 id → 坐标）
     osd_enabled: dict = field(default_factory=dict)   # OSD 元素开关（元素 id → bool）
     craft_name: str = ""               # 机名（MSP Craft Name）
