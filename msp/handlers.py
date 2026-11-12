@@ -1,5 +1,5 @@
 # msp/handlers.py
-"""MSP 命令表：身份组 + 状态组 + 参数读写组（纯标准库，不 import 项目模块）。
+"""MSP 命令表：身份组 + 状态组 + 参数读写组 + 模式组 + OSD 组。
 
 命令号对齐 Betaflight Configurator（src/js/msp/MSPCodes.ts，2026-11 核对）：
 1=MSP_API_VERSION、2=MSP_FC_VARIANT、3=MSP_FC_VERSION、4=MSP_BOARD_INFO、
@@ -18,19 +18,31 @@ virtual.tune 本体并置 state["changed"]（dispatch → on_change → 脏标�
 GET/SET 恒读写 virtual.mode_ranges（平铺域无此字段）；µs↔step 换算
 900+step×25；SET_MODE_RANGE 兼容 5/7 字节双形态、slot≥20 整体忽略。
 
+OSD 组（Task 23，OSD tab 布局编辑）：84=MSP_OSD_CONFIG、85=MSP_SET_OSD_CONFIG、
+0x3007=MSP2_SET_TEXT（0x3006 GET_TEXT 见上）。GET 应答 190 字节固定布局
+（item_count=80，元素表单一来源 import 根目录 osd.py）；SET 位置 11 位 +
+可见位 0x0800 分解写 virtual.osd_layout/osd_enabled。布局差异核对记录见
+_osd_config_payload docstring（简报 194/81 与固件写序不符，按外部源码实现）。
+
 MSP2_GET_TEXT(0x3006=12294) 为 v2 命令（fix round 3）：连接序列在身份组
 之后请求 BUILDKEY(5)/CRAFT_NAME(2)/PILOT_NAME(1)（serial_backend.ts
 processBuildConfiguration/processCraftName），无应答会被判超时断开。
-请求 payload=[类型 u8]，应答 payload=[类型 u8]+文本。
+请求 payload=[类型 u8]，应答 payload=[类型 u8]+文本；类型 2 CRAFT_NAME
+为 state 感知（Task 23：virtual.craft_name → preset_id → FSKY-SIM 兜底）。
 
 状态组载荷布局经外部源码核对（2026-11-12 GitHub 取 tag 4.5.1 的
 src/main/msp/msp.c L1080-1133 与 Configurator src/js/msp/MSPHelper.ts
 L841-903）：STATUS_EX 与固件写序逐字段一致；STATUS 应答 11 字节止于
 profile（Configurator 解码器只读 11 字节即停、尾字节忽略——真实固件续写
 load/gyroCycleTime/禁锁段共 24 字节，本表从简，差异记录于 Task 20 提交）。
+
+import 约定：除标准库外仅 import 根目录 osd.py（纯数据表模块，无渲染/
+UI 依赖）——OSD 元素表单一来源，handlers 与飞行页 OSD 渲染共用一份。
 """
 import struct
 from typing import Callable
+
+import osd
 
 # MSP_UID：Configurator MSPCodes.js 定义为 160（v1 惯例，已在线核对）
 MSP_UID = 160
@@ -74,13 +86,30 @@ _PID_AXES = ("roll", "pitch", "yaw")
 # MSP_PIDNAMES：条目名 0x3b 分隔（Configurator 按分号拆解，条目数与 PID 一致）
 _PID_NAMES = b"ROLL;PITCH;YAW;LEVEL;MAG"
 
+# ---- OSD 组常量（Task 23，Configurator OSD tab） ----
+# MSP_OSD_CONFIG(84) 头部 osdFlags（msp.c OSD_FLAGS_* 位定义）：
+# bit0 FEATURE_OSD | bit4 OSD_HARDWARE_MAX_7456 | bit5 DEVICE_DETECTED
+# = 0x31——模拟器恒报 MAX7456 检出（PAL SD 网格 30×16 路径）
+_OSD_FLAGS = 0x31
+
+# video_system=1 PAL（Configurator VIDEO_TYPES[1]="PAL" → 30×16 网格；
+# NTSC 13 行受限，PAL 为 BF 默认）
+_OSD_VIDEO_SYSTEM = 1
+
+# 统计/计时器/警告段条目计数（固件 4.5.1 osd.h 枚举计数，Configurator
+# decode 为 count 驱动循环——条目全 0 时循环 0 次，仅 console.error 告警）
+_OSD_STAT_COUNT = 31      # osd_stats_e（RTC_DATE_TIME..AVG_THROTTLE）
+_OSD_TIMER_COUNT = 2      # osd_timer_e（TIMER_1/TIMER_2；简报写 3 系笔误）
+_OSD_WARNING_COUNT = 19   # osdWarningsFlags_e（4.5.1：ARMING_DISABLE..LOAD）
+
 # MSP2TextType（MSPCodes.ts MSP2TextType 枚举，2026-11 核对）：GET 方向
-# 合法类型 → 应答文本（空串即 [类型字节] 单字节载荷）
+# 合法类型 → 应答文本（空串即 [类型字节] 单字节载荷）。类型 2 CRAFT_NAME
+# 走 _craft_name_text state 感知分支（Task 23）、类型 3/4 恒 FSKY（单
+# profile 参考名），不入此表
 _TEXT_TYPES: dict[int, bytes] = {
     1: b"",            # PILOT_NAME
-    2: b"FSKY-SIM",    # CRAFT_NAME（Setup 页机名显示）
-    3: b"",            # PID_PROFILE_NAME
-    4: b"",            # RATE_PROFILE_NAME
+    3: b"FSKY",        # PID_PROFILE_NAME（参考值）
+    4: b"FSKY",        # RATE_PROFILE_NAME（参考值）
     5: b"",            # BUILDKEY（非 32 字长 → Configurator 跳过云构建选项）
     6: b"",            # RELEASENAME（GET 方向固件支持）
     11: b"",           # BATTERY_PROFILE_NAME
@@ -94,13 +123,27 @@ _UID_PAYLOAD = struct.pack("<3I", 0x46534B59, 0x56464331, 0x32363131)
 assert len(_UID_PAYLOAD) == 12
 
 
+def _craft_name_text(state: "dict | None") -> bytes:
+    """CRAFT_NAME 应答文本：virtual.craft_name → state["preset_id"] →
+    "FSKY-SIM" 兜底（无状态源时保持 Task 19 的自报机名语义）。"""
+    params = (state or {}).get("params")
+    virtual = getattr(params, "virtual", None)
+    name = getattr(virtual, "craft_name", "") or ""
+    if not name:
+        name = (state or {}).get("preset_id") or ""
+    return (name or "FSKY-SIM").encode("utf-8")
+
+
 def _get_text(payload: bytes, state: "dict | None" = None) -> bytes:
     """MSP2_GET_TEXT 应答：[类型 u8] + 文本；未知/空类型 → 空载荷降级。
 
-    state 为 Task 19 二参协议的第二个参数（身份组不消费，带缺省保兼容）。"""
+    state 为 Task 19 二参协议的第二个参数；类型 2 CRAFT_NAME 消费 state
+    （Task 23：地面站写入/预设代号可回显），其余类型查静态表。"""
     if not payload:
         return b""
     text_type = payload[0]
+    if text_type == 2:
+        return bytes([text_type]) + _craft_name_text(state)
     text = _TEXT_TYPES.get(text_type)
     if text is None:
         return b""
@@ -414,6 +457,108 @@ def _set_mode_range(payload: bytes, state: "dict | None" = None) -> bytes:
     return b""
 
 
+# ---- OSD 组（Task 23） ----
+
+def _elem_pos(virtual, item_id: int) -> int:
+    """元素 u16 布局值合成：pos 11 位 = 覆盖布局 osd_layout[id]，缺省回落
+    出厂默认表（未实现元素恒 0）；可见位 0x0800 = osd_enabled[id] 覆盖，
+    缺省「pos 非零」（未显式关过的元素跟随位置位）。变体位（bits 14-15）
+    不合成（恒 0，单形态元素）。"""
+    stored = virtual.osd_layout.get(item_id, osd.DEFAULT_LAYOUT.get(item_id, 0))
+    pos = stored & osd.OSD_POS_MASK
+    visible = virtual.osd_enabled.get(item_id, pos != 0)
+    return pos | (osd.OSD_VISIBLE if visible else 0)
+
+
+def _osd_config_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_OSD_CONFIG(84)：190 字节固定布局（固件 4.5.1 msp.c 写序）。
+
+    头部 10 字节：osdFlags u8=0x31、video_system u8=1(PAL)、units u8=0、
+    rssi_alarm u8=0、cap_alarm u16=0、obsolete u8=0、item_count u8=80、
+    alt_alarm u16=0；item_pos u16×80（位置/可见位合成见 _elem_pos）；
+    统计段 count u8=31 条目全 0；计时器段 count u8=2 + u16×2=0；警告段
+    obsolete u16=0 + count u8=19 + flags u32=0；OSD profile 段 number=1/
+    selected=1（单 profile 模拟器）；overlay_radio_mode u8=0；camera_frame
+    w/h=24/11；link_quality_alarm u16=0（API 1.46 尾）。总长
+    10+160+1+5+7+2+1+2+2=190。
+
+    与简报参考布局的差异（按外部源码实现，2026-11-12 GitHub 取固件 4.5.1
+    tag 与 Configurator master 互证）：item_count 80 非 81（osd.h osd_items_e
+    机械计数 0..79，与 Configurator chooseDisplayFields API 1.46 数组 80 项
+    一致）；计时器段 count=2+u16×2 非 3+u16×3（osd.h osd_timer_e=2）；统计/
+    警告条目全 0 时 Configurator decode count 驱动循环 0 次（仅 console.error
+    告警），缩骨架应答合法。无参数源 → 空载荷降级。"""
+    params = (state or {}).get("params")
+    if params is None:
+        return b""
+    out = bytearray()
+    out += struct.pack("<BBBBHBBH", _OSD_FLAGS, _OSD_VIDEO_SYSTEM, 0, 0, 0,
+                       0, osd.OSD_ITEM_COUNT, 0)
+    virtual = params.virtual
+    for i in range(osd.OSD_ITEM_COUNT):
+        out += struct.pack("<H", _elem_pos(virtual, i))
+    out += bytes([_OSD_STAT_COUNT])                          # 统计段（条目全 0）
+    out += bytes([_OSD_TIMER_COUNT]) + b"\x00\x00" * _OSD_TIMER_COUNT
+    out += struct.pack("<HBI", 0, _OSD_WARNING_COUNT, 0)     # 警告段
+    out += bytes([1, 1])                                     # profile：单 profile 选中 1
+    out += bytes([0])                                        # overlay_radio_mode
+    out += bytes([24, 11])                                   # camera_frame w/h
+    out += struct.pack("<H", 0)                              # link_quality_alarm
+    return bytes(out)
+
+
+def _set_osd_config(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_SET_OSD_CONFIG(85)：len≥3 消费 addr u8 + value u16（尾部可选
+    screen u8 读出忽略；固件 4.5.1 msp.c 同款 3/4 字节双形态）。
+
+    addr < 80 → 元素写：osd_layout[addr] = value & 0x07FF（仅位置位）、
+    osd_enabled[addr] = bool(value & 0x0800)（可见位分解），置 changed；
+    变体位（bits 14-15）丢弃。addr ≥ 80 整体忽略——含 0xFF 通用设置块
+    (video_system/units/alarms/warnings/profile/camera)、0xFE 计时器块、
+    screen=0 统计屏开关形态（virtual 域无对应存储，诚实降级不冒充）。"""
+    if state is None or len(payload) < 3:
+        return b""
+    params = state.get("params")
+    if params is None:
+        return b""
+    addr = payload[0]
+    value = struct.unpack_from("<H", payload, 1)[0]
+    # 尾部可选 screen u8 读出（固件缺省 1）：screen==0 且 addr < 统计计数
+    # 为统计屏开关形态（固件分支一）——模拟器无统计屏域，整体忽略；
+    # screen==0 但 addr ≥ 31 仍落元素写分支（固件 else-if 语义忠实还原）
+    screen = payload[3] if len(payload) >= 4 else 1
+    if screen == 0 and addr < _OSD_STAT_COUNT:
+        return b""
+    if addr >= osd.OSD_ITEM_COUNT:
+        return b""
+    params.virtual.osd_layout[addr] = value & osd.OSD_POS_MASK
+    params.virtual.osd_enabled[addr] = bool(value & osd.OSD_VISIBLE)
+    _set_changed(state)
+    return b""
+
+
+def _set_text(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP2_SET_TEXT(0x3007)：[类型 u8][长度 u8][文本字节]（Configurator
+    MSPHelper.setText 先推长度字节、固件 msp.c sbufReadU8 读长度后按长收
+    字符——简报布局缺长度字节，按外部源码实现）；len≥2 消费。
+
+    类型 2 → virtual.craft_name = 文本[:32]（固件 MAX_NAME_LENGTH 截断
+    语义）、置 changed；文本字节以长度为准（尾部多余字节丢弃），UTF-8
+    容错解码。其余类型整体忽略（空载荷 ack）。"""
+    if state is None or len(payload) < 2:
+        return b""
+    params = state.get("params")
+    if params is None:
+        return b""
+    text_type, size = payload[0], payload[1]
+    if text_type != 2:
+        return b""
+    params.virtual.craft_name = \
+        payload[2:2 + size].decode("utf-8", "replace")[:32]
+    _set_changed(state)
+    return b""
+
+
 def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
     """命令表（身份组 + 状态组）：cmd → payload 载荷生成器。
 
@@ -473,4 +618,11 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         35: _set_mode_range,
         # 238 MSP_MODE_RANGES_EXTRA：count + 恒零语义段
         238: _mode_ranges_extra_payload,
+        # ---- OSD 组（Task 23，Configurator OSD tab） ----
+        # 84 MSP_OSD_CONFIG：190 字节固定布局（80 元素位置 + 可见位）
+        84: _osd_config_payload,
+        # 85 MSP_SET_OSD_CONFIG：元素位置/可见位写（其余块忽略）
+        85: _set_osd_config,
+        # 0x3007 MSP2_SET_TEXT：craft name 写入（[类型][长度][文本]）
+        0x3007: _set_text,
     }
