@@ -1,10 +1,10 @@
 # msp/handlers.py
 """MSP 命令表：身份组（虚拟飞控自报身份，纯标准库）。
 
-命令号对齐 Betaflight Configurator（src/js/msp/MSPCodes.js，2026-11 核对）：
+命令号对齐 Betaflight Configurator（src/js/msp/MSPCodes.ts，2026-11 核对）：
 1=MSP_API_VERSION、2=MSP_FC_VARIANT、3=MSP_FC_VERSION、4=MSP_BOARD_INFO、
-160=MSP_UID（v1 惯例值）。204 为设计文档规定的自报载荷（非真实
-MSP_SET_RC_TUNING 语义，见 docs/plans/2026-11-12-phase2.md §Task 16）。
+5=MSP_BUILD_INFO、160=MSP_UID（v1 惯例值）。204=MSP_SET_RC_TUNING 为写
+命令，身份组不应答（计划简报起草时误记 4/204 的映射，已修正）。
 """
 import struct
 from typing import Callable
@@ -33,11 +33,11 @@ def make_identity_handlers() -> dict[int, Callable[[bytes], bytes]]:
         2: lambda _payload: b"BTFL",
         # 3 MSP_FC_VERSION：固件版本 4.5.1
         3: lambda _payload: b"4.5.1",
-        # 4 MSP_BOARD_INFO（设计文档规定自报值：板名 + 构建时间戳 + 扩展位）
-        4: lambda _payload: b"FSKY sim build 2026-11-12 00:00:00 26",
-        # 204（设计文档规定自报值：板名 + 版本 0 + 标志 4 + 保留 8 字节）
-        204: lambda _payload: _BOARD_NAME + struct.pack("<H", 0)
-                              + bytes([4]) + b"\0" * 8,
+        # 4 MSP_BOARD_INFO：板名 + 板修订 0 + 标志 4 + 保留 8 字节
+        4: lambda _payload: _BOARD_NAME + struct.pack("<H", 0)
+                            + bytes([4]) + b"\0" * 8,
+        # 5 MSP_BUILD_INFO：构建来源字符串（日期 + 时间 + 修订尾号）
+        5: lambda _payload: b"FSKY sim build 2026-11-12 00:00:00 26",
         # 160 MSP_UID：12 字节固定 unique id
         MSP_UID: lambda _payload: _UID_PAYLOAD,
     }
