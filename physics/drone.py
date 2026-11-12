@@ -17,6 +17,11 @@ BOX_FLIP_OVER_AFTER_CRASH = 21 # 反乌龟（翻转脱困）
 # 解锁油门保护阈值：throttle < 该值才允许解锁（防炸桨；类比 BF min_check）
 ARM_THROTTLE_MAX = 0.10
 
+# ANGLE 自稳外环（设计 §7）：满杆目标倾角 ±45°；角度误差 × 外环增益
+# （°/s/°）→ 内环 rate setpoint。不暴露 UI（一期量级调通即可，后续按需开放）
+ANGLE_MAX_DEG = 45.0
+ANGLE_P = 8.0
+
 def eval_boxes(mode_ranges, aux_us) -> frozenset:
     """求值激活的模式集合（纯函数，Betaflight 语义简化版）。
     mode_ranges 条目 (box_id, aux_index, lo_us, hi_us)：aux_us[aux_index] 落入
@@ -140,8 +145,10 @@ class FlightController:
         二期扩展（缺省参数保证一期三参调用零修改）：boxes = 本帧激活模式集合
         （eval_boxes 求值结果）。virtual_fc=True 时 ARM 门控生效——ARM 激活且油门
         <ARM_THROTTLE_MAX 才解锁，加锁期间电机归零、每帧清 PID；virtual_fc=False
-        门控整段跳过（一期行为不变）。aux_us/angles_deg 为后续任务（MSP/自稳模式）
-        预留，本任务不消费。"""
+        门控整段跳过（一期行为不变）。angles_deg = (roll, pitch, yaw) 杆义姿态角
+        度（与 gyro_dps 同义系），ANGLE 模式外环消费，None 且 ANGLE 激活时防御性
+        退化 rate 输出（飞行接线层保证传入）。aux_us 为 MSP 任务预留，本任务不
+        消费。"""
         if self._virtual_fc:
             if BOX_ARM in boxes:
                 if not self.armed:
@@ -164,6 +171,12 @@ class FlightController:
         targets = (rate_setpoint(ch.roll, self._tune.rate["roll"], rt),
                    rate_setpoint(ch.pitch, self._tune.rate["pitch"], rt),
                    rate_setpoint(ch.yaw, self._tune.rate["yaw"], rt))
+        # ANGLE 自稳外环：杆位→目标倾角（±ANGLE_MAX_DEG），角度误差×ANGLE_P 替换
+        # roll/pitch 内环 setpoint；yaw 恒 rate 曲线（自稳不掺 yaw 偏航语义）
+        if BOX_ANGLE in boxes and angles_deg is not None:
+            targets = ((ch.roll * ANGLE_MAX_DEG - angles_deg[0]) * ANGLE_P,
+                       (ch.pitch * ANGLE_MAX_DEG - angles_deg[1]) * ANGLE_P,
+                       targets[2])
         # TPA：衰减因子乘到三轴 PID 输出后进混控。油门取上一帧四电机均值——比杆量
         # 多含饱和信息（饱和时均值≠杆量），且用历史值无代数环。真实 BF 只衰减 P/I
         # （真机 D 项重滤波、噪声主导，衰减反放大噪声）；本仿真 gyro 干净、D 无滤波，
