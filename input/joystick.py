@@ -7,15 +7,18 @@ _AXIS3_THRESHOLD = 1.0 / 3.0
 
 class JoystickInput(RCInput):
     """get_axis_fn(i) 返回第 i 轴原始值 [-1,1]（App 层接 pygame.joystick）。
-    二期新增 get_button_fn(i) 按钮态与 num_axes 轴数（均带默认值，旧构造零回归）：
-    前者供 AUX button 绑定，后者供主轴/AUX 轴越界防御（换设备回中）"""
+    二期新增 get_button_fn(i) 按钮态与 num_axes/num_buttons 轴数/按钮数（均带
+    默认值，旧构造零回归）：按钮源供 AUX button 绑定，两计数供主轴/AUX 轴与
+    AUX 按钮越界防御（换设备回中，防 get_axis/get_button 越界抛 IndexError）"""
     def __init__(self, get_axis_fn, mappings: dict, deadband: float = 0.02,
-                 get_button_fn=None, num_axes: int | None = None):
+                 get_button_fn=None, num_axes: int | None = None,
+                 num_buttons: int | None = None):
         self._get_axis = get_axis_fn
         self._mappings = mappings
         self._deadband = deadband
         self._get_button = get_button_fn
         self._num_axes = num_axes
+        self._num_buttons = num_buttons
 
     def _channel(self, name: str, center: float) -> float:
         """取绑定轴值：死区归零 + 反向。center: 0=对称轴, 0.5=油门轴"""
@@ -37,8 +40,12 @@ class JoystickInput(RCInput):
         """AUX 通道求值：none → 0.0；button 两档 ±1；axis3 三段（阈值 ±1/3）。
         无按钮源 / index 无效或越界 → 0.0（防御，读不到的开关不乱跳）"""
         if b.kind == "button":
-            if self._get_button is None or b.index < 0:
-                return 0.0  # 无按钮源防御（旧构造）+ 未绑定
+            if self._get_button is None:
+                return 0.0  # 无按钮源防御（旧构造）
+            if b.index < 0 or (self._num_buttons is not None
+                               and b.index >= self._num_buttons):
+                return 0.0  # 未绑定 / 按钮越界按未绑定回中（换设备防御；
+                            # num_buttons 未知不检查，与 num_axes 同款语义）
             return 1.0 if self._get_button(b.index) else -1.0
         if b.kind == "axis3":
             if b.index < 0:

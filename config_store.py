@@ -246,7 +246,7 @@ class ConfigStore:
         if cls is DroneParams and isinstance(data, dict) \
                 and data.get("params_schema") != PARAMS_SCHEMA:
             ver = data.get("params_schema")
-            if ver != 4:                    # v4 档 additive：不重置任何字段
+            if ver != 4:                    # 非 v4 档才重置（v4 档 additive：仅升版本，不重置任何字段）
                 d = default_drone_params()
                 obj.pid = d.pid
                 if ver != 3:                # v3 档仅 pid 过时，rate 语义未变
