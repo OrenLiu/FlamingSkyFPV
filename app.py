@@ -8,9 +8,10 @@ from imgui.integrations.pygame import PygameRenderer
 from OpenGL.GL import glActiveTexture, GL_TEXTURE0
 import soup3D
 
-from config_store import (ConfigStore, Settings, DroneParams, RCConfig,
-                          DEFAULT_PRESET_ID, list_preset_ids, load_preset,
-                          save_preset, migrate_legacy_drone)
+from config_store import (CONFIG_DIR, DRONES_DIR, ConfigStore, Settings,
+                          DroneParams, RCConfig, DEFAULT_PRESET_ID,
+                          list_preset_ids, load_preset, save_preset,
+                          migrate_legacy_drone)
 from scene_loader import list_scenes
 from shaderpacks import runtime
 from shaderpacks.loader import load_pack
@@ -19,9 +20,7 @@ from input.keyboard import KeyboardInput
 from input.joystick import JoystickInput
 
 RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选
-
-# 预设目录（config_store 预设函数集的消费路径：每机一 json，见二期设计文档）
-DRONES_DIR = "config/drones"
+# 配置根/预设目录常量在 config_store 定义（app 与 screens 同源引用，防漂移）
 
 # 中文字体候选（spike 验证过的顺序）
 FONT_PATHS = [
@@ -46,12 +45,12 @@ def load_cjk_font():
 class App:
     """全局唯一应用对象：窗口、配置、输入、场景列表与当前 Screen"""
     def __init__(self):
-        self.store = ConfigStore("config")
+        self.store = ConfigStore(CONFIG_DIR)
         self.settings = self.store.load("settings", Settings)
         # 二期多预设接线（App 生命周期三步）：一期 drone.json 存量档先迁移为
         # 默认机预设；预设目录空 → 自动建默认机；current_drone_id 失效（旧档
         # "default"/预设被删）→ 回落列表第一台（下次 save_all 落盘）
-        migrate_legacy_drone("config")
+        migrate_legacy_drone(CONFIG_DIR)
         ids = list_preset_ids(DRONES_DIR)
         if not ids:
             save_preset(DRONES_DIR, DEFAULT_PRESET_ID, DroneParams())

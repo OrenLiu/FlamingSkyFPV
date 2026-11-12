@@ -240,9 +240,15 @@ class ConfigStore:
         with open(self._path(name), "w", encoding="utf-8") as f:
             json.dump(dataclasses.asdict(obj), f, ensure_ascii=False, indent=2)
 
-# ---- 预设存储函数集（二期多预设管理数据层：drones_dir = "config/drones"，每机一文件） ----
+# ---- 预设存储函数集（二期多预设管理数据层：drones_dir = DRONES_DIR，每机一文件） ----
 # 六个函数全部经 ConfigStore(drones_dir) 复用 load/save：损坏备份 .bak 与
 # params_schema 三档迁移自动继承，无需各自重写容错逻辑
+
+# 配置根（settings/rc 存档目录）与预设目录（每机一 json）。常量定义在此、
+# app.py 与 screens/drone_params.py 两侧引用同一来源，防字面量漂移
+# （screens 不 import app，依赖方向仍单向：screens → config_store）
+CONFIG_DIR = "config"
+DRONES_DIR = os.path.join(CONFIG_DIR, "drones")
 
 # 默认机预设 id：migrate_legacy_drone 的迁移目标 + App 启动空列表时自动建机，
 # 两处共用同一常量防字面量漂移
