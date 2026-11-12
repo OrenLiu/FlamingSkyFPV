@@ -50,6 +50,15 @@ Features 位表互证；RX_MSP=「遥控经 MSP 注入」即虚拟飞控实况�
 对齐固件内部序 [roll,pitch,yaw,throttle,AUX..]（Configurator 通道条
 标签固定 RPYT——Task 20 权宜序 [油门,yaw,roll,pitch] 废弃）。
 
+Task 35 组（Task 25 实测衍生：OSD tab 不显示、Ports tab 无端口）：
+189=MSP_OSD_CANVAS（PAL 30×16 画布 u8×2——osd store 加载链 API ≥ 1.45
+首环 await，缺失即超时 reject 中断 84/44 整链，haveSomeOsd 恒 false）、
+188=MSP_SET_OSD_CANVAS（HD VTX 推送用 IN 命令，no-op）、88=MSP_VTX_CONFIG
+（无 VTX 设备实况 15 字节——Ports tab loadConfig 的前置 gate，reject 会被
+catch 吞掉串口加载链）、0x1009 MSP2_COMMON_SERIAL_CONFIG（Ports tab 实际
+数据源：count u8 + 每端口 id u8/functions u32/四 baud u8，54 不在其链上）、
+0x100A MSP2_COMMON_SET_SERIAL_CONFIG（保存链 v2 SET，与 55 同款整体忽略）。
+
 状态组载荷布局经外部源码核对（2026-11-12 GitHub 取 tag 4.5.1 的
 src/main/msp/msp.c L1080-1133 与 Configurator src/js/msp/MSPHelper.ts
 L841-903）：STATUS_EX 与固件写序逐字段一致；STATUS 应答 11 字节止于
@@ -719,6 +728,38 @@ def _set_rx_config(payload: bytes, state: "dict | None" = None) -> bytes:
     return b""
 
 
+# ---- Task 35 组（OSD tab 可见性 + Ports tab 空端口，2026-11-13） ----
+# 外部源码核对（Configurator master + 固件 4.5.1 tag 互证，详见测试
+# 文件 Task 35 段核对记录）：
+# - OSD tab 根因：osd store fetchOsdInfo 在 API ≥ 1.45 时先 await
+#   MSP_OSD_CANVAS(189)，未实现 → 超时 reject 中断 84/44 整链 →
+#   haveSomeOsd 恒 false → tab 不渲染。189 应答 = canvas_cols u8 +
+#   canvas_rows u8（固件 msp.c L1057-1062），PAL SD MAX7456 画布
+#   30×16（与 MSP_OSD_CONFIG 的 video_system=1 自洽，applyCanvas 写回
+#   值与 Configurator 内建 PAL 默认一致）
+_OSD_CANVAS_PAYLOAD = bytes([30, 16])
+assert len(_OSD_CANVAS_PAYLOAD) == 2
+
+# - MSP_VTX_CONFIG(88)：Ports tab loadConfig 的前置 gate（reject 会被
+#   .catch 吞掉整条串口加载链）。15 字节无 VTX 设备实况：vtx_type=
+#   VTXDEV_UNKNOWN(0xFF)、band/channel/power=0（4.5.1 USE_VTX_TABLE 构建
+#   PG 复位值）、pit/freq/ready/lowPowerDisarm/pitModeFreq=0、
+#   vtx_table_available=0（无 VTX 表域 → PortsLegacyView 的「VTX 表未
+#   配置」警告框不出现）
+_VTX_CONFIG_PAYLOAD = bytes([0xFF]) + b"\x00" * 14
+assert len(_VTX_CONFIG_PAYLOAD) == 15
+
+# - MSP2_COMMON_SERIAL_CONFIG(0x1009)：Ports tab 的实际串口数据源
+#   （loadSerialConfig 恒发 0x1009，54 不在其链上）。count u8 前导 +
+#   每端口 [identifier u8, functions u32, msp/gps/telemetry/blackbox
+#   baud u8×4]（MSPHelper.ts L1723-1743，portConfigSize=remaining/count
+#   容尾）。单端口 UART1(id 0) + MSP 位(u32=1) + 115200(索引 5)，与
+#   54 应答同实况不同帧形态
+_MSP2_SERIAL_CONFIG_PAYLOAD = (bytes([1])
+                               + struct.pack("<BIBBBB", 0, 1, 5, 5, 5, 5))
+assert len(_MSP2_SERIAL_CONFIG_PAYLOAD) == 10
+
+
 def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
     """命令表（身份组 + 状态组）：cmd → payload 载荷生成器。
 
@@ -818,4 +859,20 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         # （仿真无死区域，SET 忽略）
         125: lambda _payload, _state=None: _RC_DEADBAND_PAYLOAD,
         218: _noop,
+        # ---- Task 35 组（OSD tab 可见性 + Ports tab 空端口） ----
+        # 189 MSP_OSD_CANVAS：PAL 30×16 画布——解锁 osd store 加载链首环
+        # （API ≥ 1.45 前置 await，缺失即整链超时 reject）
+        189: lambda _payload, _state=None: _OSD_CANVAS_PAYLOAD,
+        # 188 MSP_SET_OSD_CANVAS：no-op（HD VTX 推画布的 IN 命令，
+        # Configurator 不发送；SD MAX7456 实况无消费语义）
+        188: _noop,
+        # 88 MSP_VTX_CONFIG：无 VTX 设备实况 15 字节（Ports tab 前置
+        # gate——reject 会吞掉串口加载链）
+        88: lambda _payload, _state=None: _VTX_CONFIG_PAYLOAD,
+        # 0x1009 MSP2_COMMON_SERIAL_CONFIG：Ports tab 数据源（count u8 +
+        # 单端口 UART1/MSP/115200）
+        0x1009: lambda _payload, _state=None: _MSP2_SERIAL_CONFIG_PAYLOAD,
+        # 0x100A MSP2_COMMON_SET_SERIAL_CONFIG：整体忽略（Ports 页保存
+        # 走 v2 SET 命令；UART1 恒含 MSP 位无法误关，与 55 同款降级）
+        0x100A: _noop,
     }
