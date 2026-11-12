@@ -155,6 +155,17 @@ class FlightWorld:
         return tuple(math.degrees(x) for x in e)
 
     @property
+    def euler_stick_deg(self) -> tuple:
+        """(roll, pitch, yaw) 杆义姿态角度制（Task 14）：bullet euler 的 y/z 轴
+        正方向与杆义相反（同 gyro_dps 的符号翻转）——ANGLE/HORIZON 自稳外环与
+        反乌龟倒置检测消费（与 gyro_dps 同义系，保证闭环符号一致）"""
+        e = p.getEulerFromQuaternion(
+            p.getBasePositionAndOrientation(self._body,
+                                            physicsClientId=self._cid)[1])
+        d = [math.degrees(x) for x in e]
+        return (d[0], -d[1], -d[2])
+
+    @property
     def velocity(self) -> tuple:
         return p.getBaseVelocity(self._body, physicsClientId=self._cid)[0]
 
