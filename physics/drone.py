@@ -6,6 +6,29 @@ from config_store import DroneParams, RateParams
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
+# ---- 模式开关（Mode）（二期虚拟飞控） ----
+# box permanentId 常量：Betaflight 4.5.x pg/box_ids.h 参考值（Task 17 spike 会对外部
+# 源码核对，若不一致以外部源码为准并在提交说明记录差异）
+BOX_ARM = 0                    # 解锁（电机供能）
+BOX_ANGLE = 1                  # 自稳角模式
+BOX_HORIZON = 2                # 地平线模式（自稳+rate 混合）
+BOX_FLIP_OVER_AFTER_CRASH = 21 # 反乌龟（翻转脱困）
+
+# 解锁油门保护阈值：throttle < 该值才允许解锁（防炸桨；类比 BF min_check）
+ARM_THROTTLE_MAX = 0.10
+
+def eval_boxes(mode_ranges, aux_us) -> frozenset:
+    """求值激活的模式集合（纯函数，Betaflight 语义简化版）。
+    mode_ranges 条目 (box_id, aux_index, lo_us, hi_us)：aux_us[aux_index] 落入
+    [lo_us, hi_us] 闭区间 → 该 box 激活。aux_index 越界的条目忽略（绑定未配置时
+    不激活任何模式）；同一 box 多条目命中取并集。"""
+    active = set()
+    for box_id, aux_index, lo_us, hi_us in mode_ranges:
+        if aux_us is not None and 0 <= aux_index < len(aux_us) \
+                and lo_us <= aux_us[aux_index] <= hi_us:
+            active.add(box_id)
+    return frozenset(active)
+
 def rate_setpoint(rc: float, rate: RateParams, rate_type: str) -> float:
     """rc∈[-1,1] + 单轴 rate 参数 → 目标角速度 °/s（纯函数，三轴各自调用）。
     betaflight_actual：expo 混合 + superRate 超线性（BF 4.x Actual Rates 公式）；
@@ -28,6 +51,10 @@ PID_MIX_SCALING = 1e5
 # ∝ 转速² → 满油门推力 = 参考值 × (battery_voltage/REF_VOLTAGE)²。thrust_ratio
 # 语义 = 本参考电压下的推重比（DroneParams 注释同）
 REF_VOLTAGE = 14.8
+
+# TPA 油门记忆初值：悬停近似（1/sqrt(7)≈0.38，取 0.35）；首帧后即被实际电机均值
+# 覆盖。set_params 重建与加锁重置共用同一常量，防两处漂移
+TPA_THROTTLE_INIT = 0.35
 
 def tpa_factor(throttle: float, percent: float, breakpoint: float) -> float:
     """TPA 衰减因子（Throttle PID Attenuation）：油门断点以下 1.0（悬停区不动）；
@@ -88,28 +115,61 @@ class FlightController:
 
     def set_params(self, params: DroneParams):
         self._params = params
-        g = params.pid
+        # 调参域：virtual_fc=True 消费 virtual.tune（地面站调参生效），False 消费
+        # 平铺字段快照（一期行为，active_tune 内部深拷贝）。建控时取一次存引用，
+        # update 逐帧只读不重建（避免每帧深拷贝分配）
+        t = params.active_tune()
+        self._tune = t
+        g = t.pid
         self._pid = {
             "roll": PIDController(g["roll"].p, g["roll"].i, g["roll"].d),
             "pitch": PIDController(g["pitch"].p, g["pitch"].i, g["pitch"].d),
             "yaw": PIDController(g["yaw"].p, g["yaw"].i, g["yaw"].d),
         }
-        # TPA 油门记忆初值：悬停近似（1/sqrt(7)≈0.38，取 0.35）；首帧后即被
-        # 实际电机均值覆盖。set_params 重建（换机体/参数页保存），不复用旧值
-        self._tpa_throttle = 0.35
+        # TPA 油门记忆：初值见 TPA_THROTTLE_INIT；首帧后即被实际电机均值覆盖。
+        # set_params 重建（换机体/参数页保存），不复用旧值
+        self._tpa_throttle = TPA_THROTTLE_INIT
+        # 飞控模式与解锁状态：set_params = 重建飞控（换机体/参数页保存）→ 回锁定态
+        self._virtual_fc = params.virtual_fc
+        self.armed = False
+        self.arm_denied_once = False
 
-    def update(self, ch: Channels, gyro_dps: tuple, dt: float) -> list:
-        """gyro_dps = (roll右, pitch抬头, yaw右) 杆义角速度 °/s → 四电机油门 [0,1]"""
-        rt = self._params.rate_type
-        targets = (rate_setpoint(ch.roll, self._params.rate["roll"], rt),
-                   rate_setpoint(ch.pitch, self._params.rate["pitch"], rt),
-                   rate_setpoint(ch.yaw, self._params.rate["yaw"], rt))
+    def update(self, ch: Channels, gyro_dps: tuple, dt: float,
+               aux_us=None, boxes=frozenset(), angles_deg=None) -> list:
+        """gyro_dps = (roll右, pitch抬头, yaw右) 杆义角速度 °/s → 四电机油门 [0,1]
+        二期扩展（缺省参数保证一期三参调用零修改）：boxes = 本帧激活模式集合
+        （eval_boxes 求值结果）。virtual_fc=True 时 ARM 门控生效——ARM 激活且油门
+        <ARM_THROTTLE_MAX 才解锁，加锁期间电机归零、每帧清 PID；virtual_fc=False
+        门控整段跳过（一期行为不变）。aux_us/angles_deg 为后续任务（MSP/自稳模式）
+        预留，本任务不消费。"""
+        if self._virtual_fc:
+            if BOX_ARM in boxes:
+                if not self.armed:
+                    if ch.throttle < ARM_THROTTLE_MAX:
+                        self.armed = True
+                        self.arm_denied_once = False
+                    else:
+                        # 油门保护：高油门尝试解锁被拒（ latch 一次供 UI 提示）
+                        self.arm_denied_once = True
+            else:
+                self.armed = False    # 撤 ARM → 立即加锁
+            if not self.armed:
+                # 加锁期每帧重置（幂等）：解锁瞬间 = 干净初态——三轴 PID 积分/D
+                # 状态清零 + TPA 油门记忆回悬停初值，等价全新飞控
+                for pid in self._pid.values():
+                    pid.reset()
+                self._tpa_throttle = TPA_THROTTLE_INIT
+                return [0.0, 0.0, 0.0, 0.0]
+        rt = self._tune.rate_type
+        targets = (rate_setpoint(ch.roll, self._tune.rate["roll"], rt),
+                   rate_setpoint(ch.pitch, self._tune.rate["pitch"], rt),
+                   rate_setpoint(ch.yaw, self._tune.rate["yaw"], rt))
         # TPA：衰减因子乘到三轴 PID 输出后进混控。油门取上一帧四电机均值——比杆量
         # 多含饱和信息（饱和时均值≠杆量），且用历史值无代数环。真实 BF 只衰减 P/I
         # （真机 D 项重滤波、噪声主导，衰减反放大噪声）；本仿真 gyro 干净、D 无滤波，
         # D 增益同样随油门放大并越离散稳定边界（D×K 天花板），故 P/I/D 三项全衰减
-        f = tpa_factor(self._tpa_throttle, self._params.tpa_percent,
-                       self._params.tpa_breakpoint)
+        f = tpa_factor(self._tpa_throttle, self._tune.tpa_percent,
+                       self._tune.tpa_breakpoint)
         outs = (self._pid["roll"].update(targets[0], gyro_dps[0], dt) * f,
                 self._pid["pitch"].update(targets[1], gyro_dps[1], dt) * f,
                 self._pid["yaw"].update(targets[2], gyro_dps[2], dt) * f)
