@@ -13,6 +13,11 @@
 virtual.tune 本体并置 state["changed"]（dispatch → on_change → 脏标志 →
 飞行帧首 set_params 即时生效）。
 
+模式组（Task 22，Modes 页开关范围）：116=MSP_BOXNAMES、119=MSP_BOXIDS、
+34=MSP_MODE_RANGES、35=MSP_SET_MODE_RANGE、238=MSP_MODE_RANGES_EXTRA。
+GET/SET 恒读写 virtual.mode_ranges（平铺域无此字段）；µs↔step 换算
+900+step×25；SET_MODE_RANGE 兼容 5/7 字节双形态、slot≥20 整体忽略。
+
 MSP2_GET_TEXT(0x3006=12294) 为 v2 命令（fix round 3）：连接序列在身份组
 之后请求 BUILDKEY(5)/CRAFT_NAME(2)/PILOT_NAME(1)（serial_backend.ts
 processBuildConfiguration/processCraftName），无应答会被判超时断开。
@@ -49,6 +54,18 @@ MSP2_GET_TEXT = 0x3006
 # 仿真 D 标定域与 BF 展示域差百倍（config_store._default_pid 注释：存档/
 # 展示为 BF 量级刻度、仿真内部经 PID_MIX_SCALING 换算，默认 D=0.4 ↔ BF 40）
 _PID_D_SCALE = 100.0
+
+# ---- 模式组常量（Task 22，Configurator Modes 页） ----
+# 槽位数 = 固件 4.5.1 fc/rc_modes.h MAX_MODE_ACTIVATION_CONDITION_COUNT
+MODE_RANGE_SLOTS = 20
+
+# BOXNAMES：box 显示名 0x3b 分隔（MSPHelper.ts:1276-1295 按 ';' 拆解，
+# 条目数与 BOXIDS 对齐；显示名参考值，以固件 box 名称表核对）
+_BOX_NAMES = b"ARM;ANGLE;HORIZON;FLIP OVER AFTER CRASH"
+
+# BOXIDS：permanentId 表（plan 1 Task 10 已按固件 box_ids.h 核对：ARM=0/
+# ANGLE=1/HORIZON=2/FLIP_OVER_AFTER_CRASH=21，与 drone.py BOX_* 常量同源）
+_BOX_IDS = bytes([0, 1, 2, 21])
 
 # MSP_PID 条目序（固件 4.5.1 pid.h PID_ITEM_COUNT=5：ROLL/PITCH/YAW/LEVEL/MAG）；
 # 仿真仅前三轴有映射，LEVEL/MAG 恒 0（诚实降级）
@@ -322,6 +339,81 @@ def _set_pid_advanced(payload: bytes, state: "dict | None" = None) -> bytes:
     return b""
 
 
+# ---- 模式组（Task 22） ----
+
+def _step_to_us(step: int) -> int:
+    """step（25µs 步进基准 900µs）→ µs（Configurator 编码段逆换算）。"""
+    return 900 + step * 25
+
+
+def _us_to_step(us: float) -> int:
+    """µs → step：(µs−900)//25，经 _u8 钳位 [0,255]（实际域 900-2100 →
+    0-48，钳位纯防御）。"""
+    return _u8((us - 900) // 25)
+
+
+def _slot_entry(ranges: list, i: int) -> tuple:
+    """按槽序号取 mode_ranges 条目；越界（未配置槽）→ (0, 0, 0, 0) 缺省。
+
+    JSON round-trip 后条目为 list，tuple() 归一为可解包元组。"""
+    return tuple(ranges[i]) if i < len(ranges) else (0, 0, 0, 0)
+
+
+def _mode_ranges_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_MODE_RANGES(34)：20 槽 ×4B = permanentId u8、auxChannelIndex u8、
+    startStep u8、endStep u8（固件 msp.c 写序）。读 virtual.mode_ranges
+    （出厂默认 ARM=AUX1 高段，Modes 页开箱可用）；未配置槽恒 (0,0,0,0)。
+    无参数源 → 空载荷降级。"""
+    params = (state or {}).get("params")
+    if params is None:
+        return b""
+    out = bytearray()
+    for i in range(MODE_RANGE_SLOTS):
+        box_id, aux, lo_us, hi_us = _slot_entry(params.virtual.mode_ranges, i)
+        out += struct.pack("<4B", _u8(box_id), _u8(aux),
+                           _us_to_step(lo_us), _us_to_step(hi_us))
+    return bytes(out)
+
+
+def _mode_ranges_extra_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_MODE_RANGES_EXTRA(238)：count u8=20 + 每槽 3B（permanentId 与
+    MODE_RANGES 槽位对齐、modeLogic=0 恒 OR、linkedTo=0——仿真无 linked
+    mode，恒零语义段）。无参数源 → 空载荷降级。"""
+    params = (state or {}).get("params")
+    if params is None:
+        return b""
+    out = bytearray([MODE_RANGE_SLOTS])
+    for i in range(MODE_RANGE_SLOTS):
+        box_id = _slot_entry(params.virtual.mode_ranges, i)[0]
+        out += struct.pack("<3B", _u8(box_id), 0, 0)
+    return bytes(out)
+
+
+def _set_mode_range(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_SET_MODE_RANGE(35)：len≥5 消费；7 字节形态尾 2 字节（modeLogic/
+    linkedTo）忽略（无 linked mode 语义），len 5 旧形态（尾部缺省 0）同容。
+
+    布局 = slot u8 + permanentId u8 + auxChannelIndex u8 + startStep u8 +
+    endStep u8 (+ modeLogic u8 + linkedTo u8)。slot ≥ MODE_RANGE_SLOTS
+    整体忽略；列表补长（缺省 (0,0,0,0)）后写元组 (permanentId, aux,
+    900+start×25, 900+end×25)，置 changed。start=end=0 → 900/900µs 在
+    aux 实际域 1000-2000 永不激活（eval_boxes 语义下等价清空）。"""
+    if state is None or len(payload) < 5:
+        return b""
+    params = state.get("params")
+    if params is None:
+        return b""
+    slot, perm_id, aux, start, end = payload[:5]
+    if slot >= MODE_RANGE_SLOTS:
+        return b""
+    ranges = params.virtual.mode_ranges
+    while len(ranges) <= slot:
+        ranges.append((0, 0, 0, 0))
+    ranges[slot] = (perm_id, aux, _step_to_us(start), _step_to_us(end))
+    _set_changed(state)
+    return b""
+
+
 def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
     """命令表（身份组 + 状态组）：cmd → payload 载荷生成器。
 
@@ -372,4 +464,13 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         # 94 MSP_PID_ADVANCED / 95 MSP_SET_PID_ADVANCED：59B（TPA/cells）
         94: _pid_advanced_payload,
         95: _set_pid_advanced,
+        # ---- 模式组（Task 22，Configurator Modes 页） ----
+        # 116 MSP_BOXNAMES / 119 MSP_BOXIDS：显示名与 permanentId 表
+        116: lambda _payload, _state=None: _BOX_NAMES,
+        119: lambda _payload, _state=None: _BOX_IDS,
+        # 34 MSP_MODE_RANGES / 35 MSP_SET_MODE_RANGE：20 槽 ×4B 步进编码
+        34: _mode_ranges_payload,
+        35: _set_mode_range,
+        # 238 MSP_MODE_RANGES_EXTRA：count + 恒零语义段
+        238: _mode_ranges_extra_payload,
     }
