@@ -56,10 +56,11 @@ class App:
         self.preset_fallback = False         # 预设回落提示标记（设置页显示）
         self._pending_preset_reload = False  # 帧边界执行的预设重载标记（同 _pending_rebuild）
         self.debug_overlay = False    # F3 调试覆盖层开关（FPS + 相机坐标）
-        # 自测窗口平均帧率：io.framerate = 1/io.delta_time，但主循环只调
-        # process_event 从不调集成层的 process_inputs() → delta_time 恒为
-        # 初始 0.01667 → framerate 恒 60 不可用（统计见 run() 的窗口计数）
-        self._fps_avg = 0.0        # 窗口平均帧率（0.5s 窗口；io.framerate 因 delta_time 无人维护恒 60，不可用）
+        # 自测窗口平均帧率：0.5s 真实时间窗口计数（perf_counter 浮点精度）。
+        # io.framerate（=1/io.delta_time 平滑值）自 run() 按实测帧间隔喂
+        # delta_time 起已可用，但窗口计数不受 clock.tick 毫秒量化影响、更稳，
+        # 故保留（run() 内注释见 delta_time 喂入机制）
+        self._fps_avg = 0.0        # 窗口平均帧率（0.5s 窗口计数）
         self._fps_frames = 0       # 当前窗口帧计数
         self._fps_window_start = 0.0
         self.screen = None
@@ -239,6 +240,14 @@ class App:
             else:
                 soup3D.update()               # 先渲 3D（spike 验证的顺序）
                 self.screen.render_scene()    # 3D 直渲钩子（显示列表失效，见 base.py）
+            # imgui 内部时间每帧 io.Time += io.DeltaTime（光标闪烁、退格/方向键
+            # 重复、双击判定全吃这个时间）。集成层 process_inputs() 从不被调
+            # （主循环只走 process_event 事件流），delta_time 恒为初始 1/60 →
+            # 实际帧率 F 时 UI 时间以 F/60 倍速快进：unlimited 实测 ~900fps 即
+            # ~15 倍速，光标高频闪烁出残影、文本编辑按键重复飞快。按实测帧间隔
+            # 喂 imgui；clock.tick 整数毫秒在高帧率下可量化为 0ms，下限 1ms
+            # 防 UI 时间冻结
+            imgui.get_io().delta_time = dt if dt > 0.0 else 0.001
             imgui.new_frame()
             # push 前捕获：render_ui 处理器可能触发重建改动 self.font（帧中禁字体
             # 图集操作），pop 条件若再读 self.font 会与 push 时不一致 → 栈失衡
