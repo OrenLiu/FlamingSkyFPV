@@ -20,6 +20,10 @@ class Settings:
     # "builtin_performance"，不升 schema（fps_mode 先例）。失效 id 由 App.
     # reload_shader_preset 回落 builtin_performance（spec：着色器预设系统设计 5.7）
     shader_preset: str = "builtin_performance"
+    # 当前机预设 id（config/drones/<id>.json，二期多预设管理）。additive 字段：旧档
+    # 缺失键加载时补默认 "default"，不升 schema（fps_mode/shader_preset 先例）。
+    # id 失效（预设被删）由 App.__init__ 回落列表第一台，select_drone 切换时落盘
+    current_drone_id: str = "default"
 
 @dataclass
 class PIDGains:
@@ -240,6 +244,10 @@ class ConfigStore:
 # 六个函数全部经 ConfigStore(drones_dir) 复用 load/save：损坏备份 .bak 与
 # params_schema 三档迁移自动继承，无需各自重写容错逻辑
 
+# 默认机预设 id：migrate_legacy_drone 的迁移目标 + App 启动空列表时自动建机，
+# 两处共用同一常量防字面量漂移
+DEFAULT_PRESET_ID = "默认机"
+
 def sanitize_preset_id(name: str) -> str:
     """预设 id 清洗：strip；"/" "\\" 与控制字符（ord<32）替换 "_"；空 → "default" """
     cleaned = "".join("_" if ch in ("/", "\\") or ord(ch) < 32 else ch
@@ -285,12 +293,12 @@ def copy_preset(drones_dir: str, src_id: str, new_name: str) -> str:
     return new_id
 
 def migrate_legacy_drone(config_dir: str) -> None:
-    """一期存量档迁移：<config_dir>/drone.json 存在且 drones/默认机.json 不存在
-    → 逐字深拷贝为默认机预设 + 旧档改名 drone.json.migrated 归档；否则不操作
-    （幂等：二次调用时旧档已不在，默认机参数不被覆盖）"""
+    """一期存量档迁移：<config_dir>/drone.json 存在且 drones/DEFAULT_PRESET_ID.json
+    不存在 → 逐字深拷贝为默认机预设 + 旧档改名 drone.json.migrated 归档；否则
+    不操作（幂等：二次调用时旧档已不在，默认机参数不被覆盖）"""
     legacy = os.path.join(config_dir, "drone.json")
     drones_dir = os.path.join(config_dir, "drones")
-    target = os.path.join(drones_dir, "默认机.json")
+    target = os.path.join(drones_dir, f"{DEFAULT_PRESET_ID}.json")
     if not os.path.exists(legacy) or os.path.exists(target):
         return
     os.makedirs(drones_dir, exist_ok=True)
