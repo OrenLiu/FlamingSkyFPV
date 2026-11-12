@@ -22,26 +22,43 @@ set_mat_queue = weakref.WeakValueDictionary()
 light_queue = {}
 
 
+# uniform 上传函数走 PyOpenGL raw 层（ctypes 直调 + argtypes，无包装层
+# 的每调用 Python 对象分配——包装层 _cast/转换器是 GC 升代大户，见
+# gc-stutter 诊断；raw 层语义一致，仅无 glGetError 检查，引擎已有独立检查）
+from OpenGL.raw.GL.VERSION.GL_2_0 import (
+    glUniform1f as _glUniform1f, glUniform2f as _glUniform2f,
+    glUniform3f as _glUniform3f, glUniform4f as _glUniform4f,
+    glUniform1i as _glUniform1i, glUniform2i as _glUniform2i,
+    glUniform3i as _glUniform3i, glUniform4i as _glUniform4i,
+    glUniform1fv as _glUniform1fv, glUniform2fv as _glUniform2fv,
+    glUniform3fv as _glUniform3fv, glUniform4fv as _glUniform4fv,
+    glUniform1iv as _glUniform1iv, glUniform2iv as _glUniform2iv,
+    glUniform3iv as _glUniform3iv, glUniform4iv as _glUniform4iv,
+    glUniformMatrix2fv as _glUniformMatrix2fv,
+    glUniformMatrix3fv as _glUniformMatrix3fv,
+    glUniformMatrix4fv as _glUniformMatrix4fv,
+)
+
 type_map = {
-    soup3D.name.FLOAT_VEC1: glUniform1f,
-    soup3D.name.FLOAT_VEC2: glUniform2f,
-    soup3D.name.FLOAT_VEC3: glUniform3f,
-    soup3D.name.FLOAT_VEC4: glUniform4f,
-    soup3D.name.INT_VEC1: glUniform1i,
-    soup3D.name.INT_VEC2: glUniform2i,
-    soup3D.name.INT_VEC3: glUniform3i,
-    soup3D.name.INT_VEC4: glUniform4i,
-    soup3D.name.ARRAY_FLOAT_VEC1: glUniform1fv,
-    soup3D.name.ARRAY_FLOAT_VEC2: glUniform2fv,
-    soup3D.name.ARRAY_FLOAT_VEC3: glUniform3fv,
-    soup3D.name.ARRAY_FLOAT_VEC4: glUniform4fv,
-    soup3D.name.ARRAY_INT_VEC1: glUniform1iv,
-    soup3D.name.ARRAY_INT_VEC2: glUniform2iv,
-    soup3D.name.ARRAY_INT_VEC3: glUniform3iv,
-    soup3D.name.ARRAY_INT_VEC4: glUniform4iv,
-    soup3D.name.ARRAY_MATRIX_VEC2: glUniformMatrix2fv,
-    soup3D.name.ARRAY_MATRIX_VEC3: glUniformMatrix3fv,
-    soup3D.name.ARRAY_MATRIX_VEC4: glUniformMatrix4fv,
+    soup3D.name.FLOAT_VEC1: _glUniform1f,
+    soup3D.name.FLOAT_VEC2: _glUniform2f,
+    soup3D.name.FLOAT_VEC3: _glUniform3f,
+    soup3D.name.FLOAT_VEC4: _glUniform4f,
+    soup3D.name.INT_VEC1: _glUniform1i,
+    soup3D.name.INT_VEC2: _glUniform2i,
+    soup3D.name.INT_VEC3: _glUniform3i,
+    soup3D.name.INT_VEC4: _glUniform4i,
+    soup3D.name.ARRAY_FLOAT_VEC1: _glUniform1fv,
+    soup3D.name.ARRAY_FLOAT_VEC2: _glUniform2fv,
+    soup3D.name.ARRAY_FLOAT_VEC3: _glUniform3fv,
+    soup3D.name.ARRAY_FLOAT_VEC4: _glUniform4fv,
+    soup3D.name.ARRAY_INT_VEC1: _glUniform1iv,
+    soup3D.name.ARRAY_INT_VEC2: _glUniform2iv,
+    soup3D.name.ARRAY_INT_VEC3: _glUniform3iv,
+    soup3D.name.ARRAY_INT_VEC4: _glUniform4iv,
+    soup3D.name.ARRAY_MATRIX_VEC2: _glUniformMatrix2fv,
+    soup3D.name.ARRAY_MATRIX_VEC3: _glUniformMatrix3fv,
+    soup3D.name.ARRAY_MATRIX_VEC4: _glUniformMatrix4fv,
 
     soup3D.name.BYTE: GL_BYTE,
     soup3D.name.BYTE_US: GL_UNSIGNED_BYTE,
@@ -912,7 +929,9 @@ class ShaderProgram:
                 if v_type in type_map:
                     type_map[v_type](loc, *value)
 
-        self.uniform_loc = {}
+        # clear() 而非重建 dict：CPython dict clear 后保留 entry 表容量，
+        # 同键重新插入不再分配（每帧 45 surface × 新 dict 是 GC 升代大户）
+        self.uniform_loc.clear()
         self.dirty = False
 
     def has_uniform(self, v_name: str) -> bool:
@@ -1040,6 +1059,12 @@ class AutoSP:
         self.model_mat = glm.mat4(1.0)
         self.view_mat = glm.mat4(1.0)
         self.projection_mat = glm.mat4(1.0)
+        # 持久 value_ptr：矩阵对象此后恒定（setter 改为原地拷贝，不替换引用），
+        # 指针数据随矩阵原地写自动同步；消除每帧 glm.value_ptr() 的 ctypes
+        # 指针包装分配（GC 升代大户，见 gc-stutter 诊断）
+        self._model_ptr = glm.value_ptr(self.model_mat)
+        self._view_ptr = glm.value_ptr(self.view_mat)
+        self._proj_ptr = glm.value_ptr(self.projection_mat)
 
         # 缓存式渲染（rend_cached）的拆分缓存：_cached_split_src 记录上次拆分的
         # 源顶点列表对象，后续帧传入同一对象（id 不变）时直接复用拆分结果
@@ -1287,7 +1312,10 @@ class AutoSP:
         """
         if not isinstance(mat, glm.mat4):
             raise TypeError("mat must be a glm.mat4")
-        self.model_mat = mat
+        # 原地拷贝而非替换引用：矩阵对象恒定，持久 value_ptr 指针保持有效；
+        # pyglm 支持整行 vec4 赋值且 C 端按值拷贝（已验证）
+        for i in range(4):
+            self.model_mat[i] = mat[i]
         self.dirty = True
         self.model_dirty = True
 
@@ -1299,7 +1327,9 @@ class AutoSP:
         """
         if not isinstance(mat, glm.mat4):
             raise TypeError("mat must be a glm.mat4")
-        self.view_mat = mat
+        # 原地拷贝（同 set_model_mat：矩阵对象恒定，持久指针保持有效）
+        for i in range(4):
+            self.view_mat[i] = mat[i]
         self.dirty = True
         self.view_dirty = True
 
@@ -1311,7 +1341,9 @@ class AutoSP:
         """
         if not isinstance(mat, glm.mat4):
             raise TypeError("mat must be a glm.mat4")
-        self.projection_mat = mat
+        # 原地拷贝（同 set_model_mat：矩阵对象恒定，持久指针有效）
+        for i in range(4):
+            self.projection_mat[i] = mat[i]
         self.dirty = True
         self.projection_dirty = True
 
@@ -1494,7 +1526,7 @@ class AutoSP:
                     soup3D.ARRAY_MATRIX_VEC4,
                     1,
                     GL_FALSE,
-                    glm.value_ptr(self.model_mat)
+                    self._model_ptr
                 )
                 self.model_dirty = False
             if self.view_dirty:
@@ -1503,7 +1535,7 @@ class AutoSP:
                     soup3D.ARRAY_MATRIX_VEC4,
                     1,
                     GL_FALSE,
-                    glm.value_ptr(self.view_mat)
+                    self._view_ptr
                 )
                 self.view_dirty = False
             if self.projection_dirty:
@@ -1512,7 +1544,7 @@ class AutoSP:
                     soup3D.ARRAY_MATRIX_VEC4,
                     1,
                     GL_FALSE,
-                    glm.value_ptr(self.projection_mat)
+                    self._proj_ptr
                 )
                 self.projection_dirty = False
             if self.light_dirty:

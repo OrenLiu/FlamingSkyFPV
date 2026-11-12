@@ -46,3 +46,21 @@
 
 如需吸收上游更新：在原仓库查看变更后，将对应文件改动手工移植到本副本，
 并在本文件追加改造记录；`shader.py` 以外的文件可直接整文件覆盖。
+
+## GC 升代治理改造（2026-11-11）
+
+飞行界面每 8.5s 周期性卡顿（gen2 GC 停顿 26ms）根治：消除每帧渲染路径的
+Python 对象分配（升代燃料）。改动与上游同步实施：
+
+| 位置 | 改动 |
+| --- | --- |
+| 模块级 | 新增 OpenGL.raw.GL.VERSION.GL_2_0 的 19 个 glUniform* raw 直调导入；type_map 的 uniform 上传函数全部换 raw 层（无包装层每调用分配） |
+| ShaderProgram.update | uniform_loc 待上传队列改 clear() 复用（原每帧 `= {}` 重建 dict） |
+| AutoSP.__init__ | 矩阵初始化后建持久 value_ptr（_model_ptr/_view_ptr/_proj_ptr） |
+| AutoSP.set_model/view/projection_mat | 替换引用 → 原地拷贝（矩阵对象恒定，持久指针保持有效；pyglm 整行 vec4 赋值已验证） |
+| AutoSP.update | 三处 glm.value_ptr() 调用换持久指针 |
+
+效果（bando_factory 1080p unlimited，探针 45s）：>10ms 帧尖峰 5→0，
+gen2 GC 45s 内 5 次×26ms → 2 次×≤12ms，帧率 436→464fps。
+测试 145 项全绿。编码规则自查：仅第 5 条偏离（新增 raw import，
+替换既有函数来源无法避免），其余全部符合。
