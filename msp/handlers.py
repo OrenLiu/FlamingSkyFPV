@@ -1,12 +1,17 @@
 # msp/handlers.py
-"""MSP 命令表：身份组 + 状态组（虚拟飞控自报身份与实时遥测，纯标准库）。
+"""MSP 命令表：身份组 + 状态组 + 参数读写组（纯标准库，不 import 项目模块）。
 
 命令号对齐 Betaflight Configurator（src/js/msp/MSPCodes.ts，2026-11 核对）：
 1=MSP_API_VERSION、2=MSP_FC_VARIANT、3=MSP_FC_VERSION、4=MSP_BOARD_INFO、
-5=MSP_BUILD_INFO、160=MSP_UID（v1 惯例值）。204=MSP_SET_RC_TUNING 为写
-命令，身份组不应答（计划简报起草时误记 4/204 的映射，已修正）。
+5=MSP_BUILD_INFO、160=MSP_UID（v1 惯例值）。
 状态组（Task 20，Setup 页实时遥测）：101=MSP_STATUS、150=MSP_STATUS_EX、
 102=MSP_RAW_IMU、105=MSP_RC、108=MSP_ATTITUDE。
+参数读写组（Task 21，PID tab 调参读写映射 virtual.tune）：117=MSP_PIDNAMES、
+112=MSP_PID、202=MSP_SET_PID、111=MSP_RC_TUNING、204=MSP_SET_RC_TUNING、
+94=MSP_PID_ADVANCED、95=MSP_SET_PID_ADVANCED。GET 经 params.active_tune()
+（virtual_fc=True → virtual.tune 本体，False → 平铺快照）；SET 恒写
+virtual.tune 本体并置 state["changed"]（dispatch → on_change → 脏标志 →
+飞行帧首 set_params 即时生效）。
 
 MSP2_GET_TEXT(0x3006=12294) 为 v2 命令（fix round 3）：连接序列在身份组
 之后请求 BUILDKEY(5)/CRAFT_NAME(2)/PILOT_NAME(1)（serial_backend.ts
@@ -39,6 +44,18 @@ _CYCLE_TIME_US = 500
 
 # MSP2_GET_TEXT（MSPCodes.ts MSP2_GET_TEXT = 0x3006；0x3007 为 SET_TEXT）
 MSP2_GET_TEXT = 0x3006
+
+# ---- 参数读写组常量（Task 21，Configurator PID tab） ----
+# 仿真 D 标定域与 BF 展示域差百倍（config_store._default_pid 注释：存档/
+# 展示为 BF 量级刻度、仿真内部经 PID_MIX_SCALING 换算，默认 D=0.4 ↔ BF 40）
+_PID_D_SCALE = 100.0
+
+# MSP_PID 条目序（固件 4.5.1 pid.h PID_ITEM_COUNT=5：ROLL/PITCH/YAW/LEVEL/MAG）；
+# 仿真仅前三轴有映射，LEVEL/MAG 恒 0（诚实降级）
+_PID_AXES = ("roll", "pitch", "yaw")
+
+# MSP_PIDNAMES：条目名 0x3b 分隔（Configurator 按分号拆解，条目数与 PID 一致）
+_PID_NAMES = b"ROLL;PITCH;YAW;LEVEL;MAG"
 
 # MSP2TextType（MSPCodes.ts MSP2TextType 枚举，2026-11 核对）：GET 方向
 # 合法类型 → 应答文本（空串即 [类型字节] 单字节载荷）
@@ -163,6 +180,148 @@ def _rc_payload(payload: bytes, state: "dict | None" = None) -> bytes:
     return struct.pack("<8H", *(_u16(v) for v in channels))
 
 
+# ---- 参数读写组（Task 21） ----
+
+def _u8(v: float) -> int:
+    """浮点 → u8 载荷值：钳位 [0,255] + 半进位取整（0.5 进 1）。"""
+    return int(min(255.0, max(0.0, v)) + 0.5)
+
+
+def _set_changed(state: "dict | None") -> None:
+    """SET 写参数成功后声明变更（dispatch 末尾 pop → on_change 置脏标志）。
+
+    仅在写路径完整成功后调用（len 守卫失败/无参数源不计变更）。"""
+    state["changed"] = True
+
+
+def _active_tune(state: "dict | None"):
+    """state["params"] → 当前生效调参域（DroneParams.active_tune：virtual_fc
+    =True → virtual.tune 本体；False → 平铺字段深拷贝快照）。无参数源 → None
+    （GET 诚实降级空载荷；SET 不可写直接放弃）。"""
+    params = (state or {}).get("params")
+    return params.active_tune() if params is not None else None
+
+
+def _pid_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_PID(112)：5 条目 × 3 u8（P/I/D）。P/I ×1 无损、D ×100 域换算，
+    LEVEL/MAG 条目恒 0（仿真无自稳/磁锁 PID）。"""
+    tune = _active_tune(state)
+    if tune is None:
+        return b""
+    out = bytearray()
+    for ax in _PID_AXES:
+        g = tune.pid[ax]
+        out += struct.pack("<3B", _u8(g.p), _u8(g.i), _u8(g.d * _PID_D_SCALE))
+    return bytes(out) + b"\x00" * 6      # LEVEL + MAG（恒 0）
+
+
+def _set_pid(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_SET_PID(202)：15 字节同 GET 布局（len<15 整体忽略）。
+
+    roll/pitch/yaw 写回 virtual.tune 本体（设计 §8.3：SET 恒写 virtual 域，
+    参数模式无地面站入口）；P/I ×1、D ÷100；LEVEL/MAG 忽略。"""
+    if state is None or len(payload) < 15:
+        return b""
+    params = state.get("params")
+    if params is None:
+        return b""
+    for i, ax in enumerate(_PID_AXES):
+        p, i_gain, d = struct.unpack_from("<3B", payload, i * 3)
+        g = params.virtual.tune.pid[ax]
+        g.p, g.i, g.d = float(p), float(i_gain), d / _PID_D_SCALE
+    _set_changed(state)
+    return b""
+
+
+def _rc_tuning_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_RC_TUNING(111)：23 字节（MSPHelper.ts L1147-1180 布局）。
+
+    三轴 rate ×100 双向换算（roll 占头部三参数，pitch/yaw 的 super_rate 在
+    头部、rc_rate/expo 在尾段）；throttle_MID=50/throttle_EXPO=0/reserved/
+    throttleLimit=0/rate_limit=500/rates_type=0 为只读参考值（仿真无对应，
+    SET 忽略——GET/SET 对称往返，诚实降级）。"""
+    tune = _active_tune(state)
+    if tune is None:
+        return b""
+    r = tune.rate
+    return (struct.pack(
+                "<6B", _u8(r["roll"].rc_rate * 100), _u8(r["roll"].expo * 100),
+                _u8(r["roll"].super_rate * 100), _u8(r["pitch"].super_rate * 100),
+                _u8(r["yaw"].super_rate * 100), 0)
+            + struct.pack("<2B", 50, 0) + struct.pack("<H", 0)
+            + struct.pack(
+                "<4B", _u8(r["yaw"].expo * 100), _u8(r["yaw"].rc_rate * 100),
+                _u8(r["pitch"].rc_rate * 100), _u8(r["pitch"].expo * 100))
+            + struct.pack("<2B", 0, 0)
+            + struct.pack("<3H", 500, 500, 500) + bytes([0]))
+
+
+def _set_rc_tuning(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_SET_RC_TUNING(204)：23 字节同 GET 布局（len<23 整体忽略）。
+
+    三轴 rate 写回 virtual.tune 本体（÷100）；throttle MID/EXPO、
+    rate_limit、rates_type、throttleLimit 段忽略（GET 报参考值；
+    rate_type 保持预设——linear 无地面站等价档）。"""
+    if state is None or len(payload) < 23:
+        return b""
+    params = state.get("params")
+    if params is None:
+        return b""
+    r = params.virtual.tune.rate
+    (roll_rc, roll_expo, roll_rate, pitch_rate, yaw_rate) = \
+        struct.unpack_from("<5B", payload, 0)
+    yaw_expo, yaw_rc, pitch_rc, pitch_expo = struct.unpack_from("<4B", payload, 10)
+    r["roll"].rc_rate = roll_rc / 100.0
+    r["roll"].expo = roll_expo / 100.0
+    r["roll"].super_rate = roll_rate / 100.0
+    r["pitch"].super_rate = pitch_rate / 100.0
+    r["yaw"].super_rate = yaw_rate / 100.0
+    r["yaw"].expo = yaw_expo / 100.0
+    r["yaw"].rc_rate = yaw_rc / 100.0
+    r["pitch"].rc_rate = pitch_rc / 100.0
+    r["pitch"].expo = pitch_expo / 100.0
+    _set_changed(state)
+    return b""
+
+
+def _pid_advanced_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_PID_ADVANCED(94)：59 字节（MSPHelper.ts L1959-2028 解码序：
+    12×u16 + 35×u8）。非零语义字段仅 autoProfileCellCount(s8)=virtual.cells、
+    tpaRate u8=tpa_percent、tpaBreakpoint u16=断点 µs（1000-2000 域）；
+    D-Min/FF 等 44 字段恒 0（仿真无对应，SET 全部忽略——诚实降级）。"""
+    params = (state or {}).get("params")
+    tune = _active_tune(state)
+    if params is None or tune is None:
+        return b""
+    return (b"\x00" * 46
+            + struct.pack("<B", _u8(params.virtual.cells))
+            + b"\x00" * 9
+            + struct.pack("<BH", _u8(tune.tpa_percent),
+                          _u16(1000 + tune.tpa_breakpoint * 1000)))
+
+
+def _set_pid_advanced(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_SET_PID_ADVANCED(95)：len≥59 才消费（守卫外整体忽略）。
+
+    仅取 autoProfileCellCount（s8，≥1 → virtual.cells；0=auto 不写）与尾部
+    tpaRate/tpaBreakpoint（percent ← u8、breakpoint ← (µs−1000)/1000 钳位
+    [0,1]），写 virtual.tune 本体；其余字段忽略。"""
+    if state is None or len(payload) < 59:
+        return b""
+    params = state.get("params")
+    if params is None:
+        return b""
+    cells = struct.unpack_from("<b", payload, 46)[0]
+    if cells >= 1:
+        params.virtual.cells = cells
+    tpa_rate, tpa_bp_us = struct.unpack_from("<BH", payload, 56)
+    tune = params.virtual.tune
+    tune.tpa_percent = float(tpa_rate)
+    tune.tpa_breakpoint = min(1.0, max(0.0, (tpa_bp_us - 1000) / 1000.0))
+    _set_changed(state)
+    return b""
+
+
 def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
     """命令表（身份组 + 状态组）：cmd → payload 载荷生成器。
 
@@ -201,4 +360,16 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         105: _rc_payload,
         # 108 MSP_ATTITUDE：姿态角 decidegree
         108: _attitude_payload,
+        # ---- 参数读写组（Task 21，Configurator PID tab） ----
+        # 117 MSP_PIDNAMES：条目名 0x3b 分隔
+        117: lambda _payload, _state=None: _PID_NAMES,
+        # 112 MSP_PID / 202 MSP_SET_PID：5×3 u8（P/I ×1、D ×100）
+        112: _pid_payload,
+        202: _set_pid,
+        # 111 MSP_RC_TUNING / 204 MSP_SET_RC_TUNING：rate 三轴 ×100（23B）
+        111: _rc_tuning_payload,
+        204: _set_rc_tuning,
+        # 94 MSP_PID_ADVANCED / 95 MSP_SET_PID_ADVANCED：59B（TPA/cells）
+        94: _pid_advanced_payload,
+        95: _set_pid_advanced,
     }
