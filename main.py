@@ -11,6 +11,7 @@ def main():
         app.run(max_frames=args.frames)
     finally:
         app.save_all()
+        app.msp_server.stop()  # 退出显式停服：释放端口可重绑（未启动时幂等空操作）
 
 if __name__ == "__main__":
     main()
