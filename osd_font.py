@@ -58,6 +58,7 @@ GLYPH_AH_CENTER = 0x73             # 中线中心（十字中心）
 GLYPH_AH_CENTER_LINE_RIGHT = 0x74  # 中线右段
 GLYPH_ARROW_SMALL_UP = 0x75        # 小箭头（上/右，数值微调用）
 GLYPH_ARROW_SMALL_RIGHT = 0x77
+GLYPH_ARROW_SMALL_LEFT = 0x78      # 小箭头（左，0x77 的水平镜像；OSD 侧边栏左翼，Task 28 具名）
 
 # ---- 解析段（纯标准库） ----
 

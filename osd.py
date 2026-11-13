@@ -84,7 +84,8 @@ OSD_ROWS = 16
 # 特殊字形索引：与 osd_font.GLYPH_* 同值（本模块不 import osd_font——其
 # GL 段属渲染侧；同值锁定由 test/test_osd.py 拦截漂移，Task 28 直接拿
 # build_frame 输出的索引进图集）。0x78 为 0x77 的水平镜像小左箭头，
-# osd_font 未具名（Task 26 范围），此处补位。
+# 两处具名（osd_font 侧 Task 28 顺路批补齐），此处保留同值定义以维持
+# 零 import 纯函数纪律。
 GLYPH_AH_CENTER_LINE_LEFT = 0x72    # 人工地平线中线左段
 GLYPH_AH_CENTER = 0x73              # 中线中心（十字中心）
 GLYPH_AH_CENTER_LINE_RIGHT = 0x74   # 中线右段

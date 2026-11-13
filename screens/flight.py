@@ -1,19 +1,33 @@
-"""飞行界面：场景选择 → 花式飞行（相机由 PyBullet 位姿驱动）+ HUD + Esc 菜单"""
+"""飞行界面：场景选择 → 花式飞行（相机由 PyBullet 位姿驱动）+ HUD/OSD + Esc 菜单"""
 import math
+import time
 import imgui
 import pygame
 import soup3D
+from OpenGL.GL import (glActiveTexture, glBindTexture, glTexParameteri,
+                       GL_TEXTURE0, GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R,
+                       GL_TEXTURE_SWIZZLE_G, GL_TEXTURE_SWIZZLE_B,
+                       GL_TEXTURE_SWIZZLE_A, GL_ONE, GL_ALPHA)
 from .base import Screen
 from input.joystick import JoystickInput
 from physics.drone import FlightController, eval_boxes
 from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
 from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
                          COVER_BOX_W, COVER_BOX_H)
+from osd import compose_state, build_frame
+from osd_font import (parse_mcm, bake_atlas, free_atlas,
+                      MAX7456_FORMAT, ATLAS_COLS)
 
 class FlightScreen(Screen):
     # 网格卡片布局：卡片宽/封面高复用 cover_cache.COVER_BOX_W/H，只留两个
     CARD_NAME_H = 36     # 卡片标题条高（含文字垂直居中）
     CARD_GAP = 16        # 卡片间距
+    # OSD（设计 §9 / Task 28）：字体资产与屏幕绘制参数。锚点 (24,24) 与
+    # 一期 HUD 同位；字符格 12×18 = MAX7456 字形尺寸（图集 16×16 平铺）
+    OSD_FONT_PATH = "assets/osd_betaflight.mcm"
+    OSD_ANCHOR = (24.0, 24.0)
+    OSD_GLYPH_W = MAX7456_FORMAT[2]
+    OSD_GLYPH_H = MAX7456_FORMAT[3]
     # 内部子状态：选场景 → 加载 → 飞行
     def enter(self, app):
         self.app = app
@@ -30,14 +44,26 @@ class FlightScreen(Screen):
         self._flight_time_s = 0.0   # 飞行计时（MSP 快照/OSD 消费，暂停不累计）
         self._aux_us = []           # 本帧 AUX µs 缓存（快照消费；非 virtual_fc 恒空）
         self._boxes = frozenset()   # 本帧激活模式 box 缓存（同上）
+        # OSD 图集（Task 28）：脏标记在帧边界（update 顶部，imgui 帧外）烘焙——
+        # 帧内禁 GL 创建（同封面纹理/_pending_preset_reload 先例）。virtual_fc
+        # 仅参数页转换可变（飞行页存活期间稳定，enter 时判定一次即可）；
+        # getattr 防御：单测 fake app 桩（SimpleNamespace）常缺 drone_params，
+        # select/MSP 路径无 OSD 需求，缺属性即不烘焙
+        params = getattr(app, "drone_params", None)
+        self._osd_atlas = None      # (tex_id, w, h) | None（烘焙失败也置 None）
+        self._osd_atlas_dirty = bool(getattr(params, "virtual_fc", False))
 
     def exit(self):
         self._teardown_scene()      # 离开飞行必须清理 GL 与物理资源
         self._release_covers()      # 封面纹理同属 GL 资源：FlightScreen 每次进入都新建实例，不释放会泄漏
+        self._release_osd_atlas()   # OSD 图集同属 GL 资源，一并释放
 
     def reload(self):
         """窗口重建后重载：新 GL 上下文 → 封面纹理句柄全部失效，必须释放重载"""
         self._release_covers()
+        self._release_osd_atlas()   # OSD 图集句柄随 GL 上下文一并失效
+        params = getattr(self.app, "drone_params", None)   # 防御同 enter
+        self._osd_atlas_dirty = bool(getattr(params, "virtual_fc", False))
         if self.stage == "flying" and self._scene is not None:
             self._teardown_scene()
             self.stage = "loading"
@@ -48,6 +74,37 @@ class FlightScreen(Screen):
             if entry:
                 free_cover_texture(entry[0])
         self._covers.clear()
+
+    def _release_osd_atlas(self):
+        """释放 OSD 字体图集（free_atlas 容错，重复/非法句柄不抛）"""
+        if self._osd_atlas is not None:
+            free_atlas(self._osd_atlas[0])
+            self._osd_atlas = None
+
+    def _bake_osd_atlas(self):
+        """烘焙 OSD 字体图集（帧边界专用：update 顶部调用，imgui 帧外）。
+
+        GL_ALPHA 单通道纹理采样 RGB 恒 0，pyimgui shader 为乘法调制
+        （Frag_Color * texture），直绘任何色调制都只剩黑字；烘焙后设
+        swizzle(R/G/B=ONE, A=ALPHA) 使采样恒 (1,1,1,a)，配合白色调
+        制 add_image 输出「白字 + 半透明描边」（osd_font PIXEL_ALPHA_LUT
+        的白叠加语义，实测验证：raw GL_ALPHA 输出纯黑、swizzle 后纯白）。
+        parse/bake 失败置 None 静默降级——OSD 为增强层，缺失仅无叠加
+        信息，不影响飞行（HUD 仍按设计 §9 保持隐藏）。"""
+        try:
+            chars = parse_mcm(self.OSD_FONT_PATH)
+        except (OSError, ValueError):
+            self._osd_atlas = None
+            return
+        self._osd_atlas = bake_atlas(chars)
+        if self._osd_atlas is None:
+            return
+        glActiveTexture(GL_TEXTURE0)   # 同 bake_atlas：活动单元归位后操作
+        glBindTexture(GL_TEXTURE_2D, self._osd_atlas[0])
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_ONE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_ONE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_ONE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ALPHA)
 
     # ---- 场景选择 ----
     def render_select(self):
@@ -211,6 +268,10 @@ class FlightScreen(Screen):
         }
 
     def update(self, dt: float):
+        if self._osd_atlas_dirty:
+            # 帧边界烘焙（imgui 帧外：主循环 update 在 new_frame 之前调用）
+            self._osd_atlas_dirty = False
+            self._bake_osd_atlas()
         if self.stage == "loading":
             try:
                 self._load_scene()
@@ -295,8 +356,45 @@ class FlightScreen(Screen):
             imgui.text(f"正在加载 {self._scene.name} …")
             imgui.end()
             return
-        self._render_hud()
+        if self.app.drone_params.virtual_fc:
+            # 虚拟飞控模式（设计 §9）：一期 HUD（含输入徽标）隐藏，改渲 OSD
+            self._render_osd()
+        else:
+            self._render_hud()
         self._render_esc_menu()
+
+    def _render_osd(self):
+        """OSD 渲染（设计 §9 / Task 28）：compose_state → build_frame →
+        imgui 背景绘制层逐格位图绘制。用背景层（而非窗口）不产生
+        imgui item，且保证 Esc 弹窗/任意 UI 绘制在 OSD 之上。图集缺失
+        （资产/GL 失败）静默不画。"""
+        atlas = self._osd_atlas
+        if atlas is None:
+            return
+        state = compose_state(self.app.drone_params, self.flight_snapshot(),
+                              self.app.settings.current_drone_id,
+                              time.monotonic())
+        frame = build_frame(state)
+        if not frame:
+            return
+        tex, aw, ah = atlas
+        gw, gh = self.OSD_GLYPH_W, self.OSD_GLYPH_H
+        ax, ay = self.OSD_ANCHOR
+        u_step, v_step = gw / aw, gh / ah
+        # 白色调制：swizzle 后采样恒 (1,1,1,a)，字形透明度全由图集 alpha 决定
+        col = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0)
+        # blink 相位关防御跳过（生成端已过滤 DISARMED 相位关，此处按同源
+        # now_s 再判一次，双保险不引入第二时钟）
+        phase_off = int(state["now_s"] * 2) % 2 == 1
+        dl = imgui.get_background_draw_list()
+        for (c, r), (glyph, blink) in frame.items():
+            if blink and phase_off:
+                continue
+            u0 = (glyph % ATLAS_COLS) * u_step
+            v0 = (glyph // ATLAS_COLS) * v_step
+            x, y = ax + c * gw, ay + r * gh
+            dl.add_image(tex, (x, y), (x + gw, y + gh),
+                         (u0, v0), (u0 + u_step, v0 + v_step), col)
 
     def _render_hud(self):
         v = self._world.velocity
@@ -322,8 +420,12 @@ class FlightScreen(Screen):
             src = "键盘（手柄已断开）"
         else:
             src = "键盘" if rc.mode == "keyboard" else (rc.device_name or "手柄")
-        n = sum(1 for c in ("throttle", "yaw", "roll", "pitch")
-                if rc.mappings[c].axis < 0)
+        # 未绑定计数仅 joystick 模式显示（键盘模式无绑定概念，噪音抑制——
+        # Task 9 deferred → M6 顺路批收口）
+        n = 0
+        if rc.mode == "joystick":
+            n = sum(1 for c in ("throttle", "yaw", "roll", "pitch")
+                    if rc.mappings[c].axis < 0)
         imgui.text(f"输入: {src}" + (f"（{n} 路未绑定）" if n else ""))
         imgui.text("Esc 暂停菜单")
         imgui.end()

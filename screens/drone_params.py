@@ -364,8 +364,12 @@ class DroneParamsScreen(Screen):
         """虚拟飞控模式表单：仅硬件参数（Rate/PID/TPA 已转入 virtual 域，
         由地面站经 MSP 调整，参数页不再展示）"""
         imgui.text("虚拟飞控模式：调参请接入地面站调整")
+        # F 键提示行（Task 8 deferred → M6 顺路批）：飞行页键盘 AUX 拨动键，
+        # 键定义见 input/keyboard.py（F4 避开 F3 调试热键）
+        imgui.text("开关通道：F1 解锁 / F2 自稳 / F4 反乌龟（在地面站 Modes 页绑定到 AUX1/2/3）")
         imgui.separator()
         self._render_body_form(p)
+        imgui.separator()   # 机体段与电池节数分隔（Task 8 deferred 外观项 → M6 顺路批）
         # 电池节数（virtual 域，MSP 电池配置同源）：地面站电压计算基准；
         # 手输 0/负数钳到 1（节数下限，防电压计算除零/失真）
         _, cells = imgui.input_int("电池节数", int(p.virtual.cells), 1, 10)
