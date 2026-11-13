@@ -67,12 +67,19 @@ Task 36 组（Task 25 实测衍生：Receiver 页渲染中断）：42=MSP_MIXER_
 
 Task 41 组（用户实飞反馈衍生：Power & Battery 页 + 节数联动）：32=
 MSP_BATTERY_CONFIG（13B 固件默认参考值——**布局无 cells 字段**，固件
-4.5.1 msp.c 写序三方互证；节数载体为 94/95 offset 46 可写与 130 只读
+4.5.1 msp.c 写序三方互证；节数载体为 94/95 offset 48 可写与 130 只读
 显示）、33=MSP_SET_BATTERY_CONFIG（no-op：mincell/capacity/计量源无
 仿真域）、130=MSP_BATTERY_STATE（state 感知：cellCount=virtual.cells、
 双标度 voltage=battery_voltage；容量/消耗/电流恒 0 理想静态电源）、
 128/129=MSP_VOLTAGE/CURRENT_METERS（无计量表空载荷）、56/40=MSP_
 VOLTAGE/CURRENT_METER_CONFIG（count=0）、57/41 SET 同 33 降级。
+
+fix round 1（Task 41 审查）：94/95 的 cells offset 46→48、TPA 段
+56→58/59-60、载荷 59B→61B——Task 21 布局漏计固件 msp.c 的
+use_integrated_yaw/integrated_yaw_relax 两个 u8（@44/45），致 46 起整体
+前移 2 字节错位（46 实为 itermRelaxCutoff）；全字段复检表见
+_pid_advanced_payload docstring，三方互证（固件 4.5.1 + 本地
+Configurator 2026.12.0-alpha MSPHelper.js 解码/crunch）。
 
 状态组载荷布局经外部源码核对（2026-11-12 GitHub 取 tag 4.5.1 的
 src/main/msp/msp.c L1080-1133 与 Configurator src/js/msp/MSPHelper.ts
@@ -448,15 +455,38 @@ def _set_rc_tuning(payload: bytes, state: "dict | None" = None) -> bytes:
 
 
 def _pid_advanced_payload(payload: bytes, state: "dict | None" = None) -> bytes:
-    """MSP_PID_ADVANCED(94)：59 字节（MSPHelper.ts L1959-2028 解码序：
-    12×u16 + 35×u8）。非零语义字段仅 autoProfileCellCount(s8)=virtual.cells、
-    tpaRate u8=tpa_percent、tpaBreakpoint u16=断点 µs（1000-2000 域）；
-    D-Min/FF 等 44 字段恒 0（仿真无对应，SET 全部忽略——诚实降级）。"""
+    """MSP_PID_ADVANCED(94)：61 字节（固件 4.5.1 msp.c L1931-2031 写序 ↔
+    本地 Configurator MSPHelper.js 解码/crunch 三方逐字段互证，fix round 1
+    全字段复检表见下）。12×u16 + 37×u8；非零语义字段仅
+    autoProfileCellCount(s8)@48=virtual.cells、tpaRate u8@58=tpa_percent、
+    tpaBreakpoint u16@59-60=断点 µs（1000-2000 域）；其余 58 字节恒 0
+    （D-Min/FF/itermRelax 等 44 字段仿真无对应——诚实降级）。
+
+    全字段复检表（fix round 1，防二次错位；固件字段名 ↔ offset ↔ 处置）：
+    0-5 3×u16（rollPitchItermIgnore/yawItermIgnore/yaw_p_limit 惯零）｜
+    6 deltaMethod 惯零｜7 vbatPidCompensation 惯零｜8 feedforwardTransition
+    惯零｜9 dtermSetpointWeight u8 惯零｜10-12 toleranceBand/
+    toleranceBandReduction/itermThrottleGain 惯零｜13-16 2×u16
+    （rateAccelLimit/yawRateAccelLimit）惯零｜17 angle_limit 惯零｜18
+    levelSensitivity 惯零｜19-20 itermThrottleThreshold 惯零｜21-22
+    anti_gravity_gain 惯零｜23-24 dtermSetpointWeight u16 惯零｜25
+    iterm_rotation 惯零｜26 smart_feedforward 惯零｜27-28 iterm_relax(_type)
+    惯零｜29 abs_control_gain 惯零｜30 throttle_boost 惯零｜31
+    acro_trainer_angle_limit 惯零｜32-37 3×u16 FF（roll/pitch/yaw）惯零｜
+    38 antiGravityMode 惯零｜39-43 d_min×3/gain/advance 惯零｜44
+    use_integrated_yaw 惯零｜45 integrated_yaw_relax 惯零｜46
+    iterm_relax_cutoff 惯零（**旧代码误置 cells——46 是 itermRelaxCutoff
+    所在，Task 21 布局漏计 44/45 两 u8 致整体后移 2 字节**）｜47
+    motor_output_limit 惯零｜48 **auto_profile_cell_count = cells**｜49
+    dyn_idle_min_rpm 惯零｜50-54 FF averaging/smooth/boost/max_rate_limit/
+    jitter 惯零｜55 vbat_sag_compensation 惯零｜56 thrustLinearization
+    惯零｜57 tpa_mode 惯零｜58 **tpa_rate = tpa_percent**｜59-60
+    **tpa_breakpoint = 断点 µs**。"""
     params = (state or {}).get("params")
     tune = _active_tune(state)
     if params is None or tune is None:
         return b""
-    return (b"\x00" * 46
+    return (b"\x00" * 48
             + struct.pack("<B", _u8(params.virtual.cells))
             + b"\x00" * 9
             + struct.pack("<BH", _u8(tune.tpa_percent),
@@ -464,20 +494,23 @@ def _pid_advanced_payload(payload: bytes, state: "dict | None" = None) -> bytes:
 
 
 def _set_pid_advanced(payload: bytes, state: "dict | None" = None) -> bytes:
-    """MSP_SET_PID_ADVANCED(95)：len≥59 才消费（守卫外整体忽略）。
+    """MSP_SET_PID_ADVANCED(95)：len≥61 才消费（守卫外整体忽略）。
 
-    仅取 autoProfileCellCount（s8，≥1 → virtual.cells；0=auto 不写）与尾部
-    tpaRate/tpaBreakpoint（percent ← u8、breakpoint ← (µs−1000)/1000 钳位
-    [0,1]），写 virtual.tune 本体；其余字段忽略。"""
-    if state is None or len(payload) < 59:
+    仅取 autoProfileCellCount（s8@48，≥1 → virtual.cells；0=auto 不写）与
+    tpaRate@58/tpaBreakpoint@59-60（percent ← u8、breakpoint ←
+    (µs−1000)/1000 钳位 [0,1]），写 virtual.tune 本体；@46 itermRelaxCutoff
+    等其余 58 字段忽略（GET 报惯零，诚实降级）。61 字节为本地
+    Configurator 2026.12.0-alpha（API 1.46 分支：含 @29 absoluteControl
+    Gain、不含 1.48 尾段）crunch 实发形态。"""
+    if state is None or len(payload) < 61:
         return b""
     params = state.get("params")
     if params is None:
         return b""
-    cells = struct.unpack_from("<b", payload, 46)[0]
+    cells = struct.unpack_from("<b", payload, 48)[0]
     if cells >= 1:
         params.virtual.cells = cells
-    tpa_rate, tpa_bp_us = struct.unpack_from("<BH", payload, 56)
+    tpa_rate, tpa_bp_us = struct.unpack_from("<BH", payload, 58)
     tune = params.virtual.tune
     tune.tpa_percent = float(tpa_rate)
     tune.tpa_breakpoint = min(1.0, max(0.0, (tpa_bp_us - 1000) / 1000.0))
@@ -858,9 +891,12 @@ assert len(_MIXER_CONFIG_PAYLOAD) == 2
 #   (330+5)/10=33 四舍五入写法照抄固件）。模拟器无 batteryConfig 仿真
 #   域（mincell/maxcell/warning 不消费、容量无电量模型）→ GET 恒固件
 #   默认参考值、SET 忽略，与 RX_CONFIG stick 阈值同款诚实降级
-# - API 1.46 下节数唯一可写载体 = 94/95 offset 46（autoProfileCellCount，
+# - API 1.46 下节数唯一可写载体 = 94/95 offset 48（autoProfileCellCount，
 #   Configurator PID 调参页 Misc Settings「Cell Count」——PidSubTab.vue
-#   L1016-1026，Task 21 已实现写 virtual.cells）；Power 页节数编辑为
+#   L1016-1026；fix round 1 修正：Task 21 的 offset 46 系布局漏计
+#   useIntegratedYaw/integratedYawRelax 两 u8（@44/45）——固件 msp.c
+#   L1931-2031 写序 ↔ MSPHelper.js 解码/crunch 三方互证 cells@48、
+#   tpaRate@58、tpaBreakpoint@59-60、总长 61B）；Power 页节数编辑为
 #   API ≥ 1.48 电池 profile 特性（usePower.js hasBatteryProfiles 门控 +
 #   Power 页 locale 无 cells 键），1.46 域外不冒充。batteryConfig 的
 #   forceBatteryCellCount 固件侧存在但 4.5.1 不经 MSP_BATTERY_CONFIG
@@ -925,7 +961,8 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         # 111 MSP_RC_TUNING / 204 MSP_SET_RC_TUNING：rate 三轴 ×100（23B）
         111: _rc_tuning_payload,
         204: _set_rc_tuning,
-        # 94 MSP_PID_ADVANCED / 95 MSP_SET_PID_ADVANCED：59B（TPA/cells）
+        # 94 MSP_PID_ADVANCED / 95 MSP_SET_PID_ADVANCED：61B（cells@48、
+        # TPA@58/59-60——fix round 1 修正 59B/46 旧布局）
         94: _pid_advanced_payload,
         95: _set_pid_advanced,
         # ---- 模式组（Task 22，Configurator Modes 页） ----
