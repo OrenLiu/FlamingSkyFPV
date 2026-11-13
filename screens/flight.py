@@ -57,6 +57,13 @@ class FlightScreen(Screen):
         self._paused = False
         self._esc_open = False
         self._flight_time_s = 0.0   # 飞行计时（MSP 快照/OSD 消费，暂停不累计）
+        # OSD 距离状态（Task 47，HOME_DIST/FLIGHT_DIST 数据源）：水平面取
+        # bullet (x,y)（z 为高度，与 alt_m 同源同单位惯例——米）；锁定后冻结
+        self._home_xy = None        # 起飞点水平位置（None=从未解锁）
+        self._last_xy = None        # 上一帧水平位置（里程累计步进基准）
+        self._dist_flown_m = 0.0    # 本次解锁累计水平飞行里程
+        self._dist_home_m = 0.0     # 当前到起飞点水平距离
+        self._dist_armed_prev = False   # 距离跟踪的上一帧解锁态（上升沿检测）
         self._aux_us = []           # 本帧 AUX µs 缓存（快照消费；非 virtual_fc 恒空）
         self._boxes = frozenset()   # 本帧激活模式 box 缓存（同上）
         # OSD 图集（Task 28）：脏标记在帧边界（update 顶部，imgui 帧外）烘焙——
@@ -267,9 +274,31 @@ class FlightScreen(Screen):
             "gyro_dps": self._world.gyro_dps,
             "speed_mps": math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]),
             "alt_m": self._world.pos[2],
+            "dist_home_m": int(self._dist_home_m),     # Task 47：int 米（OSD
+            "dist_flown_m": int(self._dist_flown_m),   # HOME_DIST/FLIGHT_DIST）
             "vario_mps": v[2],
             "flight_time_s": self._flight_time_s,
         }
+
+    def _track_flight_distance(self, pos, armed: bool) -> None:
+        """OSD 距离状态逐帧跟踪（Task 47，update 帧尾调用）：解锁上升沿
+        （armed False→True）记录起飞点水平位置并清零里程；解锁期间每帧累计
+        帧间水平位移模长、更新到起飞点距离；锁定后保持上次飞行值不再累计
+        （真机语义：落地后 OSD 距离冻结至下次解锁）。水平面取 bullet (x,y)
+        ——z 为高度轴，纯垂直移动不计入；param 模式 armed 恒 False 恒空转。"""
+        if armed and not self._dist_armed_prev:
+            self._home_xy = (pos[0], pos[1])
+            self._last_xy = self._home_xy
+            self._dist_flown_m = 0.0
+            self._dist_home_m = 0.0
+        elif armed:
+            cur = (pos[0], pos[1])
+            self._dist_flown_m += math.hypot(cur[0] - self._last_xy[0],
+                                             cur[1] - self._last_xy[1])
+            self._last_xy = cur
+            self._dist_home_m = math.hypot(cur[0] - self._home_xy[0],
+                                           cur[1] - self._home_xy[1])
+        self._dist_armed_prev = armed
 
     def update(self, dt: float):
         if self._osd_atlas_dirty:
@@ -317,6 +346,9 @@ class FlightScreen(Screen):
             # 参数模式：一期三参调用形态，行为零修改
             motors = self._fc.update(ch, self._world.gyro_dps, dt)
         self._world.step(self._fc.motor_thrusts(motors), dt)
+        # OSD 距离状态（Task 47）：world.step 后位置已就绪，armed 为 fc.update
+        # 后的本帧值——解锁沿/累计/冻结判定见 _track_flight_distance
+        self._track_flight_distance(self._world.pos, self._fc.armed)
         # 相机同步：位姿 + 机头对齐 + 摄像头仰角合成（纯函数在 physics.world）
         cam = compose_camera_quat(self._world.quat,
                                   self.app.drone_params.camera_angle_deg)
