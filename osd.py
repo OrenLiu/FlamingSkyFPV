@@ -1,6 +1,8 @@
 # osd.py
 """OSD 元素数据表、位置编解码与内容生成（MSP Task 23 建表；Task 27 内容
-生成；Task 28 渲染消费）。
+生成；Task 28 渲染消费；Task 40 用户实飞反馈——元素渲染对齐固件 4.5.1
+osd_elements.c：电压/RSSI/vario 补图标字形，十字线锚点=左段，侧边栏改
+固件竖轨+水平箭头）。
 
 仅纯数据表与无依赖纯函数，不 import 项目模块（依赖方向单向：
 msp/handlers 与 screens 可 import 本表；改动需保持无 GL/pygame/imgui——
@@ -42,8 +44,10 @@ OSD_ITEM_COUNT = 80
 DEFAULT_LAYOUT: dict[int, int] = {
     0: 2370,   # RSSI_VALUE        (2,10)
     1: 2441,   # MAIN_BATT_VOLTAGE (9,12)
-    2: 2286,   # CROSSHAIRS        (14,7)
-    4: 2286,   # HORIZON_SIDEBARS  (14,7)
+    2: 2253,   # CROSSHAIRS        (13,6)——固件 pgResetFn (midCol-2,midRow-1)
+    4: 2254,   # HORIZON_SIDEBARS  (14,6)——固件 (midCol-1,midRow-1)；Task 40
+               # 起两元素锚点对齐固件/Configurator 默认（原 (14,7) 双双居中
+               # 系建表期近似；十字线锚点=左段格后 (13,6) 使中心格落 midCol）
     5: 2082,   # TIMER_1           (2,1)
     6: 2114,   # TIMER_2           (2,2)
     7: 2060,   # FLYMODE           (12,0)
@@ -51,7 +55,8 @@ DEFAULT_LAYOUT: dict[int, int] = {
     9: 2434,   # THROTTLE_POS      (2,12)
     13: 2393,  # GPS_SPEED         (25,10)
     15: 2391,  # ALTITUDE          (23,10)
-    22: 2452,  # AVG_CELL_VOLTAGE  (20,12)
+    22: 2451,  # AVG_CELL_VOLTAGE  (19,12)——Task 40 起图标化 6 格，默认锚点
+               # 左移 1 列（原 (20,12) 5 格）避免与 vario 默认 (25,12) 首格重叠
     26: 2479,  # PITCH_ANGLE       (15,13)
     27: 2466,  # ROLL_ANGLE        (2,13)
     29: 2188,  # DISARMED          (12,4)
@@ -83,14 +88,28 @@ OSD_ROWS = 16
 
 # 特殊字形索引：与 osd_font.GLYPH_* 同值（本模块不 import osd_font——其
 # GL 段属渲染侧；同值锁定由 test/test_osd.py 拦截漂移，Task 28 直接拿
-# build_frame 输出的索引进图集）。0x78 为 0x77 的水平镜像小左箭头，
-# 两处具名（osd_font 侧 Task 28 顺路批补齐），此处保留同值定义以维持
-# 零 import 纯函数纪律。
+# build_frame 输出的索引进图集）。命名与固件 osd_symbols.h 的 SYM_* 对应，
+# 索引逐一对照实装字体位图核对（Task 40；0x77/0x78 小右/左箭头仅
+# osd_font 侧具名——本模块无消费者，固件侧边栏实际用 AH_LEFT/AH_RIGHT）。
+GLYPH_RSSI = 0x01                    # RSSI 信号条图标（SYM_RSSI）
+GLYPH_AH_RIGHT = 0x02                # 侧边栏水平指示箭头·右（SYM_AH_RIGHT）
+GLYPH_AH_LEFT = 0x03                 # 侧边栏水平指示箭头·左（SYM_AH_LEFT）
+GLYPH_VOLT = 0x06                    # 电压单位 V 专用字形（SYM_VOLT）
+GLYPH_AH_DECORATION = 0x13           # 侧边栏竖轨菱形装饰点（SYM_AH_DECORATION）
 GLYPH_AH_CENTER_LINE_LEFT = 0x72    # 人工地平线中线左段
 GLYPH_AH_CENTER = 0x73              # 中线中心（十字中心）
 GLYPH_AH_CENTER_LINE_RIGHT = 0x74   # 中线右段
-GLYPH_ARROW_SMALL_RIGHT = 0x77      # 小箭头（右）
-GLYPH_ARROW_SMALL_LEFT = 0x78       # 小箭头（左）
+GLYPH_ARROW_SMALL_UP = 0x75          # vario 上升小箭头（SYM_ARROW_SMALL_UP）
+GLYPH_ARROW_SMALL_DOWN = 0x76        # vario 下降小箭头（SYM_ARROW_SMALL_DOWN）
+GLYPH_BATT_FULL = 0x90               # 电池图标族·满格（SYM_BATT_FULL）
+GLYPH_BATT_EMPTY = 0x96              # 电池图标族·空（SYM_BATT_EMPTY；段数
+                                     # = 0x96-图标，0..6 白段自下而上递增）
+GLYPH_MPS = 0x9F                     # m/s 单位字形（SYM_MPS，公制 vario 尾缀）
+
+# 固件侧边栏几何（osd_elements.c AH_SIDEBAR_WIDTH_POS/HEIGHT_POS）：
+# 锚点 ±7 列竖轨、锚点行 ±3 共 7 行，水平箭头在 ±(7-1) 列
+_AH_SIDEBAR_WIDTH_POS = 7
+_AH_SIDEBAR_HEIGHT_POS = 3
 
 # FLYMODE 消费的 box id（与 physics.drone.BOX_ANGLE/BOX_HORIZON 同源；
 # 本模块不 import physics，保持依赖方向单向）
@@ -116,6 +135,34 @@ def _to_glyph(ch: str) -> int:
     if 0x61 <= code <= 0x7A:
         return code - 0x20
     return _GLYPH_QUESTION
+
+
+def _osd_float(value: float, dp: int, do_round: bool) -> tuple[int, str]:
+    """固件 osd.c osdPrintFloat 数值段：value×10^dp 取整后拆整数/定宽小数。
+
+    do_round=True 用 lrintf 最近偶舍入（Python round 同语义，主压/vario）；
+    False 为 (int) 截断（avg cell）。输入约定非负（vario 在调用前取 abs，
+    固件对负值仅输出 '-' 且图标元素恒非负）。dp=0 时小数段为空串。
+    """
+    scaled = value * (10 ** dp)
+    n = round(scaled) if do_round else int(scaled)
+    ip, fp = divmod(n, 10 ** dp)
+    return ip, (f"{fp:0{dp}d}" if dp else "")
+
+
+def _battery_glyph(voltage_v: float, cells: int) -> int:
+    """固件 osdGetBatterySymbol：平均芯压 → 电池图标段数字形。
+
+    cv = 总压厘伏整数 // cells（battery.c getBatteryAverageCellVoltage，
+    cells=0 → 0）；段数 = scaleRange(cv, 330, 430, 0, 8) 即 (8×(cv-330))//100
+    截断除（maths.c 整数版），钳 0..6；图标 = SYM_BATT_EMPTY(0x96) - 段数
+    （330/430 = vbatmin/maxcellvoltage 厘伏默认值）。BATTERY_CRITICAL →
+    SYM_MAIN_BATT(0x97) 分支不模拟：模拟器 battery_voltage 为静态配置、
+    无电量消耗/告警状态机（恒 BATTERY_OK 语义）。
+    """
+    cv = (round(voltage_v * 100) // cells) if cells > 0 else 0
+    seg = min(6, max(0, (8 * (cv - 330)) // 100))
+    return GLYPH_BATT_EMPTY - seg
 
 
 def _int_keyed(d) -> dict:
@@ -218,18 +265,30 @@ def build_frame(state: dict) -> dict:
         col = min(col, OSD_COLS - 1)
         row = min(row, OSD_ROWS - 1)
 
-        if elem_id == 0:          # RSSI_VALUE（模拟恒 99）
-            put_text("R 99", col, row)
-        elif elem_id == 1:        # MAIN_BATT_VOLTAGE
-            put_text(f"{voltage_v:.1f}V", col, row)
-        elif elem_id == 2:        # CROSSHAIRS：锚点=中心字形，左右段 ±1
-            put(col - 1, row, GLYPH_AH_CENTER_LINE_LEFT)
-            put(col, row, GLYPH_AH_CENTER)
-            put(col + 1, row, GLYPH_AH_CENTER_LINE_RIGHT)
-        elif elem_id == 4:        # HORIZON_SIDEBARS：左右箭头对（锚点 ±2 列）
-            offset = max(-5, min(5, round(att[0] * 0.2)))
-            put(col - 2 + offset, row, GLYPH_ARROW_SMALL_LEFT)
-            put(col + 2 + offset, row, GLYPH_ARROW_SMALL_RIGHT)
+        if elem_id == 0:          # RSSI_VALUE：信号条图标+%2d（模拟恒 99）
+            put(col, row, GLYPH_RSSI)
+            put_text(f"{99:2d}", col + 1, row)
+        elif elem_id == 1:        # MAIN_BATT_VOLTAGE：电池图标+数值+V 字形
+            # 固件 osdElementMainBatteryVoltage：图标按平均芯压分段；
+            # 电压 ≥10V 一位小数、否则两位（osdPrintFloat round=lrintf）
+            dp = 1 if voltage_v >= 10 else 2
+            ip, fp = _osd_float(voltage_v, dp, True)
+            text = f"{ip}.{fp}"
+            put(col, row, _battery_glyph(voltage_v, cells))
+            put_text(text, col + 1, row)
+            put(col + 1 + len(text), row, GLYPH_VOLT)
+        elif elem_id == 2:        # CROSSHAIRS：锚点=左段格（固件 buff 自
+            put(col, row, GLYPH_AH_CENTER_LINE_LEFT)   # elemPosX 起写三字形）
+            put(col + 1, row, GLYPH_AH_CENTER)
+            put(col + 2, row, GLYPH_AH_CENTER_LINE_RIGHT)
+        elif elem_id == 4:        # HORIZON_SIDEBARS：固件静态背景——±7 列
+            # 竖轨（锚点行 ±3）+ ±6 列 AH_LEFT/AH_RIGHT 水平指示箭头；
+            # 与姿态无关（roll 偏移属于未实现的 ARTIFICIAL_HORIZON 元素）
+            for dy in range(-_AH_SIDEBAR_HEIGHT_POS, _AH_SIDEBAR_HEIGHT_POS + 1):
+                put(col - _AH_SIDEBAR_WIDTH_POS, row + dy, GLYPH_AH_DECORATION)
+                put(col + _AH_SIDEBAR_WIDTH_POS, row + dy, GLYPH_AH_DECORATION)
+            put(col - _AH_SIDEBAR_WIDTH_POS + 1, row, GLYPH_AH_LEFT)
+            put(col + _AH_SIDEBAR_WIDTH_POS - 1, row, GLYPH_AH_RIGHT)
         elif elem_id in (5, 6):   # TIMER_1/2（均计飞行时间，计划规格）
             mm, ss = int(flight_time_s // 60), int(flight_time_s % 60)
             put_text(f"{mm:02d}:{ss:02d}", col, row)
@@ -248,9 +307,13 @@ def build_frame(state: dict) -> dict:
             put_text(f"{speed_mps * 3.6:.0f}Kmh", col, row)
         elif elem_id == 15:       # ALTITUDE
             put_text(f"{alt_m:.0f}M", col, row)
-        elif elem_id == 22:       # AVG_CELL_VOLTAGE（cells 非法则不画）
-            if cells > 0:
-                put_text(f"{voltage_v / cells:.2f}V", col, row)
+        elif elem_id == 22:       # AVG_CELL_VOLTAGE：图标+2 位小数+V（cells
+            if cells > 0:         # 非法则不画；固件 round=false 截断）
+                ip, fp = _osd_float(voltage_v / cells, 2, False)
+                text = f"{ip}.{fp}"
+                put(col, row, _battery_glyph(voltage_v, cells))
+                put_text(text, col + 1, row)
+                put(col + 1 + len(text), row, GLYPH_VOLT)
         elif elem_id == 26:       # PITCH_ANGLE（att[1]）
             put_text(f"P{att[1]:+.0f}", col, row)
         elif elem_id == 27:       # ROLL_ANGLE（att[0]）
@@ -258,6 +321,12 @@ def build_frame(state: dict) -> dict:
         elif elem_id == 29:       # DISARMED（armed 或相位关 → 整元素不画）
             if not armed and int(now_s * 2) % 2 == 0:
                 put_text("DISARMED", col, row, blink=True)
-        elif elem_id == 33:       # NUMERICAL_VARIO
-            put_text(f"{vario_mps:+.1f}", col, row)
+        elif elem_id == 33:       # NUMERICAL_VARIO：升/降箭头+|v| 一位小数
+            arrow = (GLYPH_ARROW_SMALL_DOWN if vario_mps < 0
+                     else GLYPH_ARROW_SMALL_UP)   # 固件 <0 降、≥0 升；方向由
+            ip, fp = _osd_float(abs(vario_mps), 1, True)  # 箭头表达，数值无符号
+            text = f"{ip}.{fp}"
+            put(col, row, arrow)
+            put_text(text, col + 1, row)
+            put(col + 1 + len(text), row, GLYPH_MPS)
     return frame

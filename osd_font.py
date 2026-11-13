@@ -41,9 +41,15 @@ PIXEL_WHITE = 2        # 白（字形主体）
 PIXEL_BLINK = 3        # 闪烁（静态图集按透明处理，同 Configurator 预览）
 
 # GLYPH_*：BF 特殊字形索引（OSD 渲染消费；索引已对照实际位图逐一核对，
-# 命名与 Configurator SYMBOL_CODES 对应。ASCII 恒等区 0x20-0x5A 直接用
-# ord(ch) 寻址，不需要常量）
+# 命名与固件 osd_symbols.h 的 SYM_* 及 Configurator SYM 表对应。Task 40
+# 按固件 4.5.1 osd_symbols.h 扩充图标族常量并逐一对照位图复核。ASCII
+# 恒等区 0x20-0x5A 直接用 ord(ch) 寻址，不需要常量）
+GLYPH_RSSI = 0x01                  # RSSI 信号条图标（三角条族，SYM_RSSI）
+GLYPH_AH_RIGHT = 0x02              # 侧边栏水平指示箭头·右指燕尾（SYM_AH_RIGHT）
+GLYPH_AH_LEFT = 0x03               # 侧边栏水平指示箭头·左指燕尾（SYM_AH_LEFT）
+GLYPH_VOLT = 0x06                  # 电压单位 V 专用字形（SYM_VOLT，双钩 V）
 GLYPH_HOME_FLAG = 0x11             # 回家旗标（房子图标）
+GLYPH_AH_DECORATION = 0x13         # AH 侧边栏竖轨菱形装饰点（SYM_AH_DECORATION）
 GLYPH_HEADING_N = 0x18             # 航向带方位字母 N（S/E/W 依次 +1）
 GLYPH_HEADING_S = 0x19
 GLYPH_HEADING_E = 0x1A
@@ -58,9 +64,16 @@ GLYPH_ARROW_WEST = 0x6C
 GLYPH_AH_CENTER_LINE_LEFT = 0x72   # 人工地平线中线左段
 GLYPH_AH_CENTER = 0x73             # 中线中心（十字中心）
 GLYPH_AH_CENTER_LINE_RIGHT = 0x74  # 中线右段
-GLYPH_ARROW_SMALL_UP = 0x75        # 小箭头（上/右，数值微调用）
-GLYPH_ARROW_SMALL_RIGHT = 0x77
-GLYPH_ARROW_SMALL_LEFT = 0x78      # 小箭头（左，0x77 的水平镜像；OSD 侧边栏左翼，Task 28 具名）
+GLYPH_ARROW_SMALL_UP = 0x75        # vario 上升小箭头（SYM_ARROW_SMALL_UP）
+GLYPH_ARROW_SMALL_DOWN = 0x76      # vario 下降小箭头（SYM_ARROW_SMALL_DOWN）
+GLYPH_ARROW_SMALL_RIGHT = 0x77     # 小右箭头（Configurator SYS DVR 预览用；
+GLYPH_ARROW_SMALL_LEFT = 0x78      # 0x77 的水平镜像小左箭头。固件无具名，
+                                   # 侧边栏实际用 AH_LEFT/RIGHT——Task 40 更正）
+GLYPH_BATT_FULL = 0x90             # 电池图标族（SYM_BATT_FULL..BATT_EMPTY：
+GLYPH_BATT_EMPTY = 0x96            # 0x90-0x96 白段自下而上递减，分段由
+                                   # osdGetBatterySymbol 按平均芯压选取）
+GLYPH_MAIN_BATT = 0x97             # 电池告警图标（BATTERY_CRITICAL 用）
+GLYPH_MPS = 0x9F                   # m/s 单位字形（SYM_MPS，公制 vario 尾缀）
 
 # ---- 解析段（纯标准库） ----
 
