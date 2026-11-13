@@ -270,8 +270,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
     |---|---|---|
     | 0 RSSI_VALUE | (2,10) | 2370 |
     | 1 MAIN_BATT_VOLTAGE | (9,12) | 2441 |
-    | 2 CROSSHAIRS | (14,7) | 2286 |
-    | 4 HORIZON_SIDEBARS | (14,7) | 2286 |
+    | 2 CROSSHAIRS | (14,7) | 2286 → **2253 (13,6)**（Task 40 更正，见下注） |
+    | 4 HORIZON_SIDEBARS | (14,7) | 2286 → **2254 (14,6)**（Task 40 更正，见下注） |
     | 5 TIMER_1 | (2,1) | 2082 |
     | 6 TIMER_2 | (2,2) | 2114 |
     | 7 FLYMODE | (12,0) | 2060 |
@@ -279,18 +279,23 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
     | 9 THROTTLE_POS | (2,12) | 2434 |
     | 13 GPS_SPEED | (25,10) | 2393 |
     | 15 ALTITUDE | (23,10) | 2391 |
-    | 22 AVG_CELL_VOLTAGE | (20,12) | 2452 |
+    | 22 AVG_CELL_VOLTAGE | (20,12) | 2452 → **2451 (19,12)**（Task 40：图标化 6 格左移避让 vario） |
     | 26 PITCH_ANGLE | (15,13) | 2479 |
     | 27 ROLL_ANGLE | (2,13) | 2466 |
     | 29 DISARMED | (12,4) | 2188 |
     | 33 NUMERICAL_VARIO | (25,12) | 2457 |
 
-    （换算自检锚点：id 1 → 9|384|2048=2441；id 33 → 25|384|2048=2457）
-- OSD_CONFIG(84) GET：194 字节固定布局（固件 4.5.1 msp.c 937-1053 写序与 Configurator osd.ts decode 2265-2350 解码段互证）：
-  - 头部 10 字节：osdFlags u8=0x31（bit0 FEATURE|bit4 MAX7456|bit5 DEVICE_DETECTED）、video_system u8=1（PAL → Configurator VIDEO_TYPES[1]="PAL" → 网格 30×16，osd_constants.ts:25 核对）、unit_mode u8=0、rssi_alarm u8=0、cap_alarm u16=0、obsolete u8=0、item_count u8=81（4.5.1 osd.h 枚举计数核实）、alt_alarm u16=0
+    （换算自检锚点：id 1 → 9|384|2048=2441；id 33 → 25|384|2048=2457。
+    **Task 40 实现期更正**：id 2/4 原表 (14,7) 双双居中系建表期近似——固件
+    pgResetFn_osdElementConfig 为 CROSSHAIRS (midCol-2,midRow-1)=(13,6)、
+    HORIZON_SIDEBARS (midCol-1,midRow-1)=(14,6)，与 Configurator osd.js
+    defaultPosition 公式（cols/2 + (rows/2-2)·cols − 2/−1）互证；已改为
+    2253/2254，十字线锚点语义同步改为「锚点=左段格」见 Task 40 执行记录）
+- OSD_CONFIG(84) GET：190 字节固定布局（固件 4.5.1 msp.c 937-1053 写序与 Configurator osd.ts decode 2265-2350 解码段互证；**实现期更正**：item_count=80、统计段 count=0——原 194/81 系简报笔误，见 Task 23 执行记录）：
+  - 头部 10 字节：osdFlags u8=0x31（bit0 FEATURE|bit4 MAX7456|bit5 DEVICE_DETECTED）、video_system u8=1（PAL → Configurator VIDEO_TYPES[1]="PAL" → 网格 30×16，osd_constants.ts:25 核对）、unit_mode u8=0、rssi_alarm u8=0、cap_alarm u16=0、obsolete u8=0、item_count u8=**80**（4.5.1 osd.h osd_items_e 机械计数 0..79；Task 23 实现期更正，原 81 系简报笔误）、alt_alarm u16=0
   - item_pos u16×81：`pos = stored & 0x07FF`，`stored = virtual.osd_layout.get(id, DEFAULT_LAYOUT.get(id, 0))`；可见位合成 `raw = pos | (0x0800 if virtual.osd_enabled.get(id, pos != 0) else 0)`（未配置元素的可见性跟随位置位非零）
-  - 统计段 count u8=0；计时器段 count u8=3 + u16×3=0；警告段 obsolete u16=0 + count u8=0 + flags u32=0；OSD profile 段 number u8=1、selected u8=1；overlay_radio_mode u8=0；camera_frame w/h u8=24/11；link_quality_alarm u16=0（API 1.46 尾）
-  - 应答总长恒 194 字节（10+162+1+7+7+2+1+2+2）
+  - 统计段 count u8=**0**（不写条目——Configurator decodeStatItems 为无边界守卫的 count 驱动循环，非零且缺条目会错位解码）；计时器段 count u8=**2** + u16×2=0；警告段 obsolete u16=0 + count u8=**19** + flags u32=0；OSD profile 段 number u8=1、selected u8=1；overlay_radio_mode u8=0；camera_frame w/h u8=24/11；link_quality_alarm u16=0（API 1.46 尾）
+  - 应答总长恒 **190** 字节（10+160+1+**5**+7+2+1+2+2）
 - SET_OSD_CONFIG(85) 请求消费规则：addr u8 + value u16（+可选 screen u8 忽略）：
   - `addr == 0xFF`（通用设置块）、`addr == 0xFE`（计时器块）、统计屏开关（screen=0 形态）→ 整体忽略
   - `addr < 81` → 元素写：`virtual.osd_layout[addr] = value & 0x07FF`（仅位置位）、`virtual.osd_enabled[addr] = bool(value & 0x0800)`，置 changed
@@ -303,7 +308,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 
 - [ ] **Step 1: 写失败测试**（追加 test/test_msp_handlers.py），断言清单（h = make_identity_handlers()；p = DroneParams()）：
 1. 命令键存在：`{84, 85, 0x3007} <= set(h)`（0x3006 已有）
-2. OSD_CONFIG GET 默认预设（layout/enabled 空）→ `r = h[84](b"", {"params": p})`：`len(r)==194`、`r[0]==0x31`、`r[1]==1`（PAL）、`r[7]==81`（item_count 在偏移 7）
+2. OSD_CONFIG GET 默认预设（layout/enabled 空）→ `r = h[84](b"", {"params": p})`：`len(r)==190`、`r[0]==0x31`、`r[1]==1`（PAL）、`r[7]==80`（item_count 在偏移 7）
 3. 电压元素（id 1）默认位置：`struct.unpack_from("<H", r, 12)[0] == 2441`（偏移 10+1×2；DEFAULT_LAYOUT[1]）
 4. 未实现元素（id 14 GPS_SATS）位置 u16 == 0（偏移 10+14×2）
 5. 覆盖布局：`p.virtual.osd_layout = {1: 0x0043}`、`osd_enabled = {1: True}` → id 1 位置 u16 == 0x0843；`osd_enabled = {1: False}` → == 0x0043
@@ -346,10 +351,6 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 - Test: `test/test_msp_handlers.py` 追加、`test/test_config_store.py` 追加
 
 命令号参考值（MSPCodes.ts 在线核对）：`MSP_EEPROM_WRITE=250`、`MSP_CF_SERIAL_CONFIG=54`、`MSP_SET_CF_SERIAL_CONFIG=55`、`MSP_RESET_CONF=208`、`MSP_SET_RTC=246`。
-
-**Files:**
-- Modify: `msp/handlers.py`、`msp/server.py`（print→logging）、`config_store.py`、`screens/drone_params.py`
-- Test: `test/test_msp_handlers.py` 追加、`test/test_config_store.py` 追加
 
 **Interfaces:** Produces
 - EEPROM_WRITE(250)：空载荷 ack；执行 `save_preset(DRONES_DIR, state["preset_id"], state["params"])` 落盘（config_store 常量与函数 import 进 handlers——msp → config_store 方向允许）；落盘动作不置 changed（落盘非参数变更信号）
@@ -490,15 +491,18 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 - `build_frame(state: dict) -> dict[tuple[int, int], tuple[int, bool]]`：设计 §9 纯函数；键 (col, row)、值 (glyph_index, blink)；越界钳位与截断在生成端完成
 - `compose_state(params, flight, preset_id, now_s) -> dict`：调用方（Task 28 flight.py）与单测共用的 state 组装函数——
   `{"layout": params.virtual.osd_layout, "enabled": params.virtual.osd_enabled, "armed": ..., "boxes": ..., "throttle": ..., "voltage_v": params.battery_voltage, "cells": params.virtual.cells, "speed_mps": ..., "alt_m": ..., "vario_mps": ..., "attitude_deg": ..., "flight_time_s": ..., "craft_name": virtual.craft_name or preset_id, "now_s": now_s}`
-- 元素文本规格（ASCII 文本 → 逐字符 glyph（ASCII 区恒等），特殊字形用 GLYPH_*）：
+- 元素文本规格（ASCII 文本 → 逐字符 glyph（ASCII 区恒等），特殊字形用 GLYPH_*；
+  **Task 40 实现期更正**：电压/RSSI/vario 按固件 4.5.1 osd_elements.c 补图标
+  字形、十字线/侧边栏改固件绘制语义——原表的纯文本规格系计划期近似，已按下表
+  覆盖，详见 task-40-report.md）：
   | 元素 | 文本/绘制规格 |
   |---|---|
-  | RSSI_VALUE(0) | `f"R 99"`（模拟恒 99） |
-  | MAIN_BATT_VOLTAGE(1) | `f"{v:.1f}V"` |
-  | AVG_CELL_VOLTAGE(22) | `f"{v/cells:.2f}V"` |
+  | RSSI_VALUE(0) | `f"R 99"` → **SYM_RSSI 图标 + `f"{99:2d}"`**（固件 `"%c%2d"`） |
+  | MAIN_BATT_VOLTAGE(1) | `f"{v:.1f}V"` → **电池图标（芯压分段）+ 数值 + SYM_VOLT；小数位 v≥10?1:2** |
+  | AVG_CELL_VOLTAGE(22) | `f"{v/cells:.2f}V"` → **电池图标 + 2 位小数（截断）+ SYM_VOLT** |
   | GPS_SPEED(13) | `f"{speed_mps*3.6:.0f}Kmh"` |
   | ALTITUDE(15) | `f"{alt_m:.0f}M"` |
-  | NUMERICAL_VARIO(33) | `f"{vario_mps:+.1f}"` |
+  | NUMERICAL_VARIO(33) | `f"{vario_mps:+.1f}"` → **升/降箭头 + `f"{abs(v):.1f}"` + SYM_MPS（无符号）** |
   | PITCH_ANGLE(26) | `f"P{pitch:+.0f}"` |
   | ROLL_ANGLE(27) | `f"R{roll:+.0f}"` |
   | TIMER_1/2(5,6) | `f"{mm:02d}:{ss:02d}"`（flight_time_s） |
@@ -506,8 +510,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
   | CRAFT_NAME(8) | craft_name 非 ASCII 逐字符替换 "?"（MAX7456 ASCII 域） |
   | THROTTLE_POS(9) | `f"{thr*100:.0f}"` |
   | DISARMED(29) | "DISARMED"，`blink = int(now_s*2) % 2 == 1`（2Hz，相位关时整元素不画） |
-  | CROSSHAIRS(2) | 中心十字 GLYPH_* 字形组合（字形实现期以字体资产核对） |
-  | HORIZON_SIDEBARS(4) | 左右箭头对居中，列偏移 = clamp(round(roll×0.2), -5, 5) |
+  | CROSSHAIRS(2) | 中心十字 GLYPH_* 字形组合（字形实现期以字体资产核对）→ **锚点=左段格，0x72/0x73/0x74 自锚点起写**（固件 buff 写序） |
+  | HORIZON_SIDEBARS(4) | ~~左右箭头对居中，列偏移 = clamp(round(roll×0.2), -5, 5)~~ → **固件静态背景：±7 列竖轨 0x13（锚点行 ±3）+ ±6 列 AH_LEFT/RIGHT 水平箭头，与姿态无关** |
 - 可见性合成：`visible(id) = osd_enabled.get(id, raw!=0 判定)`；元素锚点 = `layout.get(id, DEFAULT_LAYOUT.get(id, None))`；`layout/enabled` 全空 → 默认布局生效（Task 29 默认可用性）
 - 未实现元素（OSD_IMPLEMENTED 之外的 id）忽略不画（设计 §9）
 
@@ -515,7 +519,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 1. `build_frame({}) == {}`（空 state 防御；compose_state 缺键防御同语义）
 2. 默认布局可用：state 仅含 layout/enabled 空字典与 now_s=10.0 等其余字段 → 网格含电压元素（(9,12) 起非空）与 craft name 元素（(10,15) 起非空）
 3. enabled 关闭：`enabled={1: False}` → 电压元素格子消失
-4. 覆盖位置：`layout={1: 0x0043}`（(3,4)）→ 电压文本锚点移到 (3,4)（(x,y) 转换 `col = raw & 0x1F | ((raw>>5) & 0x20)`、`row = (raw>>5) & 0x1F`
+4. 覆盖位置：`layout={1: 0x0083}`（(3,4)；**实现期更正**：原 0x0043 解出 (3,2) 与 (3,4) 预期自相矛盾，系计划笔误）→ 电压文本锚点移到 (3,4)（(x,y) 转换 `col = raw & 0x1F | ((raw>>5) & 0x20)`、`row = (raw>>5) & 0x1F`
 5. armed=True → DISARMED 无格子；armed=False + now_s=0.0 → DISARMED 在 (12,4) 出现
 6. blink 相位：armed=False + now_s=0.6 → DISARMED 无格子（`int(now_s*2)%2` 相位窗 0.5s：0.0-0.49 显示、0.5-0.99 不显示）
 7. 电压文本：voltage_v=14.8、cells=4 → AVG_CELL 文本 "3.70V" 的 ASCII 字形序列出现在锚点行
@@ -713,4 +717,4 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 
 - **规格覆盖**：Task 19-32 逐一对应设计 §8（MSP 命令集分层 6 组全部落卡：状态组/参数读写组/模式组/OSD 组/固化组＋连接序列杂项）与 §9（字符集资产/内容生成/飞行集成）与 §13（M5-M7）；三批 deferred minors 分批并入（M5→Task 24、M6→Task 28、M7→Task 32）；已销项（Task 15 两项、Task 1 迁移注释）与永久搁置清单均未入计划；简报中 RATE_PROFILE 名词按 MSPCodes.ts 在线核实更正为 RC_TUNING 组（Task 21 载体更正注记在案）
 - **无占位符**：机械校验 grep 零命中（证据见交付汇报）
-- **类型一致性**：VfcServer/handlers 二参协议与既有单参调用兼容（state 默认 None，一期身份组断言零回归）；换算表字段名与 config_store 的 TuneParams/PIDGains/RateParams、physics/drone 的 eval_boxes/常量、msp/server 的 drain 分派逐一核对；断言数值经手算复核并给自检锚点（DEFAULT_LAYOUT 2441/2457、MODE_RANGES step 32/48、STATUS_EX 24 字节、OSD_CONFIG 194 字节、RC_TUNING 23 字节、CF_SERIAL_CONFIG 8 字节）
+- **类型一致性**：VfcServer/handlers 二参协议与既有单参调用兼容（state 默认 None，一期身份组断言零回归）；换算表字段名与 config_store 的 TuneParams/PIDGains/RateParams、physics/drone 的 eval_boxes/常量、msp/server 的 drain 分派逐一核对；断言数值经手算复核并给自检锚点（DEFAULT_LAYOUT 2441/2457、MODE_RANGES step 32/48、STATUS_EX 24 字节、OSD_CONFIG **190** 字节、RC_TUNING 23 字节、CF_SERIAL_CONFIG 8 字节）
