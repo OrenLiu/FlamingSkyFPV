@@ -63,6 +63,9 @@ class RCSetupScreen(Screen):
         imgui.text(f"当前模式: {'手柄' if mode == 'joystick' else '键盘（兜底）'}")
         if getattr(self.app, "joystick_lost", False):
             imgui.text("⚠ 手柄已断开，已自动切回键盘")
+        elif getattr(self.app, "joystick_recovered", False):
+            # Task 38 对称提示：拔出重插 / 启动后接入被自动拾取（清 lost 时置位）
+            imgui.text("✓ 手柄已自动连接")
 
         imgui.separator()
         devs = joystick_devices()
@@ -164,11 +167,12 @@ class RCSetupScreen(Screen):
             # 同帧拔柄的极小概率兜底：回落键盘，避免 rc_input 悬空（同 App 层策略）
             from input.keyboard import KeyboardInput
             return KeyboardInput()
-        # AUX 按钮源 + 轴数必须传入（同 App._make_rc_input），旧两参构造下
-        # button 绑定的 AUX 求值恒 0、无越界防御
+        # AUX 按钮源 + 轴数/按钮数必须传入（同 App._make_rc_input），旧两参
+        # 构造下 button 绑定的 AUX 求值恒 0、无越界防御
         return JoystickInput(joy.get_axis, self.app.rc_config.mappings,
                              get_button_fn=joy.get_button,
-                             num_axes=joy.get_numaxes())
+                             num_axes=joy.get_numaxes(),
+                             num_buttons=joy.get_numbuttons())
 
     def _render_wizard(self):
         wz = self._wizard

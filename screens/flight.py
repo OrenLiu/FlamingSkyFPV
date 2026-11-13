@@ -4,6 +4,7 @@ import imgui
 import pygame
 import soup3D
 from .base import Screen
+from input.joystick import JoystickInput
 from physics.drone import FlightController, eval_boxes
 from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
 from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
@@ -312,9 +313,15 @@ class FlightScreen(Screen):
         if ch:
             imgui.text(f"油门 {ch.throttle * 100:3.0f}%")
         # 输入来源徽标（一期遗留 minor）：键盘显示固定文案，手柄显示设备名；
-        # 主四通道有未绑定路数时追加计数提示（全绑定不显示）
+        # 主四通道有未绑定路数时追加计数提示（全绑定不显示）。Task 38 一致性
+        # 修正：配置为手柄但实际 rc_input 已回落键盘（拔出）时如实显示键盘
+        # 兜底——徽标跟随实际输入源，消除配置态/实际态不一致窗口期（自动
+        # 拾取成功后两者天然同步一致）
         rc = self.app.rc_config
-        src = "键盘" if rc.mode == "keyboard" else (rc.device_name or "手柄")
+        if rc.mode == "joystick" and not isinstance(self.app.rc_input, JoystickInput):
+            src = "键盘（手柄已断开）"
+        else:
+            src = "键盘" if rc.mode == "keyboard" else (rc.device_name or "手柄")
         n = sum(1 for c in ("throttle", "yaw", "roll", "pitch")
                 if rc.mappings[c].axis < 0)
         imgui.text(f"输入: {src}" + (f"（{n} 路未绑定）" if n else ""))
