@@ -271,14 +271,20 @@ def _u16(v: float) -> int:
 
 
 def _mode_bits(flight: dict) -> int:
-    """flight 快照 boxes → mode u32 = Σ(1 << box_id)（ARM=bit0）。
+    """flight 快照 boxes → mode u32 = Σ(1 << BOXNAMES 位置)（ARM=bit0）。
 
+    位号取 _BOX_IDS.index(box)（表序与 BOXNAMES 条目一一对应）而非
+    permanentId 本身：Configurator AuxiliaryTab.vue 亮灯判定
+    bit_check(fcStore.config.mode, mode.index) 的 mode.index 是
+    BOXNAMES 返回列表的位置索引（Task 45 用户实测：FLIP 按
+    permanentId=21 打 bit21，Configurator 查 bit3 → Modes 页永不亮灯；
+    ARM/ANGLE/HORIZON 因 id==索引巧合正常）。
     boxes 为 eval_boxes 求值的 box id 整数集（drone.py BOX_* 常量）；
-    非 int 或 ≥32 的 id 跳过（u32 容量外/未核实的位号不冒充）。"""
+    表外 id（未在 BOXNAMES 报名）跳过：位号未核实不冒充。"""
     mode = 0
     for box in flight.get("boxes") or ():
-        if isinstance(box, int) and 0 <= box < 32:
-            mode |= 1 << box
+        if isinstance(box, int) and box in _BOX_IDS:
+            mode |= 1 << _BOX_IDS.index(box)
     return mode
 
 

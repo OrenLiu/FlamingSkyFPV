@@ -150,6 +150,13 @@ class RCSetupScreen(Screen):
             n = n_btn if b.kind == "button" else n_axis
             if n <= 0:
                 imgui.text("（设备无按钮）" if b.kind == "button" else "（设备无轴）")
+            elif b.index >= n:
+                # Task 45 越界警示：绑定编号超出当前设备轴/按钮数（换设备/
+                # 改配置残留）——JoystickInput 越界防御返回中位、模式永远
+                # 无法激活。不静默钳位自愈（否则警示一帧即逝且配置被篡改），
+                # 越界值保留使警示持续；重绑走「类型」下拉重选（既有换类型
+                # 重置编号为 0 的逻辑）。index<0（未绑定）不在此分支，不算越界
+                imgui.text("⚠ 越界：该设备无此编号")
             else:
                 b.index = min(max(b.index, 0), n - 1)   # 换设备后编号越界自愈
                 imgui.set_next_item_width(140)
