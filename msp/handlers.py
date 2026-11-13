@@ -95,7 +95,8 @@ import struct
 from typing import Callable
 
 import osd
-from config_store import DRONES_DIR, save_preset
+from config_store import (DRONES_DIR, save_preset, set_cells_auto,
+                          set_cells_manual)
 
 # MSP_UID：Configurator MSPCodes.js 定义为 160（v1 惯例，已在线核对）
 MSP_UID = 160
@@ -470,7 +471,9 @@ def _pid_advanced_payload(payload: bytes, state: "dict | None" = None) -> bytes:
     """MSP_PID_ADVANCED(94)：61 字节（固件 4.5.1 msp.c L1931-2031 写序 ↔
     本地 Configurator MSPHelper.js 解码/crunch 三方逐字段互证，fix round 1
     全字段复检表见下）。12×u16 + 37×u8；非零语义字段仅
-    autoProfileCellCount(s8)@48=virtual.cells、tpaRate u8@58=tpa_percent、
+    autoProfileCellCount(s8)@48=节数（Task 46：cells_auto=True →
+    0xFF/-1 哨兵——Configurator「电芯数 - 用于自动切换配置文件」下拉的
+    自动位；False → virtual.cells）、tpaRate u8@58=tpa_percent、
     tpaBreakpoint u16@59-60=断点 µs（1000-2000 域）；其余 58 字节恒 0
     （D-Min/FF/itermRelax 等 44 字段仿真无对应——诚实降级）。
 
@@ -489,7 +492,8 @@ def _pid_advanced_payload(payload: bytes, state: "dict | None" = None) -> bytes:
     use_integrated_yaw 惯零｜45 integrated_yaw_relax 惯零｜46
     iterm_relax_cutoff 惯零（**旧代码误置 cells——46 是 itermRelaxCutoff
     所在，Task 21 布局漏计 44/45 两 u8 致整体后移 2 字节**）｜47
-    motor_output_limit 惯零｜48 **auto_profile_cell_count = cells**｜49
+    motor_output_limit 惯零｜48 **auto_profile_cell_count = 节数
+    （auto→0xFF 哨兵 / 手动→cells，Task 46）**｜49
     dyn_idle_min_rpm 惯零｜50-54 FF averaging/smooth/boost/max_rate_limit/
     jitter 惯零｜55 vbat_sag_compensation 惯零｜56 thrustLinearization
     惯零｜57 tpa_mode 惯零｜58 **tpa_rate = tpa_percent**｜59-60
@@ -498,8 +502,12 @@ def _pid_advanced_payload(payload: bytes, state: "dict | None" = None) -> bytes:
     tune = _active_tune(state)
     if params is None or tune is None:
         return b""
+    # @48 auto 哨兵 0xFF：Configurator cellCountItems 的 -1=自动切换位
+    # （用户未碰下拉保存 → crunch 回发 -1 → SET 幂等恢复自动）
+    cell_byte = (0xFF if params.virtual.cells_auto
+                 else _u8(params.virtual.cells))
     return (b"\x00" * 48
-            + struct.pack("<B", _u8(params.virtual.cells))
+            + bytes([cell_byte])
             + b"\x00" * 9
             + struct.pack("<BH", _u8(tune.tpa_percent),
                           _u16(1000 + tune.tpa_breakpoint * 1000)))
@@ -508,7 +516,10 @@ def _pid_advanced_payload(payload: bytes, state: "dict | None" = None) -> bytes:
 def _set_pid_advanced(payload: bytes, state: "dict | None" = None) -> bytes:
     """MSP_SET_PID_ADVANCED(95)：len≥61 才消费（守卫外整体忽略）。
 
-    仅取 autoProfileCellCount（s8@48，≥1 → virtual.cells；0=auto 不写）与
+    仅取 autoProfileCellCount（s8@48，Task 46 三态：≥1 → set_cells_manual
+    写 cells+关自动；≤0（含 0 与 -1）→ set_cells_auto 按电池电压重算——
+    -1 为 Configurator「电芯数」自动位原样保存回写、0 为禁用位，仿真域
+    均归自动）与
     tpaRate@58/tpaBreakpoint@59-60（percent ← u8、breakpoint ←
     (µs−1000)/1000 钳位 [0,1]），写 virtual.tune 本体；@46 itermRelaxCutoff
     等其余 58 字段忽略（GET 报惯零，诚实降级）。61 字节为本地
@@ -521,7 +532,9 @@ def _set_pid_advanced(payload: bytes, state: "dict | None" = None) -> bytes:
         return b""
     cells = struct.unpack_from("<b", payload, 48)[0]
     if cells >= 1:
-        params.virtual.cells = cells
+        set_cells_manual(params, cells)   # Configurator 下拉 1-8 = 强制 NS
+    else:
+        set_cells_auto(params)            # 0/-1（s8）= 自动识别（重算幂等）
     tpa_rate, tpa_bp_us = struct.unpack_from("<BH", payload, 58)
     tune = params.virtual.tune
     tune.tpa_percent = float(tpa_rate)
@@ -773,7 +786,9 @@ def _battery_state_payload(payload: bytes, state: "dict | None" = None) -> bytes
     0-255）][mAhDrawn u16][amperage i16 0.01A][batteryState u8][voltage×100
     u16]。cellCount=virtual.cells、双标度电压=params.battery_voltage——
     与 OSD compose_state 同源（build_frame 平均芯压 = 尾段 cV ÷ cellCount，
-    节数经 95 写入后本应答与 OSD 同帧联动）；capacity/mAhDrawn/amperage
+    节数经 95 写入后本应答与 OSD 同帧联动；Task 46 auto 态 cells 为
+    detect_cell_count 派生值，经加载/电压编辑重算后自然流经本字段）；
+    capacity/mAhDrawn/amperage
     恒 0（模拟器电池为理想静态电源：无容量/消耗/压降模型，诚实值）；
     batteryState=0（battery.h batteryState_e BATTERY_OK——静态电压无
     告警状态机）。无参数源 → 空载荷降级（Configurator readU8 越界
@@ -912,7 +927,11 @@ assert len(_MIXER_CONFIG_PAYLOAD) == 2
 #   API ≥ 1.48 电池 profile 特性（usePower.js hasBatteryProfiles 门控 +
 #   Power 页 locale 无 cells 键），1.46 域外不冒充。batteryConfig 的
 #   forceBatteryCellCount 固件侧存在但 4.5.1 不经 MSP_BATTERY_CONFIG
-#   暴露
+#   暴露。Task 46 节数三态语义：94 @48 auto 态发 0xFF（cellCountItems
+#   -1=「电芯数 - 用于自动切换配置文件」自动位）、手动态发 cells；
+#   95 @48 ≥1=set_cells_manual 强制 NS、≤0（0=禁用/-1=自动位）=
+#   set_cells_auto 按电池电压重算（config_store.detect_cell_count，
+#   固件 battery.c batteryUpdatePresence 同款公式）
 _BATTERY_CONFIG_PAYLOAD = (bytes([33, 43, 35])    # legacy ×10：(330+5)/10…
                            + struct.pack("<H", 0)  # capacity（PG 默认 0）
                            + bytes([0, 0])         # 电压/电流计量源 = NONE

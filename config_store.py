@@ -81,7 +81,23 @@ class VirtualFCParams:
     osd_layout: dict = field(default_factory=dict)    # OSD 元素坐标（元素 id → 坐标）
     osd_enabled: dict = field(default_factory=dict)   # OSD 元素开关（元素 id → bool）
     craft_name: str = ""               # 机名（MSP Craft Name）
-    cells: int = 4                     # 电芯节数（电池电压计算基准，默认 4S）
+    cells: int = 4                     # 电芯节数（电池电压计算基准，默认 4S；
+                                       # cells_auto=True 时为派生值——加载/
+                                       # 电压编辑时按 detect_cell_count 重算）
+    # 节数自动识别开关（Task 46）：True=按 battery_voltage 自动识别（真机
+    # 同款）；False=cells 手动保持。additive 字段：旧预设缺键 → dataclass
+    # 默认 True（自动），不升 schema（fps_mode 先例）
+    cells_auto: bool = True
+
+def detect_cell_count(voltage_v: float) -> int:
+    """按电池总电压自动识别电芯节数：int(V/4.30)+1 钳 [1,8]。
+
+    固件依据（Betaflight 4.5.1 src/main/sensors/battery.c
+    batteryUpdatePresence 权威算法）：cells = voltage / vbatmaxcellvoltage
+    + 1，VBAT_CELL_VOLTAGE_DEFAULT_MAX = 430cV = 4.30V、上限
+    MAX_AUTO_DETECT_CELL_COUNT = 8。仿真域补充下限钳 1（电池恒在场，
+    固件 0 节数走「未接电池」分支，仿真无此态）。"""
+    return min(8, max(1, int(voltage_v / 4.30) + 1))
 
 # 参数 schema 版本：5 = 虚拟飞控域（DroneParams 新增 virtual_fc/virtual 字段，
 # additive 迁移：pid/rate 不重置）。4 = PID 刻度对齐 Betaflight 量级（P≈40，见
@@ -154,6 +170,20 @@ class DroneParams:
         self.pid = {k: PIDGains(**vars(v)) for k, v in t.pid.items()}
         self.tpa_percent = t.tpa_percent
         self.tpa_breakpoint = t.tpa_breakpoint
+
+# ---- 节数手动/自动切换（Task 46；UI 与 MSP SET 95 共用纯函数） ----
+
+def set_cells_manual(params: DroneParams, v: int) -> None:
+    """节数转手动：cells=max(1,int(v))（下限 1 防电压计算除零/失真）、
+    cells_auto=False"""
+    params.virtual.cells = max(1, int(v))
+    params.virtual.cells_auto = False
+
+def set_cells_auto(params: DroneParams) -> None:
+    """节数转自动：cells_auto=True 并按当前 battery_voltage 重算
+    （幂等：已是自动态时重算同值）"""
+    params.virtual.cells_auto = True
+    params.virtual.cells = detect_cell_count(params.battery_voltage)
 
 @dataclass
 class AxisBinding:
@@ -279,6 +309,12 @@ class ConfigStore:
                 if ver != 3:                # v3 档仅 pid 过时，rate 语义未变
                     obj.rate = d.rate
             obj.params_schema = PARAMS_SCHEMA
+        # 节数自动识别重算（Task 46）：cells_auto=True（含旧档缺键补默认）
+        # → 盘上 cells 按 battery_voltage 重算覆盖（auto 态 cells 为派生
+        # 值，与固件上电检测同型）；False 手动保持。schema 迁移在前（仅涉
+        # pid/rate，与本段无交集）
+        if cls is DroneParams and obj.virtual.cells_auto:
+            obj.virtual.cells = detect_cell_count(obj.battery_voltage)
         return obj
 
     def save(self, name: str, obj):

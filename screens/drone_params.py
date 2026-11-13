@@ -12,7 +12,7 @@ from config_store import (DRONES_DIR, DroneParams, PIDGains, RateParams,
                           TuneParams, VirtualFCParams, default_drone_params,
                           DEFAULT_PRESET_ID, copy_preset, delete_preset,
                           list_preset_ids, load_preset, save_preset,
-                          sanitize_preset_id)
+                          sanitize_preset_id, set_cells_auto, set_cells_manual)
 
 RATE_TYPES = ["betaflight_actual", "linear"]
 AXES = ["roll", "pitch", "yaw"]
@@ -46,7 +46,8 @@ def _clone_params(src: DroneParams) -> DroneParams:
     p.virtual = VirtualFCParams(tune=t, mode_ranges=list(vir.mode_ranges),
                                 osd_layout=dict(vir.osd_layout),
                                 osd_enabled=dict(vir.osd_enabled),
-                                craft_name=vir.craft_name, cells=vir.cells)
+                                craft_name=vir.craft_name, cells=vir.cells,
+                                cells_auto=vir.cells_auto)
     return p
 
 class DroneParamsScreen(Screen):
@@ -370,10 +371,21 @@ class DroneParamsScreen(Screen):
         imgui.separator()
         self._render_body_form(p)
         imgui.separator()   # 机体段与电池节数分隔（Task 8 deferred 外观项 → M6 顺路批）
-        # 电池节数（virtual 域，MSP 电池配置同源）：地面站电压计算基准；
-        # 手输 0/负数钳到 1（节数下限，防电压计算除零/失真）
-        _, cells = imgui.input_int("电池节数", int(p.virtual.cells), 1, 10)
-        p.virtual.cells = max(1, int(cells))
+        # 电池节数（virtual 域，MSP 电池配置同源）：地面站电压计算基准。
+        # 默认自动识别（Task 46：按电池电压 detect_cell_count，固件同款
+        # 公式），只读显示 + 可转手动；手动态 input_int 编辑（0/负钳 1，
+        # 防电压计算除零/失真）+ 可恢复自动。切换/重算逻辑走
+        # set_cells_manual/set_cells_auto 纯函数（与 MSP 95 同路径）
+        if p.virtual.cells_auto:
+            imgui.text(f"电池节数：自动识别 {p.virtual.cells}S（依据电池电压）")
+            if imgui.button("手动指定", 120, 30):
+                set_cells_manual(p, p.virtual.cells)  # 以当前识别值为起点转手动
+        else:
+            _, cells = imgui.input_int("电池节数", int(p.virtual.cells), 1, 10)
+            set_cells_manual(p, max(1, int(cells)))
+            imgui.same_line()
+            if imgui.button("恢复自动", 120, 30):
+                set_cells_auto(p)
 
     def _render_body_form(self, p):
         """机体硬件参数（两模式共用段，控件同一期）"""
@@ -385,6 +397,10 @@ class DroneParamsScreen(Screen):
         p.thrust_ratio = _input("推重比", p.thrust_ratio, 0.1)
         # 电池电压 V：推力按 (V/14.8)² 缩放（参考 4S 标称；满电 4S=16.8、3S=11.1）
         p.battery_voltage = _input("电池电压 (V)", p.battery_voltage, 0.1)
+        # 自动识别态同帧重算节数（Task 46）：电压编辑即联动，_render_vfc_form
+        # 的显示行下一帧即见新值（非虚拟飞控模式同样维护派生值，转 vfc 时自洽）
+        if p.virtual.cells_auto:
+            set_cells_auto(p)
         # 线性空气阻力 N·s/m：默认 1.2 为默认机标定值，轻量高推机按手感调低
         p.drag_k = _input("空气阻力", p.drag_k, 0.1)
         p.camera_angle_deg = _input("摄像头角度 (°)", p.camera_angle_deg, 1.0)
