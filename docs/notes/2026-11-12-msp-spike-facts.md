@@ -73,3 +73,28 @@
 - **12294 = MSP2_GET_TEXT（0x3006），不是 BUILD_KEY**——MSPCodes.ts 无 BUILD_KEY 命令；build key / craft name / pilot name 都是 MSP2_GET_TEXT 的类型字节区分（MSP2TextType：PILOT_NAME=1、CRAFT_NAME=2、PID_PROFILE_NAME=3、RATE_PROFILE_NAME=4、BUILDKEY=5、RELEASENAME=6、BATTERY_PROFILE_NAME=11）。请求 payload=[类型 u8]，应答 payload=[类型 u8]+文本。
 - **连接序列全貌**（serial_backend.ts）：身份组 → MSP_UID(160) → MSP2_GET_TEXT[BUILDKEY=5] → MSP2_GET_TEXT[CRAFT_NAME=2] → MSP2_GET_TEXT[PILOT_NAME=1] → disableArming → MSP_SET_RTC → finishOpen（connectionValid=true，Setup 页完成）。BUILDKEY 应答非 32 字长则跳过云构建选项拉取。
 - **v2 必答**：v2 请求被静默丢弃（旧策略）会被 Configurator 判超时（"stopped responding"）断开——修复后 v2 解析入队、应答按请求版本包 v2 帧、未知 v2 命令空载荷降级。
+
+## 8. 附录（Task 45-47 修复批，2026-11-13）：Modes 亮灯/节数/OSD 元素权威事实
+
+- **STATUS flightModeFlags 按 BOXNAMES 列表索引打位，非 BOXIDS permanentId**
+  ——Configurator AuxiliaryTab.vue 判亮灯用 `bit_check(fcStore.config.mode,
+  mode.index)`（mode.index = BOXNAMES 位置）。我方曾按 permanentId 打位
+  （FLIP=bit21）→ Modes 页永不亮（ARM/ANGLE/HORIZON 因 id==索引 巧合正常）。
+  修复：按 _BOX_IDS 列表索引打位（Task 45，commit 7b15769/4e8fb76）。
+- **节数自动识别**（固件 4.5.1 sensors/battery.c batteryUpdatePresence 实读）：
+  手动强制（forceBatteryCellCount≠0）优先；否则 cells = int(V/4.30)+1
+  （VBAT_CELL_VOLTAGE_DEFAULT_MAX=430），钳上限 8（MAX_AUTO_DETECT_CELL_COUNT）；
+  真机仅电池接入瞬间检测。仿真域补下限 1、恒重算（Task 46）。
+  PID 页「Cell Count」下拉=profile 切换条件三态（-1 切换/0 禁用/1-8 强制），
+  非节数本体；我方 GET 94@48 auto→0xFF、SET ≥1→手动/≤0→auto 与其对齐。
+- **OSD 元素 id**（固件 4.5.1 osd.h osd_items_e 逐项计数 + 现有锚点交叉验证）：
+  ARTIFICIAL_HORIZON=3、HOME_DIST=31、FLIGHT_DIST=47（Task 47 入表）。
+  4.5.x 布局注意：battery 在 src/main/sensors/、osd 在 src/main/osd/。
+- **AH 渲染语义**（osdElementArtificialHorizon 实读）：9 列阶梯倾斜线，
+  每列 y = −rollAngle·x/64 − pitch_scaled（rollAngle 0.1°、x∈[−4,+4]）；
+  右滚→右端上翘；45° 时两端各偏基准 ≈3 行、彼此 ≈6 行。仿真按
+  行号=基准−round(roll·x/60) 等比实现。
+- **教训补记**：GitHub raw/jsdelivr 对部分网络不可达时，`gh api contents`
+  配 `tr -d '\n' | base64 -d`（小文件）或 `--depth 1 --branch <tag> --filter
+  =blob:none --sparse` 克隆（大文件/整目录）为可靠取源路径；contents API
+  目录列表默认 per_page=30 会静默截断（fc/ 30+ 文件漏 battery.c 的假象）。
