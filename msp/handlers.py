@@ -171,6 +171,12 @@ _BOX_NAMES = b"ARM;ANGLE;HORIZON;FLIP OVER AFTER CRASH;"
 # ANGLE=1/HORIZON=2/FLIP_OVER_AFTER_CRASH=21，与 drone.py BOX_* 常量同源）
 _BOX_IDS = bytes([0, 1, 2, 21])
 
+# _BOX_IDS 的 tuple 视图：bytes 成员判断（in bytes）对 0-255 域外 int 抛
+# ValueError（CPython 3.10 实测 -1/256 均抛「byte must be in range(0, 256)」），
+# tuple 的 in/index 对任意 int 恒安全（Task 45 fix round 1 防御回归修复）；
+# 从 _BOX_IDS 派生保持单一来源，避免两处硬编码失同步
+_BOX_IDS_LOOKUP = tuple(_BOX_IDS)
+
 # MSP_PID 条目序（固件 4.5.1 pid.h PID_ITEM_COUNT=5：ROLL/PITCH/YAW/LEVEL/MAG）；
 # 仿真仅前三轴有映射，LEVEL/MAG 恒 0（诚实降级）
 _PID_AXES = ("roll", "pitch", "yaw")
@@ -283,8 +289,8 @@ def _mode_bits(flight: dict) -> int:
     表外 id（未在 BOXNAMES 报名）跳过：位号未核实不冒充。"""
     mode = 0
     for box in flight.get("boxes") or ():
-        if isinstance(box, int) and box in _BOX_IDS:
-            mode |= 1 << _BOX_IDS.index(box)
+        if isinstance(box, int) and box in _BOX_IDS_LOOKUP:
+            mode |= 1 << _BOX_IDS_LOOKUP.index(box)
     return mode
 
 
