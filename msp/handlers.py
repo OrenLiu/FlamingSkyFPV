@@ -144,9 +144,12 @@ _PID_D_SCALE = 100.0
 # 槽位数 = 固件 4.5.1 fc/rc_modes.h MAX_MODE_ACTIVATION_CONDITION_COUNT
 MODE_RANGE_SLOTS = 20
 
-# BOXNAMES：box 显示名 0x3b 分隔（MSPHelper.ts:1276-1295 按 ';' 拆解，
-# 条目数与 BOXIDS 对齐；显示名参考值，以固件 box 名称表核对）
-_BOX_NAMES = b"ARM;ANGLE;HORIZON;FLIP OVER AFTER CRASH"
+# BOXNAMES：box 显示名 0x3b 分隔、含尾分号（MSPHelper.js BOXNAMES
+# 解析仅在 0x3b 处 push、循环后不 flush 残段——缺尾分号会静默丢最后
+# 一个条目，Task 37 用户实测 Modes 页因此缺 FLIP OVER AFTER CRASH 行；
+# 固件 msp_box.c serializeBoxNameFn 对每个名字含最后一个写 name+';'）。
+# 条目数与 BOXIDS 对齐；显示名参考固件 msp_box.c boxes 表
+_BOX_NAMES = b"ARM;ANGLE;HORIZON;FLIP OVER AFTER CRASH;"
 
 # BOXIDS：permanentId 表（plan 1 Task 10 已按固件 box_ids.h 核对：ARM=0/
 # ANGLE=1/HORIZON=2/FLIP_OVER_AFTER_CRASH=21，与 drone.py BOX_* 常量同源）
@@ -156,8 +159,9 @@ _BOX_IDS = bytes([0, 1, 2, 21])
 # 仿真仅前三轴有映射，LEVEL/MAG 恒 0（诚实降级）
 _PID_AXES = ("roll", "pitch", "yaw")
 
-# MSP_PIDNAMES：条目名 0x3b 分隔（Configurator 按分号拆解，条目数与 PID 一致）
-_PID_NAMES = b"ROLL;PITCH;YAW;LEVEL;MAG"
+# MSP_PIDNAMES：条目名 0x3b 分隔、含尾分号（解析语义同 BOXNAMES——
+# 固件 pid.c pidNames 常量每段带尾分号，缺则丢 MAG；条目数与 PID 一致）
+_PID_NAMES = b"ROLL;PITCH;YAW;LEVEL;MAG;"
 
 # ---- OSD 组常量（Task 23，Configurator OSD tab） ----
 # MSP_OSD_CONFIG(84) 头部 osdFlags（msp.c OSD_FLAGS_* 位定义）：
