@@ -553,14 +553,31 @@ def _set_mode_range(payload: bytes, state: "dict | None" = None) -> bytes:
 
 # ---- OSD 组（Task 23） ----
 
+def _int_keyed(d) -> dict:
+    """osd_layout/osd_enabled 键 int 归一（Task 39 双保险，同 osd._int_keyed
+    手法）：存储层 config_store._rebuild 已在加载边界根治 JSON round-trip
+    的 str 键；此处兜底绕过存储层的注入（外部直改 params 对象等）。
+    不可归一条目丢弃（消费语义同 Task 27 osd.py）。"""
+    out = {}
+    if not isinstance(d, dict):
+        return out
+    for k, v in d.items():
+        try:
+            out[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+    return out
+
 def _elem_pos(virtual, item_id: int) -> int:
     """元素 u16 布局值合成：pos 11 位 = 覆盖布局 osd_layout[id]，缺省回落
     出厂默认表（未实现元素恒 0）；可见位 0x0800 = osd_enabled[id] 覆盖，
     缺省「pos 非零」（未显式关过的元素跟随位置位）。变体位（bits 14-15）
     不合成（恒 0，单形态元素）。"""
-    stored = virtual.osd_layout.get(item_id, osd.DEFAULT_LAYOUT.get(item_id, 0))
+    layout = _int_keyed(virtual.osd_layout)   # str 键防御（Task 39 双保险）
+    enabled = _int_keyed(virtual.osd_enabled)
+    stored = layout.get(item_id, osd.DEFAULT_LAYOUT.get(item_id, 0))
     pos = stored & osd.OSD_POS_MASK
-    visible = virtual.osd_enabled.get(item_id, pos != 0)
+    visible = enabled.get(item_id, pos != 0)
     return pos | (osd.OSD_VISIBLE if visible else 0)
 
 
@@ -628,6 +645,10 @@ def _set_osd_config(payload: bytes, state: "dict | None" = None) -> bytes:
         return b""
     if addr >= osd.OSD_ITEM_COUNT:
         return b""
+    # 写路径双保险（Task 39）：写入前归一——dict 残留 str 键（绕过存储层
+    # 注入）随写治愈，避免 int 新键与 str 旧键双份共存（落盘再加载即干净）
+    params.virtual.osd_layout = _int_keyed(params.virtual.osd_layout)
+    params.virtual.osd_enabled = _int_keyed(params.virtual.osd_enabled)
     params.virtual.osd_layout[addr] = value & osd.OSD_POS_MASK
     params.virtual.osd_enabled[addr] = bool(value & osd.OSD_VISIBLE)
     _set_changed(state)

@@ -25,7 +25,9 @@ from OpenGL.GL import (glActiveTexture, GL_TEXTURE0, glGenTextures,
                        glPixelStorei, glDeleteTextures, GL_TEXTURE_2D,
                        GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER,
                        GL_NEAREST, GL_ALPHA, GL_UNSIGNED_BYTE,
-                       GL_UNPACK_ALIGNMENT)
+                       GL_UNPACK_ALIGNMENT, GL_TEXTURE_SWIZZLE_R,
+                       GL_TEXTURE_SWIZZLE_G, GL_TEXTURE_SWIZZLE_B,
+                       GL_TEXTURE_SWIZZLE_A, GL_ONE)
 
 # 格式常量：(魔数头行, 字符数, 字形宽, 字形高, 每字符像素字节数)
 MAX7456_FORMAT = ("MAX7456", 256, 12, 18, 54)
@@ -113,9 +115,11 @@ def bake_atlas(chars) -> tuple:
     """将 parse_mcm 的 256 字符网格烘焙为单通道（GL_ALPHA）图集纹理。
 
     16×16 格平铺，字形 i 的格子 UV 原点为 (i%16)*12, (i//16)*18；
-    NEAREST 过滤（MAX7456 硬边观感 + 图集相邻格零渗色）。
-    返回 (tex_id, ATLAS_W, ATLAS_H)；输入非法或 GL 失败返回 None
-    （OSD 为增强层，失败不允许影响主功能）。禁止在 imgui 帧内调用。
+    NEAREST 过滤（MAX7456 硬边观感 + 图集相邻格零渗色）；烘焙后设
+    swizzle(R/G/B=ONE, A=ALPHA)——消费端白色调制直出白字（详见函数
+    体内注释，Task 39 自 flight.py 并入）。返回 (tex_id, ATLAS_W,
+    ATLAS_H)；输入非法或 GL 失败返回 None（OSD 为增强层，失败不允许
+    影响主功能）。禁止在 imgui 帧内调用。
     """
     try:
         count = MAX7456_FORMAT[1]
@@ -138,6 +142,16 @@ def bake_atlas(chars) -> tuple:
                      GL_ALPHA, GL_UNSIGNED_BYTE, bytes(data))
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        # swizzle(R/G/B=ONE, A=ALPHA)：GL_ALPHA 单通道采样 RGB 恒 0，pyimgui
+        # 乘法调制（Frag_Color * texture）直绘只剩黑字；swizzle 后采样恒
+        # (1,1,1,a)，白色调制输出「白字 + 半透明描边」（PIXEL_ALPHA_LUT 的
+        # 白叠加语义）。与 bake 同 try 块（Task 39 顺路批）：SWIZZLE 为
+        # GL 3.3 核心，pre-3.3 驱动此处抛错 → 整体 None 静默降级（OSD 为
+        # 增强层，缺失不影响飞行）
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_ONE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_ONE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_ONE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ALPHA)
         return tex, ATLAS_W, ATLAS_H
     except Exception:
         return None

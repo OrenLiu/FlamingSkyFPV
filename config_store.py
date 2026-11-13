@@ -194,6 +194,27 @@ _NESTED = {"pid": PIDGains, "rate": RateParams, "mappings": AxisBinding}
 # VirtualFCParams，VirtualFCParams.tune → TuneParams；递归重建用）
 _NESTED_ONE = {"virtual": VirtualFCParams, "tune": TuneParams}
 
+# int 键字典字段（Task 39）：osd_layout/osd_enabled 的键为 OSD 元素 id
+# （int）。JSON object 键恒序列化为 str（json 模块限制），round-trip 后
+# int 键变 str，消费端 dict[int].get 全 miss → 布局回默认（用户实测）。
+# _rebuild 为「盘上 JSON → 对象」的唯一边界，在此归一根治，所有消费方
+# （msp handlers GET / osd.build_frame / handlers SET 写路径）统一受益
+_INT_KEY_FIELDS = frozenset({"osd_layout", "osd_enabled"})
+
+def _int_key_dict(d: dict) -> dict:
+    """dict 键 int 归一：能转 int 的键（str "1"、int 1）统一为 int；
+    不可归一的键原样保留（防御不丢用户数据，int 消费端 .get 自然 miss）。
+    非 dict 输入原样返回（缺键防御由 _rebuild 默认值兜底）。"""
+    if not isinstance(d, dict):
+        return d
+    out = {}
+    for k, v in d.items():
+        try:
+            out[int(k)] = v
+        except (TypeError, ValueError):
+            out[k] = v
+    return out
+
 def _rebuild(cls, data: dict):
     """dict → dataclass 实例，递归重建嵌套 dict[str, dataclass] 与单 dataclass
     字段（缺失键用默认值补齐）"""
@@ -218,6 +239,8 @@ def _rebuild(cls, data: dict):
                                  sub) for k, sub in base.items()}
             else:
                 v = {k: _rebuild(_NESTED[f.name], sub) for k, sub in base.items()}
+        elif f.name in _INT_KEY_FIELDS and isinstance(v, dict):
+            v = _int_key_dict(v)   # osd_layout/osd_enabled 键 int 归一（见上）
         kwargs[f.name] = v
     return cls(**kwargs)
 
