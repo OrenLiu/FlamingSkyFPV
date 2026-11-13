@@ -282,14 +282,21 @@ class FlightController:
         # 反乌龟 FLIP_OVER_AFTER_CRASH（Task 48 固件开环模型重构，替代 Task
         # 13/42 的状态机）：激活 = box 激活 + armed + angles 可用（angles 仅
         # 作接线可用性防御门槛，翻转计算本身不消费姿态——纯开环）。激活时
-        # 整段接管：targets/PID/TPA/油门全不参与（固件开环语义；用户二轮复测
-        # 裁定：抬油门也不得起飞，推翻 Task 42 的油门≥0.35 接管路径），直接
-        # 由杆量算电机并提前返回；杆回中 = 电机全停待命（可随时再打杆再翻）。
-        # 唯一退出 = 撤 box：当帧即走以下正常管线（油门立即生效——真机肌肉
-        # 记忆：关开关即接管）。PID 该帧不 update（状态冻结在进入前，撤 box
-        # 后正常推进自然接续——积分无翻面积累，D 历史无待命期跳变）
+        # 整段接管：targets/PID 输出/TPA/油门全不参与（固件开环语义；用户
+        # 二轮复测裁定：抬油门也不得起飞，推翻 Task 42 的油门≥0.35 接管
+        # 路径），直接由杆量算电机并提前返回；杆回中 = 电机全停待命（可
+        # 随时再打杆再翻）。唯一退出 = 撤 box：当帧即走以下正常管线（油门
+        # 立即生效——真机肌肉记忆：关开关即接管）。三轴 PID 以零误差喂帧
+        # （积分不累积无 windup、_prev_measurement 逐帧刷新）——撤 box 当帧
+        # D 项不因历史冻结产生单帧尖峰，积分无翻面积累
         if (BOX_FLIP_OVER_AFTER_CRASH in boxes and self.armed
                 and angles_deg is not None):
+            # 零误差喂帧保新鲜：setpoint=measurement → error=0（P/I 输出 0），
+            # 喂帧返回值弃用（开环电机不经 PID）。若不喂帧，翻转中 gyro 剧烈
+            # （如 300°/s）而 prev 停在进入前——撤 box 当帧 D 项单帧尖峰
+            # （fix round 1：翻转中关开关接管油门，"接管瞬间又抖一下"根源）
+            for pid, meas in zip(self._pid.values(), gyro_dps):
+                pid.update(meas, meas, dt)
             motors = _crashflip_motors(ch.roll, ch.pitch, ch.yaw)
             self._tpa_throttle = sum(motors) / len(motors)
             return motors
