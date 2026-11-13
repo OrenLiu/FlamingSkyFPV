@@ -59,6 +59,12 @@ catch 吞掉串口加载链）、0x1009 MSP2_COMMON_SERIAL_CONFIG（Ports tab �
 数据源：count u8 + 每端口 id u8/functions u32/四 baud u8，54 不在其链上）、
 0x100A MSP2_COMMON_SET_SERIAL_CONFIG（保存链 v2 SET，与 55 同款整体忽略）。
 
+Task 36 组（Task 25 实测衍生：Receiver 页渲染中断）：42=MSP_MIXER_CONFIG
+（2B=[mixerMode=3 quad-X, yaw_motors_reversed=0]——Receiver 页 loadConfig
+八命令序列末环，缺失即超时 reject 使 runTabLoad 整链中断；mixer 为虚拟
+飞控固有实况，诚实只读）、43=MSP_SET_MIXER_CONFIG（no-op，mixer 恒 quad-X
+与 37 同款降级）。
+
 状态组载荷布局经外部源码核对（2026-11-12 GitHub 取 tag 4.5.1 的
 src/main/msp/msp.c L1080-1133 与 Configurator src/js/msp/MSPHelper.ts
 L841-903）：STATUS_EX 与固件写序逐字段一致；STATUS 应答 11 字节止于
@@ -759,6 +765,23 @@ _MSP2_SERIAL_CONFIG_PAYLOAD = (bytes([1])
                                + struct.pack("<BIBBBB", 0, 1, 5, 5, 5, 5))
 assert len(_MSP2_SERIAL_CONFIG_PAYLOAD) == 10
 
+# ---- Task 36 组（Receiver 页加载链最后一环，2026-11-13） ----
+# Receiver 页 loadConfig 八命令序列（ReceiverTab.vue loadConfig：
+# FEATURE_CONFIG/RC/RSSI_CONFIG/RC_TUNING/RX_MAP/RC_DEADBAND/RX_CONFIG/
+# MIXER_CONFIG）末环 MSP_MIXER_CONFIG 未实现 → 超时 reject 使 runTabLoad
+# 整链中断、Receiver 页渲染中断（Task 25 实测「接收机无法识别」表象
+# 之一）；其后 loadRxPort 走 0x1009（Task 35 已实现）——补 42 后整链完整。
+#
+# 应答 2 字节 = [mixerMode u8, yaw_motors_reversed u8]（固件 4.5.1 msp.c
+# L1578-1581 写序 ↔ 本地 Configurator MSPHelper.js L789-791 解码互证）：
+# - mixerMode=3 三源一致：固件 flight/mixer.h MIXER_QUADX=3、Configurator
+#   model.js mixerList[mixer-1] 索引（mixerList[2]="Quad X"）、官方
+#   VirtualFC.js L166 virtualFC.MIXER_CONFIG.mixer=3——虚拟飞控固定
+#   quad-X 同款实况
+# - yaw_motors_reversed=0（不反转，PG 复位默认）
+_MIXER_CONFIG_PAYLOAD = bytes([3, 0])
+assert len(_MIXER_CONFIG_PAYLOAD) == 2
+
 
 def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
     """命令表（身份组 + 状态组）：cmd → payload 载荷生成器。
@@ -875,4 +898,12 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         # 0x100A MSP2_COMMON_SET_SERIAL_CONFIG：整体忽略（Ports 页保存
         # 走 v2 SET 命令；UART1 恒含 MSP 位无法误关，与 55 同款降级）
         0x100A: _noop,
+        # ---- Task 36 组（Receiver 页加载链最后一环） ----
+        # 42 MSP_MIXER_CONFIG：[mixerMode=3(quad-X), yaw_motors_reversed=0]
+        # ——Receiver 页 loadConfig 八命令链末环（缺失即超时 reject 整链
+        # 中断）；mixer 为虚拟飞控固有实况，诚实只读
+        42: lambda _payload, _state=None: _MIXER_CONFIG_PAYLOAD,
+        # 43 MSP_SET_MIXER_CONFIG：载荷整体忽略（mixer 恒 quad-X——改
+        # mixer 不改仿真电机组，与 37/55/65 同款诚实降级）
+        43: _noop,
     }
