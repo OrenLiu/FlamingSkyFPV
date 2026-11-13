@@ -115,6 +115,10 @@ class App:
         self.msp_server = VfcServer(make_identity_handlers(),
                                     state_provider=self._msp_state,
                                     on_change=self._msp_on_change)
+        # 地面站常驻浮窗状态（Task 43）：提示框上移 App 层跨 Screen 显示
+        self._gs_window_spawned = False  # 首帧定位标记（此后位置交 imgui 记忆）
+        self._gs_copy_fail = None        # 复制失败的地址行下标（None=无失败提示）
+        self._gs_error = None            # 浮窗内断开失败错误（None=无）
 
     # ---- 窗口 ----
     def _open_window(self):
@@ -342,6 +346,7 @@ class App:
                 imgui.push_font(self.font)
             self.screen.render_ui()
             self._render_debug_overlay()  # 仍在 push_font 作用域内，中文标签可显示
+            self._render_gs_overlay()     # 地面站常驻浮窗（Task 43，同上作用域）
             if pushed:
                 imgui.pop_font()
             imgui.render()                # 再画 UI
@@ -432,6 +437,89 @@ class App:
         imgui.text(f"相机: {soup3D.camera.X:.2f}, {soup3D.camera.Y:.2f}, {soup3D.camera.Z:.2f}")
         imgui.end()
         imgui.pop_style_color(1)
+
+    # ---- 地面站常驻浮窗（Task 43：提示框上移 App 层，跨 Screen 显示）----
+
+    @staticmethod
+    def gs_address_lines(server) -> list:
+        """从 VfcServer 组装浮窗地址行（空值省略）：TCP / WebSocket / PTY
+        slave 路径。属性缺失（server 未挂接/契约变更）全防御返回 []。
+        状态机契约（test_msp_server.py Task 43 组）：未启动 [] → start()
+        非空行 → stop() 归空"""
+        lines = []
+        for attr in ("tcp_address", "websocket_address"):
+            v = getattr(server, attr, "") or ""
+            if v:
+                lines.append(str(v))
+        slave = getattr(server, "slave_path", None)
+        if slave:
+            lines.append(str(slave))
+        return lines
+
+    @staticmethod
+    def copy_text_to_clipboard(text: str) -> bool:
+        """pygame.scrap 剪贴板写入（utf-8 bytes）。类型逐个回退：先平台
+        规范类型 pygame.SCRAP_TEXT（常量在 pygame 顶层，2.6.1 实测不在
+        scrap 子模块），再 "text/plain;charset=utf-8"——实测 pygame 2.6.1
+        X11 后端裸 'text/plain' 被拒（content could not be placed in
+        clipboard），charset 变体走通（put/get utf-8 中文往返验证）；
+        Windows/macOS 两类型文档均支持。任何失败（init 无显示子系统/两
+        类型 put 全败）返回 False 不抛——调用方降级提示手动复制"""
+        try:
+            import pygame.scrap as scrap
+            scrap.init()   # 幂等；须在 set_mode 后（App 主循环内必然满足）
+            data = text.encode("utf-8")
+            for mime in (pygame.SCRAP_TEXT, "text/plain;charset=utf-8"):
+                try:
+                    scrap.put(mime, data)
+                    return True
+                except Exception:
+                    continue   # 该类型被拒 → 试回退类型
+            return False
+        except Exception:
+            return False
+
+    def _render_gs_overlay(self):
+        """地面站连接常驻浮窗（用户实测衍生：一期提示框困在参数页，退出即
+        消失而 MSP 功能跨页存活——渲染层上移到 App 与功能层对齐）。
+        connected 门控（VfcServer 的 running 属性实名 connected）；默认
+        标题栏可拖动，首帧固定右上角、此后 imgui 按 title 记忆位置（用户
+        拖开避遮挡，重连回用户拖动处）；三地址行各带「复制」按钮 +
+        「断开」按钮（stop 失败 OSError 转行内错误提示）"""
+        srv = self.msp_server
+        if srv is None or not getattr(srv, "connected", False):
+            return
+        if not self._gs_window_spawned:
+            # 仅 App 生命周期内首帧定位：每帧 set 会覆盖用户拖动后的位置
+            io = imgui.get_io()
+            imgui.set_next_window_position(io.display_size.x - 440, 30)
+            imgui.set_next_window_size(420, 0)   # 宽固定高自适应（内容少不溢出）
+            self._gs_window_spawned = True
+        # 默认标题栏（无 NO_MOVE/NO_TITLE_BAR）→ 可拖动；NO_COLLAPSE 防折叠丢地址
+        imgui.begin("地面站连接", flags=imgui.WINDOW_NO_COLLAPSE)
+        imgui.text("地面站已接入，在地面站软件中连接以下任一地址：")
+        for i, line in enumerate(self.gs_address_lines(srv)):
+            imgui.push_id(f"addr{i}")   # 同名「复制」按钮按行隔离
+            imgui.text(line)
+            imgui.same_line()
+            if imgui.button("复制", 72, 22):
+                if self.copy_text_to_clipboard(line):
+                    self._gs_copy_fail = None
+                else:
+                    self._gs_copy_fail = i   # 行级失败标记（新行提示，不挤地址行）
+            if self._gs_copy_fail == i:
+                imgui.text("复制失败，请手动选择文本")
+            imgui.pop_id()
+        if self._gs_error:
+            imgui.text(self._gs_error)
+        if imgui.button("断开", 160, 40):
+            try:
+                srv.stop()
+            except OSError as e:
+                self._gs_error = f"断开失败：{e}"
+            else:
+                self._gs_error = None
+        imgui.end()
 
     # ---- 多预设（二期：config/drones/<代号>.json，Task 5 UI 消费） ----
     def select_drone(self, preset_id: str) -> None:
