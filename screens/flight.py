@@ -4,28 +4,43 @@ import time
 import imgui
 import pygame
 import soup3D
-from OpenGL.GL import (glActiveTexture, glBindTexture, glTexParameteri,
-                       GL_TEXTURE0, GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R,
-                       GL_TEXTURE_SWIZZLE_G, GL_TEXTURE_SWIZZLE_B,
-                       GL_TEXTURE_SWIZZLE_A, GL_ONE, GL_ALPHA)
 from .base import Screen
 from input.joystick import JoystickInput
 from physics.drone import FlightController, eval_boxes
 from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
 from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
                          COVER_BOX_W, COVER_BOX_H)
-from osd import compose_state, build_frame
+from osd import compose_state, build_frame, OSD_COLS, OSD_ROWS
 from osd_font import (parse_mcm, bake_atlas, free_atlas,
                       MAX7456_FORMAT, ATLAS_COLS)
+
+
+def _glyph_cell(display_w: float, display_h: float) -> tuple:
+    """OSD 字符格自适应窗口（Task 39）：30×16 网格铺满界面的格尺寸与
+    居中锚点，返回 (cell_w, cell_h, origin_x, origin_y)。
+
+    真机 OSD 是全屏视频叠加（字符格铺满画面、随画面两轴独立拉伸——
+    PAL 像素本就非正方形），故两轴各自 floor(display/格数) 取整、不做
+    min 等比缩放；余数像素水平/垂直居中平分（半像素锚点 imgui 可接受）。
+    格尺寸下限 1（极小窗口不产生 0/负宽高绘制）。每帧读 io.display_size
+    即时计算——窗口 resize（rebuild_window→reload）后自动跟随新尺寸，
+    无需额外失效逻辑（reload 已释放图集会重烘焙，UV 步进不受影响）。
+    """
+    cell_w = max(1, int(display_w) // OSD_COLS)
+    cell_h = max(1, int(display_h) // OSD_ROWS)
+    origin_x = (display_w - cell_w * OSD_COLS) / 2.0
+    origin_y = (display_h - cell_h * OSD_ROWS) / 2.0
+    return cell_w, cell_h, origin_x, origin_y
+
 
 class FlightScreen(Screen):
     # 网格卡片布局：卡片宽/封面高复用 cover_cache.COVER_BOX_W/H，只留两个
     CARD_NAME_H = 36     # 卡片标题条高（含文字垂直居中）
     CARD_GAP = 16        # 卡片间距
-    # OSD（设计 §9 / Task 28）：字体资产与屏幕绘制参数。锚点 (24,24) 与
-    # 一期 HUD 同位；字符格 12×18 = MAX7456 字形尺寸（图集 16×16 平铺）
+    # OSD（设计 §9 / Task 28→39）：字体资产与图集 UV 参数。屏上格尺寸不再
+    # 固定 12×18（高分辨率窗口下只占左上角一小块），改 _glyph_cell 按窗口
+    # 自适应铺满；12×18 仅作图集内字形 UV 步进基准（图集 16×16 格平铺）
     OSD_FONT_PATH = "assets/osd_betaflight.mcm"
-    OSD_ANCHOR = (24.0, 24.0)
     OSD_GLYPH_W = MAX7456_FORMAT[2]
     OSD_GLYPH_H = MAX7456_FORMAT[3]
     # 内部子状态：选场景 → 加载 → 飞行
@@ -84,27 +99,16 @@ class FlightScreen(Screen):
     def _bake_osd_atlas(self):
         """烘焙 OSD 字体图集（帧边界专用：update 顶部调用，imgui 帧外）。
 
-        GL_ALPHA 单通道纹理采样 RGB 恒 0，pyimgui shader 为乘法调制
-        （Frag_Color * texture），直绘任何色调制都只剩黑字；烘焙后设
-        swizzle(R/G/B=ONE, A=ALPHA) 使采样恒 (1,1,1,a)，配合白色调
-        制 add_image 输出「白字 + 半透明描边」（osd_font PIXEL_ALPHA_LUT
-        的白叠加语义，实测验证：raw GL_ALPHA 输出纯黑、swizzle 后纯白）。
-        parse/bake 失败置 None 静默降级——OSD 为增强层，缺失仅无叠加
-        信息，不影响飞行（HUD 仍按设计 §9 保持隐藏）。"""
+        swizzle(R/G/B=ONE, A=ALPHA) 已并入 osd_font.bake_atlas（Task 39
+        顺路批：与 bake 同 try 块，pre-GL3.3 驱动不炸）。parse/bake 失败
+        置 None 静默降级——OSD 为增强层，缺失仅无叠加信息，不影响飞行
+        （HUD 仍按设计 §9 保持隐藏）。"""
         try:
             chars = parse_mcm(self.OSD_FONT_PATH)
         except (OSError, ValueError):
             self._osd_atlas = None
             return
         self._osd_atlas = bake_atlas(chars)
-        if self._osd_atlas is None:
-            return
-        glActiveTexture(GL_TEXTURE0)   # 同 bake_atlas：活动单元归位后操作
-        glBindTexture(GL_TEXTURE_2D, self._osd_atlas[0])
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_ONE)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_ONE)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_ONE)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ALPHA)
 
     # ---- 场景选择 ----
     def render_select(self):
@@ -357,17 +361,23 @@ class FlightScreen(Screen):
             imgui.end()
             return
         if self.app.drone_params.virtual_fc:
-            # 虚拟飞控模式（设计 §9）：一期 HUD（含输入徽标）隐藏，改渲 OSD
+            # 虚拟飞控模式（设计 §9）：一期 HUD（含输入徽标）隐藏，改渲 OSD。
+            # 隐含约定（Task 39 点名）：此处分派每帧读 drone_params.virtual_fc，
+            # 而图集烘焙脏标记是 enter/reload 时的缓存判定——两处同源不同时。
+            # 依据是 virtual_fc 仅参数页转换可变（见 enter 的脏标记注释），
+            # 飞行页存活期间两值恒一致；若未来允许飞行中切换 virtual_fc，
+            # 须同步引入烘焙脏标记失效（仅改此处会 OSD/HUD 双缺或双绘）
             self._render_osd()
         else:
             self._render_hud()
         self._render_esc_menu()
 
     def _render_osd(self):
-        """OSD 渲染（设计 §9 / Task 28）：compose_state → build_frame →
+        """OSD 渲染（设计 §9 / Task 28/39）：compose_state → build_frame →
         imgui 背景绘制层逐格位图绘制。用背景层（而非窗口）不产生
         imgui item，且保证 Esc 弹窗/任意 UI 绘制在 OSD 之上。图集缺失
-        （资产/GL 失败）静默不画。"""
+        （资产/GL 失败）静默不画。格尺寸/锚点按窗口自适应铺满（真机
+        全屏叠加观感，见 _glyph_cell），每帧读 io 即时值——resize 自动跟随。"""
         atlas = self._osd_atlas
         if atlas is None:
             return
@@ -378,9 +388,8 @@ class FlightScreen(Screen):
         if not frame:
             return
         tex, aw, ah = atlas
-        gw, gh = self.OSD_GLYPH_W, self.OSD_GLYPH_H
-        ax, ay = self.OSD_ANCHOR
-        u_step, v_step = gw / aw, gh / ah
+        cw, ch, ox, oy = _glyph_cell(*imgui.get_io().display_size)
+        u_step, v_step = self.OSD_GLYPH_W / aw, self.OSD_GLYPH_H / ah
         # 白色调制：swizzle 后采样恒 (1,1,1,a)，字形透明度全由图集 alpha 决定
         col = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0)
         # blink 相位关防御跳过（生成端已过滤 DISARMED 相位关，此处按同源
@@ -392,8 +401,8 @@ class FlightScreen(Screen):
                 continue
             u0 = (glyph % ATLAS_COLS) * u_step
             v0 = (glyph // ATLAS_COLS) * v_step
-            x, y = ax + c * gw, ay + r * gh
-            dl.add_image(tex, (x, y), (x + gw, y + gh),
+            x, y = ox + c * cw, oy + r * ch
+            dl.add_image(tex, (x, y), (x + cw, y + ch),
                          (u0, v0), (u0 + u_step, v0 + v_step), col)
 
     def _render_hud(self):
