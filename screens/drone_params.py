@@ -398,7 +398,8 @@ class DroneParamsScreen(Screen):
         # 电池电压 V：推力按 (V/14.8)² 缩放（参考 4S 标称；满电 4S=16.8、3S=11.1）
         p.battery_voltage = _input("电池电压 (V)", p.battery_voltage, 0.1)
         # 自动识别态同帧重算节数（Task 46）：电压编辑即联动，_render_vfc_form
-        # 的显示行下一帧即见新值（非虚拟飞控模式同样维护派生值，转 vfc 时自洽）
+        # 的节数显示行同帧生效（重算在文本渲染前；非虚拟飞控模式同样维护
+        # 派生值，转 vfc 时自洽）
         if p.virtual.cells_auto:
             set_cells_auto(p)
         # 线性空气阻力 N·s/m：默认 1.2 为默认机标定值，轻量高推机按手感调低
