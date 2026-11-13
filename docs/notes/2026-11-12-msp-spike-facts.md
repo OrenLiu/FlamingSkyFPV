@@ -98,3 +98,31 @@
   配 `tr -d '\n' | base64 -d`（小文件）或 `--depth 1 --branch <tag> --filter
   =blob:none --sparse` 克隆（大文件/整目录）为可靠取源路径；contents API
   目录列表默认 per_page=30 会静默截断（fc/ 30+ 文件漏 battery.c 的假象）。
+
+## 9. 附录（R2 修复批 Task 48-49，2026-11-13）：crashflip/AH 符号链/RTC 权威事实
+
+- **crashflip 开环模型**（mixer.c L275-345 + mixer_init.c 实读）：不走 PID、
+  油门完全不参与；电机=f(杆量)：expo 曲线（crashflip_expo PG 默认 35）、
+  死区在 expo 域（expo(0.15)≈0.0987 非 0.15 字面）、三轴主导仲裁
+  （abs 比较但长度替换用 expo）、cos30° 非对角独占、逐电机负截断
+  （crashflip_motor_percent PG 默认 0）、杆回中全停待命；退出唯一路径=
+  撤 box。教训：任务书常量须按固件原文域写（死区两处坑：字面值与域）。
+- **AH 符号链**：world.euler_deg=bullet 语义 pitch 正=低头
+  （euler_stick_deg 取 −y/z 得杆义）；ATTITUDE(108) 同源 → 与固件惯例
+  （imu.c:447 "negative is backwards"）一致。固件 AH：pitch 正（低头）→
+  线上移。教训：同一姿态量跨层消费时先钉符号链再写渲染公式（R1 即栽在
+  把 bullet 语义当杆义用）。flight.py 快照 docstring 曾误标「pitch抬头」。
+- **osd_items_e id**：UP_DOWN_REFERENCE=**60**（61=TX_UPLINK_POWER）；
+  72-76=SYS 族续、77-79=GPS_LAP 三件、79=GPS_LAP_TIME_BEST3。
+  教训：简报手写 id 必机械复数（本轮 team-lead 笔误 61，实现者纠出）。
+- **SET_RTC(246) 载荷** = u32 unix 秒 + u16 毫秒（Configurator
+  MSPHelper.ts:3126-3134 push32/push16）。仿真存 virtual.rtc_unix_s
+  additive 字段；**不置 changed**——Configurator 握手即发 246，置了会在
+  飞行中误触发 set_params 重建。
+- **字形取证**：GLYPH_ARROW_N/S/E/W=0x60/0x64/0x68/0x6C（官方
+  osd_symbols.h 逐一相符）；'_'=0x5F（.mcm 位图实测下划线）。
+- **G_FORCE(42) 跳过依据**：world 无加速度输出、RAW_IMU acc 为静态 1g
+  占位——无数据源不编造。
+- **取源教训补**：gh api contents 目录列表 per_page 默认 30 静默截断；
+  raw/jsdelivr 不可达时 `git clone --depth 1 --branch <tag> --filter=blob:
+  none --sparse` 可靠；部分克隆 blob 按需取可能瞬时失败（重试或换源）。
