@@ -365,7 +365,8 @@ class DroneParamsScreen(Screen):
         imgui.text("虚拟飞控模式：调参请接入地面站调整")
         # F 键提示行（Task 8 deferred → M6 顺路批）：飞行页键盘 AUX 拨动键，
         # 键定义见 input/keyboard.py（F4 避开 F3 调试热键）
-        imgui.text("开关通道：F1 解锁 / F2 自稳 / F4 反乌龟（在地面站 Modes 页绑定到 AUX1/2/3）")
+        imgui.text("开关通道：F1 解锁 / F2 自稳 / F4 反乌龟（仅键盘模式生效）")
+        imgui.text("手柄模式：在「遥控通道设置」页核对 AUX1-4 实时条是否随手柄开关动作，再在地面站 Modes 页把模式区间画在该开关激活位")
         imgui.separator()
         self._render_body_form(p)
         imgui.separator()   # 机体段与电池节数分隔（Task 8 deferred 外观项 → M6 顺路批）
