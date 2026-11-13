@@ -25,6 +25,10 @@ from screens.flight import FlightScreen   # _msp_state 的 isinstance 判定（a
 RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选
 # 配置根/预设目录常量在 config_store 定义（app 与 screens 同源引用，防漂移）
 
+# 手柄自动拾取退避间隔（秒）：构造失败（init 异常/设备名未出现）后的重试
+# 最小间隔，防插拔抖动下每帧重建 Joystick 对象的死循环（Task 38）
+JOYSTICK_PICKUP_RETRY_S = 2.0
+
 # 中文字体候选（spike 验证过的顺序）
 FONT_PATHS = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -97,6 +101,11 @@ class App:
             self._impl.refresh_font_texture()
         self.clock = pygame.time.Clock()
         self.rc_input = self._make_rc_input()
+        # 手柄热插拔状态（poll_joysticks 双向维护）：lost=配置手柄消失已回落
+        # 键盘（rc_setup 明示）；recovered=消失后自动拾取成功（对称提示）
+        self.joystick_lost = False
+        self.joystick_recovered = False
+        self._joystick_pickup_after = 0.0  # 自动拾取退避到期时刻（monotonic 秒）
         pygame.joystick.init()  # 手柄热插拔轮询用
         # MSP 虚拟飞控服务器（Task 16/19）：参数页「接入地面站」启动；未启动时
         # drain() 内部直返（run() 每帧调用无开销）。state_provider 每请求供
@@ -172,23 +181,51 @@ class App:
     def _make_rc_input(self):
         if self.rc_config.mode == "joystick" and self.rc_config.device_name:
             for i in range(pygame.joystick.get_count()):
-                j = pygame.joystick.Joystick(i)
-                if j.get_name() == self.rc_config.device_name:
-                    j.init()
-                    # 二期 AUX：按钮源 + 轴数/按钮数传入（越界防御换设备回中）
-                    return JoystickInput(j.get_axis, self.rc_config.mappings,
-                                         get_button_fn=j.get_button,
-                                         num_axes=j.get_numaxes(),
-                                         num_buttons=j.get_numbuttons())
-        return KeyboardInput()  # 无手柄/未配置 → 键盘兜底（UI 明示）
+                try:
+                    j = pygame.joystick.Joystick(i)
+                    if j.get_name() == self.rc_config.device_name:
+                        j.init()
+                        # 二期 AUX：按钮源 + 轴数/按钮数传入（越界防御换设备回中）
+                        return JoystickInput(j.get_axis, self.rc_config.mappings,
+                                             get_button_fn=j.get_button,
+                                             num_axes=j.get_numaxes(),
+                                             num_buttons=j.get_numbuttons())
+                except Exception:
+                    continue  # 构造/init 失败（热插拔窗口期设备半就绪）→ 试下一个
+        return KeyboardInput()  # 无手柄/未配置/全部失败 → 键盘兜底（UI 明示）
 
     def poll_joysticks(self):
-        """手柄插拔检测：配置为手柄但设备消失 → 回落键盘（设计文档第 8 节）"""
+        """手柄插拔双向检测（一期「消失回落」语义保持 + Task 38「出现拾取」）：
+        - 消失方向（一期）：当前 JoystickInput 且设备列表空 → 回落键盘 +
+          joystick_lost 标记（rc_setup 明示）+ 日志
+        - 出现方向（Task 38）：配置为手柄但当前 KeyboardInput（启动前未接 /
+          启动后接入 / 拔出后重插）→ _make_rc_input 重扫设备名命中即自动重建；
+          成功清 lost、置 recovered（对称提示）+ 日志；失败（init 异常/名字
+          未出现）保持键盘，按 JOYSTICK_PICKUP_RETRY_S 退避重试防抖动死循环。
+          热插拔发现依赖 SDL 事件泵——run() 每帧 event.get() 先于此调用"""
+        self.joystick_lost = getattr(self, "joystick_lost", False)
+        self.joystick_recovered = getattr(self, "joystick_recovered", False)
         if isinstance(self.rc_input, JoystickInput):
             if pygame.joystick.get_count() == 0:
                 self.rc_input = KeyboardInput()
                 self.joystick_lost = True
-        self.joystick_lost = getattr(self, "joystick_lost", False)
+                self.joystick_recovered = False
+                print(f"[输入] 手柄已断开，回落键盘: {self.rc_config.device_name}")
+            return
+        # 出现方向：仅手柄配置参与自动拾取（键盘配置的手柄只作 UI 设备源）
+        if self.rc_config.mode != "joystick" or not self.rc_config.device_name:
+            return
+        now = time.monotonic()
+        if now < getattr(self, "_joystick_pickup_after", 0.0):
+            return  # 退避窗口内：本轮不试（上次失败/设备未出现）
+        picked = self._make_rc_input()
+        if isinstance(picked, JoystickInput):
+            self.rc_input = picked
+            self.joystick_lost = False
+            self.joystick_recovered = True
+            print(f"[输入] 手柄已自动连接: {self.rc_config.device_name}")
+        else:
+            self._joystick_pickup_after = now + JOYSTICK_PICKUP_RETRY_S
 
     # ---- 状态机 ----
     def switch(self, screen):
