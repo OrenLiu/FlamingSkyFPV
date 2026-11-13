@@ -257,8 +257,9 @@ class FlightScreen(Screen):
         Task 49 更正原「pitch抬头/yaw右」误标），非杆义；vario_mps 取
         velocity[2]（正=上升）。Task 49 增三字段：arm_denied=fc.
         arm_denied_once 闩锁（OSD WARNINGS）；rtc_text=params.virtual.
-        rtc_unix_s（SET_RTC 246 存储）的 "%m-%d %H:%M" 格式化（0=未设置
-        空串，OSD RTC_DATETIME——osd.py 零 import 纪律，时间换算在本层）；
+        rtc_unix_s（SET_RTC 246 存储）的 "%Y-%m-%d %H:%M:%S" 全格式化
+        （0=未设置空串，OSD RTC_DATETIME——osd.py 零 import 纪律，
+        时间换算在本层）；
         up_body=世界 +Z（上）单位向量在机体系坐标 (x,y,z)（euler_deg 推导：
         x=-sin(pitch)、y=sin(roll)cos(pitch)、z=cos(roll)cos(pitch)，与
         yaw 无关；OSD UP_DOWN_REFERENCE 天顶/天底参考点消费）。"""
@@ -292,7 +293,8 @@ class FlightScreen(Screen):
             "vario_mps": v[2],
             "flight_time_s": self._flight_time_s,
             "arm_denied": bool(getattr(self._fc, "arm_denied_once", False)),
-            "rtc_text": (time.strftime("%m-%d %H:%M", time.localtime(rtc))
+            "rtc_text": (time.strftime("%Y-%m-%d %H:%M:%S",
+                                       time.localtime(rtc))
                          if rtc > 0 else ""),
             "up_body": (-math.sin(pitch_r),
                         math.sin(roll_r) * math.cos(pitch_r),

@@ -502,9 +502,11 @@ def build_frame(state: dict) -> dict:
             put(col + 1 + len(text), row, GLYPH_MPS)
         elif elem_id == 38:       # RTC_DATETIME（Task 49）：rtc_text 由飞行
             if rtc_text:          # 层快照格式化传入（SET_RTC(246) 存 unix
-                put_text(rtc_text, col, row)  # 秒 → "%m-%d %H:%M"（固件
-            # dateTimeFormatLocalShort 同式）；0=未设置空串。osd 本体零
-            # import 纪律——time 属调用方职责；缺键/空串不渲染不抛
+                put_text(rtc_text, col, row)  # 秒 → "%Y-%m-%d %H:%M:%S"
+            # 全格式，19 字符；固件 dateTimeFormatLocalShort
+            # "%04u-%02u-%02u %02u:%02u:%02u" 同式——本表不格式化只画
+            # 文本）。0=未设置空串。osd 本体零 import 纪律——time 属
+            # 调用方职责；缺键/空串不渲染不抛
         elif elem_id == 45:       # FLIP_ARROW（Task 49）：反乌龟激活（box
             # 21）时按杆向显示箭头，指示打杆翻转方向。固件
             # osdElementCrashFlipArrow 以姿态主导轴选箭头（|pitch|>|roll|
