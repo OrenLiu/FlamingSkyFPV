@@ -89,6 +89,11 @@ class VirtualFCParams:
     # 同款）；False=cells 手动保持。additive 字段：旧预设缺键 → dataclass
     # 默认 True（自动），不升 schema（fps_mode 先例）
     cells_auto: bool = True
+    # RTC 时钟（Task 49，MSP_SET_RTC(246) 存储）：unix 秒（毫秒折入小数），
+    # 0=未设置——OSD RTC_DATETIME 元素此时不渲染（flight_snapshot 格式化
+    # 为 "%m-%d %H:%M" 文本）。additive 字段：旧预设缺键补默认 0.0，
+    # 不升 schema（cells_auto 先例）
+    rtc_unix_s: float = 0.0
 
 def detect_cell_count(voltage_v: float) -> int:
     """按电池总电压自动识别电芯节数：int(V/4.30)+1 钳 [1,8]。
