@@ -334,7 +334,7 @@ class FlightScreen(Screen):
                 self.app.msp_params_dirty = False
             # 虚拟飞控接线（Task 14）：aux [-1,1] → µs（1500 中位 ±500）、
             # mode_ranges 求值激活 box 集、杆义姿态角随帧传递（自稳外环/反乌龟
-            # 倒置检测消费）。无 ARM box 配置时 eval_boxes 恒空 → 永不解锁（零推）
+            # 激活门槛消费）。无 ARM box 配置时 eval_boxes 恒空 → 永不解锁（零推）
             aux_us = [1500.0 + v * 500.0 for v in ch.aux]
             boxes = eval_boxes(self.app.drone_params.virtual.mode_ranges, aux_us)
             self._aux_us = aux_us    # 快照缓存（flight_snapshot 消费）
