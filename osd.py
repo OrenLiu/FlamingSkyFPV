@@ -141,8 +141,10 @@ def _osd_float(value: float, dp: int, do_round: bool) -> tuple[int, str]:
     """固件 osd.c osdPrintFloat 数值段：value×10^dp 取整后拆整数/定宽小数。
 
     do_round=True 用 lrintf 最近偶舍入（Python round 同语义，主压/vario）；
-    False 为 (int) 截断（avg cell）。输入约定非负（vario 在调用前取 abs，
-    固件对负值仅输出 '-' 且图标元素恒非负）。dp=0 时小数段为空串。
+    False 为 (int) 截断（固件 round=false 路径；当前无消费者——avg cell
+    数值段 fix round 1 起改走 _avg_cell_cv 整数路径，浮点舍入尘不模拟）。
+    输入约定非负（vario 在调用前取 abs，固件对负值仅输出 '-' 且图标元素
+    恒非负）。dp=0 时小数段为空串。
     """
     scaled = value * (10 ** dp)
     n = round(scaled) if do_round else int(scaled)
@@ -150,17 +152,26 @@ def _osd_float(value: float, dp: int, do_round: bool) -> tuple[int, str]:
     return ip, (f"{fp:0{dp}d}" if dp else "")
 
 
+def _avg_cell_cv(voltage_v: float, cells: int) -> int:
+    """平均芯压 cV 整数（battery.c getBatteryAverageCellVoltage 语义：
+    总压 cV 整数 // cells，cells=0 → 0）。图标段与数值段共源——浮点除
+    会有 0.01V 级下偏（20.15V/5S 浮点 4.0299… 截断 "4.02"，整数 403 cV
+    → "4.03"；fix round 1，与固件逐格同构）。
+    """
+    return (round(voltage_v * 100) // cells) if cells > 0 else 0
+
+
 def _battery_glyph(voltage_v: float, cells: int) -> int:
     """固件 osdGetBatterySymbol：平均芯压 → 电池图标段数字形。
 
-    cv = 总压厘伏整数 // cells（battery.c getBatteryAverageCellVoltage，
-    cells=0 → 0）；段数 = scaleRange(cv, 330, 430, 0, 8) 即 (8×(cv-330))//100
-    截断除（maths.c 整数版），钳 0..6；图标 = SYM_BATT_EMPTY(0x96) - 段数
-    （330/430 = vbatmin/maxcellvoltage 厘伏默认值）。BATTERY_CRITICAL →
-    SYM_MAIN_BATT(0x97) 分支不模拟：模拟器 battery_voltage 为静态配置、
-    无电量消耗/告警状态机（恒 BATTERY_OK 语义）。
+    cv 见 _avg_cell_cv；段数 = scaleRange(cv, 330, 430, 0, 8) 即
+    (8×(cv-330))//100 截断除（maths.c 整数版），钳 0..6；图标 =
+    SYM_BATT_EMPTY(0x96) - 段数（330/430 = vbatmin/maxcellvoltage 厘伏
+    默认值）。BATTERY_CRITICAL → SYM_MAIN_BATT(0x97) 分支不模拟：
+    模拟器 battery_voltage 为静态配置、无电量消耗/告警状态机（恒
+    BATTERY_OK 语义）。
     """
-    cv = (round(voltage_v * 100) // cells) if cells > 0 else 0
+    cv = _avg_cell_cv(voltage_v, cells)
     seg = min(6, max(0, (8 * (cv - 330)) // 100))
     return GLYPH_BATT_EMPTY - seg
 
@@ -308,11 +319,11 @@ def build_frame(state: dict) -> dict:
         elif elem_id == 15:       # ALTITUDE
             put_text(f"{alt_m:.0f}M", col, row)
         elif elem_id == 22:       # AVG_CELL_VOLTAGE：图标+2 位小数+V（cells
-            if cells > 0:         # 非法则不画；固件 round=false 截断）
-                ip, fp = _osd_float(voltage_v / cells, 2, False)
-                text = f"{ip}.{fp}"
-                put(col, row, _battery_glyph(voltage_v, cells))
-                put_text(text, col + 1, row)
+            if cells > 0:         # 非法则不画；数值段走 cV 整数整除路径
+                cell_cv = _avg_cell_cv(voltage_v, cells)   # （固件两处
+                text = f"{cell_cv // 100}.{cell_cv % 100:02d}"  # 同读 getBattery-
+                put(col, row, _battery_glyph(voltage_v, cells))  # AverageCell-
+                put_text(text, col + 1, row)               # Voltage）
                 put(col + 1 + len(text), row, GLYPH_VOLT)
         elif elem_id == 26:       # PITCH_ANGLE（att[1]）
             put_text(f"P{att[1]:+.0f}", col, row)
