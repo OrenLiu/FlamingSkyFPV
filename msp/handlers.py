@@ -34,8 +34,9 @@ virtual.craft_name → preset_id → FSKY-SIM 兜底）。
 
 固化组（Task 24，Configurator 保存/连接序列杂音）：250=MSP_EEPROM_WRITE
 （落盘当前预设）、54=MSP_CF_SERIAL_CONFIG / 55=MSP_SET_CF_SERIAL_CONFIG
-（串口配置，GET 单端口恒值、SET 整体忽略）、208=MSP_RESET_CONF /
-246=MSP_SET_RTC（显式 no-op 静音）。
+（串口配置，GET 单端口恒值、SET 整体忽略）、208=MSP_RESET_CONF（显式
+no-op 静音）、246=MSP_SET_RTC（Task 49 起存 virtual.rtc_unix_s：u32
+unix 秒 + u16 毫秒 → OSD RTC_DATETIME 元素数据源）。
 
 RX 配置组（Task 33，接收机识别——Task 25 实测「连接遥控后地面站识别
 不到接收机」的对症组）：Receiver 页「Receiver Mode」下拉取值为
@@ -777,6 +778,25 @@ def _noop(payload: bytes, state: "dict | None" = None) -> bytes:
     return b""
 
 
+def _set_rtc(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_SET_RTC(246)（Task 49）：u32 unix 秒 + u16 毫秒 →
+    virtual.rtc_unix_s = secs + millis/1000（0=未设置）。
+
+    载荷布局按 Configurator MSPHelper.ts L3126-3134 实读（push32(secs) +
+    push16(millis)）；len<6 整体忽略。存/不存均空载荷 ack（保持原 _noop
+    的静音应答语义——SET_RTC 不应答错误）。不置 changed：RTC 非调参域
+    写入，不触发飞行帧首 set_params 重建（EEPROM_WRITE 落盘同款裁定；
+    OSD 渲染经 flight_snapshot 逐帧直读参数，无需脏标志）。"""
+    if state is None or len(payload) < 6:
+        return b""
+    params = state.get("params")
+    if params is None:
+        return b""
+    secs, millis = struct.unpack_from("<IH", payload)
+    params.virtual.rtc_unix_s = secs + millis / 1000.0
+    return b""
+
+
 # ---- Task 41 组（电源电池配置，Power & Battery 页） ----
 
 def _battery_state_payload(payload: bytes, state: "dict | None" = None) -> bytes:
@@ -1018,9 +1038,10 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         # 55 MSP_SET_CF_SERIAL_CONFIG：载荷整体忽略（UART1 恒含 MSP 位，
         # Ports 页保存无法误关，设计 §8.3）
         55: _noop,
-        # 208 MSP_RESET_CONF / 246 MSP_SET_RTC：显式 no-op 静音
+        # 208 MSP_RESET_CONF：显式 no-op 静音；246 MSP_SET_RTC：存 RTC
+        # （Task 49，OSD RTC_DATETIME 数据源；空载荷/无参数源仍静音 ack）
         208: _noop,
-        246: _noop,
+        246: _set_rtc,
         # 250 MSP_EEPROM_WRITE：落盘当前预设（不置 changed）
         250: _eeprom_write,
         # ---- RX 配置组（Task 33，接收机识别） ----

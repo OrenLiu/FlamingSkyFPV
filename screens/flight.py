@@ -252,8 +252,16 @@ class FlightScreen(Screen):
         armed=飞控解锁态；boxes/aux_us=本帧模式求值结果（update 缓存）；
         stick_us 顺序 (roll, pitch, yaw, throttle)，全通道 1500 中心 ±500
         （throttle∈[0,1] 映射 1500-2000，MSP 线上格式由 handler 换算）；
-        attitude_deg 为 bullet 语义 world.euler_deg（roll右/pitch抬头/yaw右），
-        非杆义 euler_stick_deg；vario_mps 取 velocity[2]（正=上升）。"""
+        attitude_deg 为 bullet 语义 world.euler_deg（roll 右滚正 / pitch
+        低头正 / yaw 机头左转正——杆义 euler_stick_deg 翻转 y/z 两轴，
+        Task 49 更正原「pitch抬头/yaw右」误标），非杆义；vario_mps 取
+        velocity[2]（正=上升）。Task 49 增三字段：arm_denied=fc.
+        arm_denied_once 闩锁（OSD WARNINGS）；rtc_text=params.virtual.
+        rtc_unix_s（SET_RTC 246 存储）的 "%m-%d %H:%M" 格式化（0=未设置
+        空串，OSD RTC_DATETIME——osd.py 零 import 纪律，时间换算在本层）；
+        up_body=世界 +Z（上）单位向量在机体系坐标 (x,y,z)（euler_deg 推导：
+        x=-sin(pitch)、y=sin(roll)cos(pitch)、z=cos(roll)cos(pitch)，与
+        yaw 无关；OSD UP_DOWN_REFERENCE 天顶/天底参考点消费）。"""
         if (self.stage != "flying" or self._paused
                 or self._world is None or self._fc is None):
             return None
@@ -261,6 +269,11 @@ class FlightScreen(Screen):
         if ch is None:
             return None   # update 尚未求值杆量（进入 flying 的首帧边缘）
         v = self._world.velocity
+        att = self._world.euler_deg
+        roll_r, pitch_r = math.radians(att[0]), math.radians(att[1])
+        # rtc 防御链：单测 fake app（SimpleNamespace）常缺 drone_params
+        params = getattr(self.app, "drone_params", None)
+        rtc = getattr(getattr(params, "virtual", None), "rtc_unix_s", 0.0)
         return {
             "armed": self._fc.armed,
             "boxes": self._boxes,
@@ -270,7 +283,7 @@ class FlightScreen(Screen):
                          1500.0 + ch.yaw * 500.0,
                          1500.0 + ch.throttle * 500.0),
             "throttle": ch.throttle,
-            "attitude_deg": self._world.euler_deg,
+            "attitude_deg": att,
             "gyro_dps": self._world.gyro_dps,
             "speed_mps": math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]),
             "alt_m": self._world.pos[2],
@@ -278,6 +291,12 @@ class FlightScreen(Screen):
             "dist_flown_m": int(self._dist_flown_m),   # HOME_DIST/FLIGHT_DIST）
             "vario_mps": v[2],
             "flight_time_s": self._flight_time_s,
+            "arm_denied": bool(getattr(self._fc, "arm_denied_once", False)),
+            "rtc_text": (time.strftime("%m-%d %H:%M", time.localtime(rtc))
+                         if rtc > 0 else ""),
+            "up_body": (-math.sin(pitch_r),
+                        math.sin(roll_r) * math.cos(pitch_r),
+                        math.cos(roll_r) * math.cos(pitch_r)),
         }
 
     def _track_flight_distance(self, pos, armed: bool) -> None:
