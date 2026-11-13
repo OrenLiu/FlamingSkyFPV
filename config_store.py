@@ -1,6 +1,7 @@
 """配置持久化：dataclass ↔ JSON，损坏自动备份回默认（设计文档第 7 节）"""
 import dataclasses
 import json
+import math
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -96,7 +97,12 @@ def detect_cell_count(voltage_v: float) -> int:
     batteryUpdatePresence 权威算法）：cells = voltage / vbatmaxcellvoltage
     + 1，VBAT_CELL_VOLTAGE_DEFAULT_MAX = 430cV = 4.30V、上限
     MAX_AUTO_DETECT_CELL_COUNT = 8。仿真域补充下限钳 1（电池恒在场，
-    固件 0 节数走「未接电池」分支，仿真无此态）。"""
+    固件 0 节数走「未接电池」分支，仿真无此态）。非有限电压（NaN/
+    Infinity——json 默认可解析、外部编辑/历史落盘可入）按下限 1 返回：
+    int() 直转会抛 ValueError/OverflowError 且发生在 load 内即启动崩溃，
+    绕过损坏备份 .bak 兜底。"""
+    if not math.isfinite(voltage_v):
+        return 1
     return min(8, max(1, int(voltage_v / 4.30) + 1))
 
 # 参数 schema 版本：5 = 虚拟飞控域（DroneParams 新增 virtual_fc/virtual 字段，
@@ -174,9 +180,10 @@ class DroneParams:
 # ---- 节数手动/自动切换（Task 46；UI 与 MSP SET 95 共用纯函数） ----
 
 def set_cells_manual(params: DroneParams, v: int) -> None:
-    """节数转手动：cells=max(1,int(v))（下限 1 防电压计算除零/失真）、
-    cells_auto=False"""
-    params.virtual.cells = max(1, int(v))
+    """节数转手动：cells=min(8, max(1, int(v)))（下限 1 防电压计算除零/
+    失真、上限 8 与 auto 域一致——越界值 GET 94 回发时 Configurator 按
+    s8 解码会变负数）、cells_auto=False"""
+    params.virtual.cells = min(8, max(1, int(v)))
     params.virtual.cells_auto = False
 
 def set_cells_auto(params: DroneParams) -> None:
