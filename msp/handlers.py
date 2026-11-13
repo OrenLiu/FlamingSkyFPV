@@ -65,6 +65,15 @@ Task 36 组（Task 25 实测衍生：Receiver 页渲染中断）：42=MSP_MIXER_
 飞控固有实况，诚实只读）、43=MSP_SET_MIXER_CONFIG（no-op，mixer 恒 quad-X
 与 37 同款降级）。
 
+Task 41 组（用户实飞反馈衍生：Power & Battery 页 + 节数联动）：32=
+MSP_BATTERY_CONFIG（13B 固件默认参考值——**布局无 cells 字段**，固件
+4.5.1 msp.c 写序三方互证；节数载体为 94/95 offset 46 可写与 130 只读
+显示）、33=MSP_SET_BATTERY_CONFIG（no-op：mincell/capacity/计量源无
+仿真域）、130=MSP_BATTERY_STATE（state 感知：cellCount=virtual.cells、
+双标度 voltage=battery_voltage；容量/消耗/电流恒 0 理想静态电源）、
+128/129=MSP_VOLTAGE/CURRENT_METERS（无计量表空载荷）、56/40=MSP_
+VOLTAGE/CURRENT_METER_CONFIG（count=0）、57/41 SET 同 33 降级。
+
 状态组载荷布局经外部源码核对（2026-11-12 GitHub 取 tag 4.5.1 的
 src/main/msp/msp.c L1080-1133 与 Configurator src/js/msp/MSPHelper.ts
 L841-903）：STATUS_EX 与固件写序逐字段一致；STATUS 应答 11 字节止于
@@ -710,6 +719,32 @@ def _noop(payload: bytes, state: "dict | None" = None) -> bytes:
     return b""
 
 
+# ---- Task 41 组（电源电池配置，Power & Battery 页） ----
+
+def _battery_state_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_BATTERY_STATE(130)：11 字节（固件 4.5.1 msp.c L789-801 写序）。
+
+    [cellCount u8][capacity u16][voltage×10 u8（legacy，constrain
+    0-255）][mAhDrawn u16][amperage i16 0.01A][batteryState u8][voltage×100
+    u16]。cellCount=virtual.cells、双标度电压=params.battery_voltage——
+    与 OSD compose_state 同源（build_frame 平均芯压 = 尾段 cV ÷ cellCount，
+    节数经 95 写入后本应答与 OSD 同帧联动）；capacity/mAhDrawn/amperage
+    恒 0（模拟器电池为理想静态电源：无容量/消耗/压降模型，诚实值）；
+    batteryState=0（battery.h batteryState_e BATTERY_OK——静态电压无
+    告警状态机）。无参数源 → 空载荷降级（Configurator readU8 越界
+    null 容错 →「未接电池」显示，与 _pid_payload 同款）。"""
+    params = (state or {}).get("params")
+    if params is None:
+        return b""
+    voltage = params.battery_voltage
+    return (struct.pack("<B", _u8(params.virtual.cells))
+            + struct.pack("<H", 0)                    # capacity（无电量域）
+            + bytes([_u8(voltage * 10)])              # legacy 0.1V（u8 钳位）
+            + struct.pack("<HH", 0, 0)                # mAhDrawn / amperage
+            + bytes([0])                              # batteryState = OK
+            + struct.pack("<H", _u16(voltage * 100))) # 0.01V 主段
+
+
 # ---- RX 配置组（Task 33） ----
 
 def _rx_config_payload(payload: bytes, state: "dict | None" = None) -> bytes:
@@ -806,6 +841,41 @@ assert len(_MSP2_SERIAL_CONFIG_PAYLOAD) == 10
 # - yaw_motors_reversed=0（不反转，PG 复位默认）
 _MIXER_CONFIG_PAYLOAD = bytes([3, 0])
 assert len(_MIXER_CONFIG_PAYLOAD) == 2
+
+# ---- Task 41 组（电源电池配置，Power & Battery 页，2026-11-13） ----
+# 外部源码核对（本地 Configurator 2026.12.0-alpha src/composables/usePower.js
+# + src/js/msp/MSPHelper.js/MSPCodes.js，与固件 4.5.1 tag commit 77d01ba
+# msp.c/battery.c 互证）：
+# - Power 页 loadData 七命令链：150 STATUS_EX（已实现）→ 128 → 129 →
+#   40 → 56 → 130 → 32；saveConfig 写链：33 → MSP2_SET_TEXT（电池
+#   profile 名，API ≥ 1.48 才发——1.46 域外）→ 57/41（按 VOLTAGE/
+#   CURRENT_METER_CONFIGS 条数逐条发，本表 count=0 即零条）→ 250
+#   EEPROM_WRITE（已实现落盘）
+# - 32 布局 13 字节无 cells（固件 msp.c L898-908 写序 ↔ MSPHelper.js
+#   L463-472 解码 ↔ L2033-2045 crunch 三方一致）：3×u8 legacy ×10 段 +
+#   capacity u16 + 双计量源 u8×2 + 3×u16 cV 段；固件 PG 复位默认
+#   330/430/350 cV、capacity 0、双源 NONE（battery.c L106-118；
+#   (330+5)/10=33 四舍五入写法照抄固件）。模拟器无 batteryConfig 仿真
+#   域（mincell/maxcell/warning 不消费、容量无电量模型）→ GET 恒固件
+#   默认参考值、SET 忽略，与 RX_CONFIG stick 阈值同款诚实降级
+# - API 1.46 下节数唯一可写载体 = 94/95 offset 46（autoProfileCellCount，
+#   Configurator PID 调参页 Misc Settings「Cell Count」——PidSubTab.vue
+#   L1016-1026，Task 21 已实现写 virtual.cells）；Power 页节数编辑为
+#   API ≥ 1.48 电池 profile 特性（usePower.js hasBatteryProfiles 门控 +
+#   Power 页 locale 无 cells 键），1.46 域外不冒充。batteryConfig 的
+#   forceBatteryCellCount 固件侧存在但 4.5.1 不经 MSP_BATTERY_CONFIG
+#   暴露
+_BATTERY_CONFIG_PAYLOAD = (bytes([33, 43, 35])    # legacy ×10：(330+5)/10…
+                           + struct.pack("<H", 0)  # capacity（PG 默认 0）
+                           + bytes([0, 0])         # 电压/电流计量源 = NONE
+                           + struct.pack("<3H", 330, 430, 350))
+assert len(_BATTERY_CONFIG_PAYLOAD) == 13
+
+# 计量表配置 count=0 应答（56/40 共用）：模拟器电池为模型参数
+# （battery_voltage/cells 直供仿真与 OSD），无 ADC/ESC 计量硬件——
+# 与 32 的双源 NONE 自洽；显式 count=0 比隐式空载荷（Configurator
+# readU8 越界得 null）解码干净
+_METER_CONFIG_EMPTY_PAYLOAD = b"\x00"
 
 
 def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
@@ -931,4 +1001,28 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         # 43 MSP_SET_MIXER_CONFIG：载荷整体忽略（mixer 恒 quad-X——改
         # mixer 不改仿真电机组，与 37/55/65 同款诚实降级）
         43: _noop,
+        # ---- Task 41 组（电源电池配置，Power & Battery 页） ----
+        # 32 MSP_BATTERY_CONFIG：13 字节固件默认参考值（布局无 cells——
+        # 节数载体见 94/95 与 130；mincell/capacity/计量源无仿真域，
+        # 与 stick 阈值同款只读参考值）
+        32: lambda _payload, _state=None: _BATTERY_CONFIG_PAYLOAD,
+        # 33 MSP_SET_BATTERY_CONFIG：载荷整体忽略（同上诚实降级；固件
+        # 4.5.1 该命令亦无 cells 字段，Power 页保存链后续 250 照常落盘）
+        33: _noop,
+        # 130 MSP_BATTERY_STATE：cells/电压 state 感知（Power 页「已接
+        # 电池 (XS)」+ OSD 共源；Poll 周期重读，95 改节数后即时反映）
+        130: _battery_state_payload,
+        # 128 MSP_VOLTAGE_METERS / 129 MSP_CURRENT_METERS：无计量表
+        # 实况（模拟器电池为模型参数非测量值，空载荷 = 零表）
+        128: lambda _payload, _state=None: b"",
+        129: lambda _payload, _state=None: b"",
+        # 56 MSP_VOLTAGE_METER_CONFIG / 40 MSP_CURRENT_METER_CONFIG：
+        # count=0（无 ADC/ESC 计量硬件；saveConfig 按表条数发 57/41
+        # → 零条即零写）
+        56: lambda _payload, _state=None: _METER_CONFIG_EMPTY_PAYLOAD,
+        40: lambda _payload, _state=None: _METER_CONFIG_EMPTY_PAYLOAD,
+        # 57 MSP_SET_VOLTAGE_METER_CONFIG / 41 MSP_SET_CURRENT_METER_
+        # CONFIG：载荷整体忽略（无计量域，与 33 同款降级）
+        57: _noop,
+        41: _noop,
     }
