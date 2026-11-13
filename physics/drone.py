@@ -25,14 +25,16 @@ ANGLE_P = 8.0
 # HORIZON 混合过渡带：|rc| ≥ 该值后自稳权重降为 0（杆外纯 acro/rate 区）
 HORIZON_TRANSITION = 0.6
 
-# 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13）：120°/90° 双阈值迟滞防抖 + 油门门控。
-# 进入：box 激活 + armed + 未翻正 + (|roll|>120° 或 |pitch|>120°) + 油门<0.35；
-# 退出（析取，fix round 1 controller 裁定）：两轴均 <90°（严格）或 box 撤销
-# 或油门 ≥0.35。翻正 = 主导轴 setpoint 叠加 ±FLIP_OVER_RATE 朝 0° 最短方向
-# （角 >90° 取负、<−90° 取正）
-FLIP_OVER_RATE = 400.0    # °/s 主导轴叠加的翻正角速度
-FLIP_ENTER_DEG = 120.0    # 进入阈值：任一姿态轴绝对值严格超过
-FLIP_EXIT_DEG = 90.0      # 退出阈值：两轴均严格低于；叠加方向判据同值
+# 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13 → Task 42 真机交互模型重构）：进入 =
+# box 激活 + armed + 油门<0.35（用户裁定去掉倒置>120° 要求——平地激活即待命；
+# Task 13 自动翻正模型平地会直接起飞即重构动因）；翻正态油门停转待命（不进
+# 混控）、roll/pitch 杆量线性映射该轴翻转角速度 setpoint（±1 满杆 →
+# ±FLIP_OVER_RATE，符号=杆向）、yaw 杆忽略；退出析取（沿 Task 13 fix round 1
+# 裁定）：翻面后回直立（任一轴曾 |≥|FLIP_EXIT_DEG 视为已离开直立区，此后两轴
+# 均严格 <FLIP_EXIT_DEG 才退出——防平地待命因本来就直立而立即误退）或 box
+# 撤销或油门 ≥0.35
+FLIP_OVER_RATE = 400.0    # °/s 满杆翻转角速度（杆量线性比例映射，符号=杆向）
+FLIP_EXIT_DEG = 90.0      # 直立判据：两轴均严格低于；任一轴曾 ≥ 即记离开直立区
 FLIP_MAX_THROTTLE = 0.35  # 进入侧须严格低于；退出侧 ≥ 即接管（互补无重叠）
 
 def eval_boxes(mode_ranges, aux_us) -> frozenset:
@@ -72,16 +74,6 @@ def _horizon_mix(rc: float, current_deg: float, rate_sp: float) -> float:
     |rc|≥HORIZON_TRANSITION w=0 纯 rate（杆外 acro），之间线性过渡"""
     w = _clamp(1.0 - abs(rc) / HORIZON_TRANSITION, 0.0, 1.0)
     return w * _angle_loop(rc, current_deg) + (1.0 - w) * rate_sp
-
-def _flip_over_dir(angle_deg: float) -> int:
-    """翻正方向符号（纯函数）：|角|>90° 时朝 0° 最短——正角 −1（回滚）、
-    负角 +1；|角|≤90° 返回 0 不叠加（翻正态中主导轴必 ≥90°——退出条件为两轴
-    均 <90°，≤90° 仅 |roll|=|pitch| 平手时理论可达，防御兜底）"""
-    if angle_deg > FLIP_EXIT_DEG:
-        return -1
-    if angle_deg < -FLIP_EXIT_DEG:
-        return 1
-    return 0
 
 # PID 增益刻度换算（类比 Betaflight PID_MIXER_SCALING）：增益入参/存档为 BF 量级
 # 刻度（P≈40 量级，二期地面站 MSP 协议同单位），控制器内部换算到电机油门域
@@ -173,7 +165,8 @@ class FlightController:
         self._virtual_fc = params.virtual_fc
         self.armed = False
         self.arm_denied_once = False
-        self._flipping = False   # 反乌龟翻正态（Task 13）：重建回未翻正
+        self._flipping = False        # 反乌龟翻正态（Task 13/42）：重建回未翻正
+        self._flip_left_upright = False  # 翻正态记账（Task 42）：曾离开直立区
 
     def update(self, ch: Channels, gyro_dps: tuple, dt: float,
                aux_us=None, boxes=frozenset(), angles_deg=None) -> list:
@@ -203,6 +196,7 @@ class FlightController:
                     pid.reset()
                 self._tpa_throttle = TPA_THROTTLE_INIT
                 self._flipping = False
+                self._flip_left_upright = False
                 return [0.0, 0.0, 0.0, 0.0]
         rt = self._tune.rate_type
         targets = (rate_setpoint(ch.roll, self._tune.rate["roll"], rt),
@@ -222,33 +216,42 @@ class FlightController:
             targets = (_horizon_mix(ch.roll, angles_deg[0], targets[0]),
                        _horizon_mix(ch.pitch, angles_deg[1], targets[1]),
                        targets[2])
-        # 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13）：倒置检测状态机 + 主导轴最短
-        # 方向翻正叠加，120°/90° 迟滞防抖、油门 ≥0.35 拒进（常量注释含语义）。
-        # 退出为析取式（fix round 1 controller 裁定）：角度迟滞（两轴均 <90°，
-        # 自动翻正完成）或 FLIP box 撤销（真机肌肉记忆：撤 box 即停）或油门
-        # ≥0.35（用户接管意图，不被 ±400°/s 对抗）。overlay 在 setpoint 管线
-        # 末端（上述模式之后、PID 之前）只加主导轴；进入检测与退出同帧完成
-        # 先于叠加。合取 self.armed 沿模式分支惯例；angles 缺失整段跳过（防御，
-        # 状态保持不动）
+        # 反乌龟 FLIP_OVER_AFTER_CRASH（Task 42 真机交互模型重构，替代 Task 13
+        # 的倒置进入 + 主导轴自动最短方向翻正）：进入 = box 激活 + 油门<0.35
+        # （armed 由外层合取保证；不再要求倒置——平地激活即待命）。翻正态
+        # （flip_active）整段接管：油门停转待命（不进混控，平地无升力——
+        # Task 13 模型平地会直接起飞的缺陷即重构动因）、roll/pitch 杆量线性
+        # 映射该轴翻转角速度 setpoint（覆盖 ANGLE/HORIZON/rate 分支输出），
+        # yaw 杆忽略；内环 gyro 闭环照常工作（物理层实际翻滚）。退出三路
+        # 析取（沿 Task 13 fix round 1 裁定）：翻面后回直立（_flip_left_upright
+        # 记账：任一轴曾 |≥|FLIP_EXIT_DEG 视为已离开直立区，此后两轴均严格
+        # <FLIP_EXIT_DEG 才退出——防平地待命因本来就直立而立即误退）或 box
+        # 撤销（真机肌肉记忆：撤 box 即停）或油门 ≥0.35（用户接管意图，同帧
+        # 恢复油门控制可直接起飞）。退出后 box 仍激活 + 低油门则下一帧重进
+        # 待命（真机交互：box 不关持续待命）。进入检测与退出同帧完成、先于
+        # 杆量接管；angles 缺失整段跳过（防御，状态保持不动）——flip_active
+        # 局部变量与叠加同生命周期，保证该帧油门 gate 一并退化（不残留）
+        flip_active = False
         if angles_deg is not None and self.armed:
             roll_a, pitch_a = angles_deg[0], angles_deg[1]
             if self._flipping:
-                if ((abs(roll_a) < FLIP_EXIT_DEG and abs(pitch_a) < FLIP_EXIT_DEG)
+                upright_now = (abs(roll_a) < FLIP_EXIT_DEG
+                               and abs(pitch_a) < FLIP_EXIT_DEG)
+                if ((self._flip_left_upright and upright_now)
                         or BOX_FLIP_OVER_AFTER_CRASH not in boxes
                         or ch.throttle >= FLIP_MAX_THROTTLE):
                     self._flipping = False
             elif (BOX_FLIP_OVER_AFTER_CRASH in boxes
-                    and ch.throttle < FLIP_MAX_THROTTLE
-                    and (abs(roll_a) > FLIP_ENTER_DEG
-                         or abs(pitch_a) > FLIP_ENTER_DEG)):
+                    and ch.throttle < FLIP_MAX_THROTTLE):
                 self._flipping = True
+                self._flip_left_upright = False
             if self._flipping:
-                if abs(roll_a) > abs(pitch_a):
-                    targets = (targets[0] + _flip_over_dir(roll_a) * FLIP_OVER_RATE,
-                               targets[1], targets[2])
-                else:
-                    targets = (targets[0], targets[1] + _flip_over_dir(pitch_a)
-                               * FLIP_OVER_RATE, targets[2])
+                flip_active = True
+                if abs(roll_a) >= FLIP_EXIT_DEG or abs(pitch_a) >= FLIP_EXIT_DEG:
+                    self._flip_left_upright = True
+                targets = (ch.roll * FLIP_OVER_RATE,
+                           ch.pitch * FLIP_OVER_RATE,
+                           0.0)
         # TPA：衰减因子乘到三轴 PID 输出后进混控。油门取上一帧四电机均值——比杆量
         # 多含饱和信息（饱和时均值≠杆量），且用历史值无代数环。真实 BF 只衰减 P/I
         # （真机 D 项重滤波、噪声主导，衰减反放大噪声）；本仿真 gyro 干净、D 无滤波，
@@ -258,7 +261,10 @@ class FlightController:
         outs = (self._pid["roll"].update(targets[0], gyro_dps[0], dt) * f,
                 self._pid["pitch"].update(targets[1], gyro_dps[1], dt) * f,
                 self._pid["yaw"].update(targets[2], gyro_dps[2], dt) * f)
-        motors = mix_quad_x(ch.throttle, outs[2], outs[0], outs[1])
+        # 翻正态油门停转待命：throttle 不进混控，电机仅剩 PID 差动分量（平地
+        # 无杆四电机 0 无升力；打杆产生单侧力矩驱动翻面）
+        motors = mix_quad_x(0.0 if flip_active else ch.throttle,
+                            outs[2], outs[0], outs[1])
         self._tpa_throttle = sum(motors) / len(motors)
         return motors
 
@@ -271,6 +277,7 @@ class FlightController:
             pid.reset()
         self._tpa_throttle = TPA_THROTTLE_INIT
         self._flipping = False
+        self._flip_left_upright = False
 
     def motor_thrusts(self, motors: list) -> list:
         """单电机最大推力 = 推重比(参考电压下)×重量/4 × (V/REF_VOLTAGE)²；实际 = T_max×motor²。
