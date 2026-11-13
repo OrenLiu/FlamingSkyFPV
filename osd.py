@@ -307,17 +307,20 @@ def build_frame(state: dict) -> dict:
             put(col, row, GLYPH_AH_CENTER_LINE_LEFT)   # elemPosX 起写三字形）
             put(col + 1, row, GLYPH_AH_CENTER)
             put(col + 2, row, GLYPH_AH_CENTER_LINE_RIGHT)
-        elif elem_id == 3:        # ARTIFICIAL_HORIZON（Task 47 简化渲染）：
-            # 9 格 '-' 连字符地平线，锚点=水平姿态时的线中心格，随姿态偏移
-            # ——偏移量钳位（行 ±5 / 列 ±7），锚点 (15,7)（屏心）时等价
-            # row=clamp(7+pitch/10,2,12)、列起点=clamp(11+roll/15,4,18)：
-            # 抬头 pitch 正 → 地平线下移（真机 AH 语义）；roll 正 → 线随
-            # round(roll/15) 平移。字符网格简化渲染——侧倾表达主要由
-            # HORIZON_SIDEBARS(4) 竖轨+水平箭头承担（该元素已实现）
+        elif elem_id == 3:        # ARTIFICIAL_HORIZON（Task 47；设计更正
+            # round 1——固件 osdElementArtificialHorizon 语义）：9 列阶梯
+            # 倾斜线，非平移线。每列 x∈[-4,+4] 行号 = 基准行 -
+            # round(roll_deg·x/60)——右滚（roll 正）→ 线右端上翘、左端
+            # 下沉（固件 y = -roll·x/64 - pitch_scaled，rollAngle 单位
+            # 0.1°：x=+4、45° 时右端上移 28 子格 ≈ 3 字符行；/60 为同构
+            # 比例约定，45° 两端各偏 3 行与固件一致）；基准行 = 锚点行 +
+            # round(pitch/10) 钳 ±5（抬头 pitch 正 → 整线下移，真机 AH
+            # 语义）。字符网格简化仍用 '-'（侧倾主体表达由本元素阶梯
+            # 承担，HORIZON_SIDEBARS(4) 竖轨+水平箭头辅助）；逐格行号
+            # 出界跳过（put 越界忽略 = 文件头稀疏字形规则）
             drow = min(5, max(-5, round(att[1] / 10.0)))
-            dcol = min(7, max(-7, round(att[0] / 15.0)))
-            for i in range(-4, 5):
-                put(col + dcol + i, row + drow, ord("-"))
+            for x in range(-4, 5):
+                put(col + x, row + drow - round(att[0] * x / 60.0), ord("-"))
         elif elem_id == 4:        # HORIZON_SIDEBARS：固件静态背景——±7 列
             # 竖轨（锚点行 ±3）+ ±6 列 AH_LEFT/AH_RIGHT 水平指示箭头；
             # 与姿态无关（roll 平移指示属 ARTIFICIAL_HORIZON(3)，Task 47
