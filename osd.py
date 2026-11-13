@@ -2,7 +2,7 @@
 """OSD 元素数据表、位置编解码与内容生成（MSP Task 23 建表；Task 27 内容
 生成；Task 28 渲染消费；Task 40 用户实飞反馈——元素渲染对齐固件 4.5.1
 osd_elements.c：电压/RSSI/vario 补图标字形，十字线锚点=左段，侧边栏改
-固件竖轨+水平箭头）。
+固件竖轨+水平箭头；Task 47 补人工地平线/返航距离/飞行里程三元素）。
 
 仅纯数据表与无依赖纯函数，不 import 项目模块（依赖方向单向：
 msp/handlers 与 screens 可 import 本表；改动需保持无 GL/pygame/imgui——
@@ -14,11 +14,15 @@ osd_font 的 GL 图集是渲染侧职责，特殊字形以同值常量输出索�
 未列入 OSD_IMPLEMENTED 的 id 位置恒 0（地面站列表中不可见/不可拖放）。
 """
 
-# 首批实现元素表：id → 元素名（osd_items_e 枚举名；以 Task 25 实测清单校准）
+# 首批实现元素表：id → 元素名（osd_items_e 枚举名；以 Task 25 实测清单校准）。
+# Task 47 增补 3/31/47——id 核实依据：固件 4.5.1 osd.h osd_items_e 自
+# OSD_RSSI_VALUE=0 逐项计数（3=ARTIFICIAL_HORIZON、31=HOME_DIST、
+# 47=FLIGHT_DIST），与现有表锚点 15/22/26/27/29/33 全部交叉吻合
 OSD_IMPLEMENTED: dict[int, str] = {
     0: "RSSI_VALUE",
     1: "MAIN_BATT_VOLTAGE",
     2: "CROSSHAIRS",
+    3: "ARTIFICIAL_HORIZON",
     4: "HORIZON_SIDEBARS",
     5: "TIMER_1",
     6: "TIMER_2",
@@ -31,7 +35,9 @@ OSD_IMPLEMENTED: dict[int, str] = {
     26: "PITCH_ANGLE",
     27: "ROLL_ANGLE",
     29: "DISARMED",
+    31: "HOME_DIST",
     33: "NUMERICAL_VARIO",
+    47: "FLIGHT_DIST",
 }
 
 # 元素总数 = 固件 osd.h OSD_ITEM_COUNT（MSP_OSD_CONFIG 的 item_count 与
@@ -45,6 +51,9 @@ DEFAULT_LAYOUT: dict[int, int] = {
     0: 2370,   # RSSI_VALUE        (2,10)
     1: 2441,   # MAIN_BATT_VOLTAGE (9,12)
     2: 2253,   # CROSSHAIRS        (13,6)——固件 pgResetFn (midCol-2,midRow-1)
+    3: 0,      # ARTIFICIAL_HORIZON——Task 47 出厂未摆放（Configurator
+               # defaultPosition=-1 同义：列表可选、默认不显示，用户在 OSD
+               # tab 拖放后生效）
     4: 2254,   # HORIZON_SIDEBARS  (14,6)——固件 (midCol-1,midRow-1)；Task 40
                # 起两元素锚点对齐固件/Configurator 默认（原 (14,7) 双双居中
                # 系建表期近似；十字线锚点=左段格后 (13,6) 使中心格落 midCol）
@@ -60,7 +69,9 @@ DEFAULT_LAYOUT: dict[int, int] = {
     26: 2479,  # PITCH_ANGLE       (15,13)
     27: 2466,  # ROLL_ANGLE        (2,13)
     29: 2188,  # DISARMED          (12,4)
+    31: 0,     # HOME_DIST——Task 47 出厂未摆放（同 3 注释）
     33: 2457,  # NUMERICAL_VARIO   (25,12)
+    47: 0,     # FLIGHT_DIST——Task 47 出厂未摆放（同 3 注释）
 }
 
 # 可见位掩码（osd_constants.ts VISIBLE=0x0800；固件单 OSD profile 的
@@ -209,6 +220,8 @@ def compose_state(params, flight, preset_id, now_s) -> dict:
         "cells": params.virtual.cells,
         "speed_mps": f.get("speed_mps", 0.0),
         "alt_m": f.get("alt_m", 0.0),
+        "dist_home_m": f.get("dist_home_m", 0),      # Task 47：无起飞点/
+        "dist_flown_m": f.get("dist_flown_m", 0),    # 从未解锁 → 0（显示 0m）
         "vario_mps": f.get("vario_mps", 0.0),
         "attitude_deg": f.get("attitude_deg") or (0.0, 0.0, 0.0),
         "flight_time_s": f.get("flight_time_s", 0.0),
@@ -243,6 +256,8 @@ def build_frame(state: dict) -> dict:
     cells = state.get("cells", 0)
     speed_mps = state.get("speed_mps", 0.0)
     alt_m = state.get("alt_m", 0.0)
+    dist_home = state.get("dist_home_m")     # None=缺键（裸 state 防御）→ 不画
+    dist_flown = state.get("dist_flown_m")
     vario_mps = state.get("vario_mps", 0.0)
     att = state.get("attitude_deg") or (0.0, 0.0, 0.0)
     flight_time_s = max(0.0, state.get("flight_time_s", 0.0))
@@ -292,9 +307,21 @@ def build_frame(state: dict) -> dict:
             put(col, row, GLYPH_AH_CENTER_LINE_LEFT)   # elemPosX 起写三字形）
             put(col + 1, row, GLYPH_AH_CENTER)
             put(col + 2, row, GLYPH_AH_CENTER_LINE_RIGHT)
+        elif elem_id == 3:        # ARTIFICIAL_HORIZON（Task 47 简化渲染）：
+            # 9 格 '-' 连字符地平线，锚点=水平姿态时的线中心格，随姿态偏移
+            # ——偏移量钳位（行 ±5 / 列 ±7），锚点 (15,7)（屏心）时等价
+            # row=clamp(7+pitch/10,2,12)、列起点=clamp(11+roll/15,4,18)：
+            # 抬头 pitch 正 → 地平线下移（真机 AH 语义）；roll 正 → 线随
+            # round(roll/15) 平移。字符网格简化渲染——侧倾表达主要由
+            # HORIZON_SIDEBARS(4) 竖轨+水平箭头承担（该元素已实现）
+            drow = min(5, max(-5, round(att[1] / 10.0)))
+            dcol = min(7, max(-7, round(att[0] / 15.0)))
+            for i in range(-4, 5):
+                put(col + dcol + i, row + drow, ord("-"))
         elif elem_id == 4:        # HORIZON_SIDEBARS：固件静态背景——±7 列
             # 竖轨（锚点行 ±3）+ ±6 列 AH_LEFT/AH_RIGHT 水平指示箭头；
-            # 与姿态无关（roll 偏移属于未实现的 ARTIFICIAL_HORIZON 元素）
+            # 与姿态无关（roll 平移指示属 ARTIFICIAL_HORIZON(3)，Task 47
+            # 起已实现——本元素保持固件静态背景语义）
             for dy in range(-_AH_SIDEBAR_HEIGHT_POS, _AH_SIDEBAR_HEIGHT_POS + 1):
                 put(col - _AH_SIDEBAR_WIDTH_POS, row + dy, GLYPH_AH_DECORATION)
                 put(col + _AH_SIDEBAR_WIDTH_POS, row + dy, GLYPH_AH_DECORATION)
@@ -332,6 +359,9 @@ def build_frame(state: dict) -> dict:
         elif elem_id == 29:       # DISARMED（armed 或相位关 → 整元素不画）
             if not armed and int(now_s * 2) % 2 == 0:
                 put_text("DISARMED", col, row, blink=True)
+        elif elem_id == 31:       # HOME_DIST（Task 47）：到起飞点水平距离
+            if dist_home is not None:   # int 米+'m'（小写映射大写字形）；
+                put_text(f"{int(dist_home)}m", col, row)  # 缺键跳过不抛
         elif elem_id == 33:       # NUMERICAL_VARIO：升/降箭头+|v| 一位小数
             arrow = (GLYPH_ARROW_SMALL_DOWN if vario_mps < 0
                      else GLYPH_ARROW_SMALL_UP)   # 固件 <0 降、≥0 升；方向由
@@ -340,4 +370,7 @@ def build_frame(state: dict) -> dict:
             put(col, row, arrow)
             put_text(text, col + 1, row)
             put(col + 1 + len(text), row, GLYPH_MPS)
+        elif elem_id == 47:       # FLIGHT_DIST（Task 47）：本次解锁累计水平
+            if dist_flown is not None:   # 里程（锁定后由 flight 层冻结）
+                put_text(f"{int(dist_flown)}m", col, row)
     return frame
