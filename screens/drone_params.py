@@ -61,8 +61,8 @@ class DroneParamsScreen(Screen):
         self._name_buf = ""       # 编辑态代号输入缓冲（进入编辑时置为当前 id）
         self._known_ids = set()   # 编辑态代号冲突检测缓存（进入编辑时重建）
         self._conv_ask = False    # 「转换为虚拟飞控」确认弹窗开关
-        self._gs_active = False   # 地面站连接提示框开关（start 成功开、stop 关）
-        self._gs_error = None     # 接入/断开地面站的错误信息（None=无）
+        self._gs_error = None     # 接入地面站的错误信息（None=无；连接提示框
+                                  # 由 App 层常驻浮窗渲染，Task 43）
         self._copy_src = None     # 复制弹窗源 id（None=弹窗未开）
         self._copy_buf = ""       # 复制弹窗新代号输入缓冲
         self._del_target = None   # 删除弹窗目标 id（None=弹窗未开）
@@ -119,7 +119,6 @@ class DroneParamsScreen(Screen):
         # 模态弹窗在主窗口 end 之后、栈根处开（flight.py _render_esc_menu 同位置）
         self._render_copy_modal()
         self._render_delete_modal()
-        self._render_gs_panel()
 
     def _preset_row(self, pid, avail):
         """单行：左段 invisible_button 承接整行选中点击，draw list 直绘底色/
@@ -317,9 +316,9 @@ class DroneParamsScreen(Screen):
         if self._gs_error:
             imgui.text(self._gs_error)
         imgui.end()
-        # 弹窗/提示框在主窗口 end 之后、栈根处开（flight.py 同位置）
+        # 弹窗在主窗口 end 之后、栈根处开（flight.py 同位置）；地面站连接
+        # 提示框已上移 App 层常驻浮窗（Task 43），本页不再渲染
         self._render_convert_modal()
-        self._render_gs_panel()
 
     def _render_param_form(self, p):
         """参数模式表单：一期全参数表单原样迁移（控件与布局零改动）"""
@@ -410,11 +409,12 @@ class DroneParamsScreen(Screen):
             imgui.end_popup()
 
     # ---- 地面站（VfcServer 由 Task 16 挂接 app.msp_server，本类只按
-    # start/stop/tcp_address/websocket_address/slave_path 契约调用，
-    # 属性缺失全防御） ----
+    # start 契约调用，属性缺失全防御。连接提示框与断开入口均由 App 层
+    # 常驻浮窗承担——Task 43，本类只剩「接入地面站」功能入口） ----
     def _gs_start(self):
         """接入地面站：启动 VfcServer（TCP + PTY + WS 三传输）；未挂接或
-        端口占用（OSError）→ 错误提示，不崩溃不改变连接状态"""
+        端口占用（OSError）→ 错误提示（按钮旁显示），不崩溃不改变连接
+        状态。启动成功后提示框由 App 层浮窗跨页常驻显示"""
         srv = getattr(self.app, "msp_server", None)
         if srv is None:
             self._gs_error = "地面站服务尚未接入，请等待后续版本"
@@ -425,41 +425,3 @@ class DroneParamsScreen(Screen):
             self._gs_error = f"接入失败：{e}"
             return
         self._gs_error = None
-        self._gs_active = True
-
-    def _gs_stop(self):
-        """断开地面站：stop 后提示框收起；异常转错误提示"""
-        srv = getattr(self.app, "msp_server", None)
-        if srv is not None:
-            try:
-                srv.stop()
-            except OSError as e:
-                self._gs_error = f"断开失败：{e}"
-                return
-        self._gs_error = None
-        self._gs_active = False
-
-    def _render_gs_panel(self):
-        """地面站连接提示框（非模态小窗，不挡表单交互）：TCP 地址 + WS
-        地址（浏览器版地面站用，Task 18 起）+ PTY slave 路径（无 PTY 省略）
-        + 断开按钮；stop 或 server 消失后收起"""
-        if not self._gs_active:
-            return
-        srv = getattr(self.app, "msp_server", None)
-        if srv is None:
-            self._gs_active = False   # 防御：连接中 server 被移除
-            return
-        imgui.set_next_window_position(660, 30)   # 编辑窗右缘 650 + 间距 10
-        imgui.set_next_window_size(380, 0)        # 宽固定高自适应（内容少不溢出）
-        imgui.begin("地面站连接", flags=imgui.WINDOW_NO_COLLAPSE)
-        imgui.text("地面站已接入，在地面站软件中连接以下任一地址：")
-        imgui.text(str(getattr(srv, "tcp_address", "")))
-        ws_addr = getattr(srv, "websocket_address", "")
-        if ws_addr:
-            imgui.text(str(ws_addr))
-        slave = getattr(srv, "slave_path", None)
-        if slave:
-            imgui.text(str(slave))
-        if imgui.button("断开", 160, 40):
-            self._gs_stop()
-        imgui.end()
