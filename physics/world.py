@@ -70,8 +70,18 @@ class FlightWorld:
         self._last_step_h = None   # 上次 setTimeStep 的步长（变化才重设）
         self._cid = p.connect(p.DIRECT)
         p.setGravity(0, 0, -9.81, physicsClientId=self._cid)
-        p.createCollisionShape(p.GEOM_PLANE, planeNormal=(0, 0, 1),
-                               physicsClientId=self._cid)  # 无限地面
+        ground = p.createCollisionShape(p.GEOM_PLANE, planeNormal=(0, 0, 1),
+                                        physicsClientId=self._cid)  # 无限地面
+        # Task 53 修复：地面挂载静态刚体（mass=0）。缺陷史：此处曾只创建碰撞
+        # 形状、从未 createMultiBody——「孤儿形状」从不参与碰撞（Task 50 探针
+        # 顺带发现并经最小 DIRECT 实验实证：孤儿形状下盒子自由穿地，挂刚体后
+        # 正常停地）。真机会话一直靠场景 mesh 地板接住、掩盖了缺陷；无 mesh
+        # 地板的场景或飞出场景边界会无限坠落。修复后 plane 与场景地板 mesh
+        # 共面双接触，实测静置 z 波动 <1mm、无抖动弹跳（test_world.py
+        # Task 53 场景 A/B 探针；反乌龟探针五项结论不变，见
+        # test_crashflip_physics.py）。
+        p.createMultiBody(0, ground, basePosition=(0, 0, 0),
+                          physicsClientId=self._cid)
         col = p.createCollisionShape(p.GEOM_BOX, halfExtents=[ARM, ARM, 0.04],
                                      physicsClientId=self._cid)
         mass = params.weight_g / 1000.0
