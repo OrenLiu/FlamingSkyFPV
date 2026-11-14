@@ -67,8 +67,11 @@ class FlightScreen(Screen):
         self._dist_home_m = 0.0     # 当前到起飞点水平距离
         self._dist_armed_prev = False   # 距离跟踪的上一帧解锁态（上升沿检测）
         # 飞行统计（Task 52，OSD TOTAL_FLIGHTS 数据源）：解锁时段起止锚点
-        # 与上升/下降沿检测（固件 stats.c statsOnArm/statsOnDisarm 语义）
+        # 与上升/下降沿检测（固件 stats.c statsOnArm/statsOnDisarm 语义）；
+        # _arm_flip=反乌龟解锁锁存（core.c flipOverAfterCrashActive 同构：
+        # 解锁沿置位、加锁沿消费并清零）
         self._arm_start_s = None        # 本次解锁起始 _flight_time_s（None=未解锁）
+        self._arm_flip = False          # 本次解锁是否带反乌龟 box（救援不计架次）
         self._stats_armed_prev = False  # 统计跟踪的上一帧解锁态（沿检测）
         self._aux_us = []           # 本帧 AUX µs 缓存（快照消费；非 virtual_fc 恒空）
         self._boxes = frozenset()   # 本帧激活模式 box 缓存（同上）
@@ -349,26 +352,35 @@ class FlightScreen(Screen):
                                            cur[1] - self._home_xy[1])
         self._dist_armed_prev = armed
 
-    def _track_flight_stats(self, armed: bool) -> None:
+    def _track_flight_stats(self, armed: bool, boxes=frozenset()) -> None:
         """OSD TOTAL_FLIGHTS 计数（Task 52，update 帧尾调用）：固件
         stats.c statsOnDisarm 语义——解锁时长 ≥ stats_min_armed_time_s 才
         stats_total_flights += 1（出厂 STATS_OFF=-1 不计数，pg/stats.c
         PG_RESET_TEMPLATE L33；模拟器无 stats PG 配置域，按阈值 0 的计数
         开启语义实现：每次解锁→加锁沿 +1，时长基准 _flight_time_s——
         暂停不累计的飞行页时钟，与固件 millis() 差值口径同构）。
-        virtual.total_flights 就地递增（params 对象上 additive 字段），
-        持久化走既有预设保存机制（EEPROM_WRITE/参数页落盘）。防御链：
-        fake app 缺 drone_params（SimpleNamespace 桩）时静默跳过。"""
+        反乌龟例外（fix round 1，core.c L469）：加锁沿 !flipOverAfterCrashActive
+        才计数——该标志是解锁时刻的锁存（tryArm 内随 ARM 时 box 21 置位
+        /未置位清零 L528-533，加锁沿 L474 清零），即带反乌龟开关解锁的
+        救援架次不计（正常解锁后中途开 box 21 不影响——固件标志仍为
+        false，照常计数）。virtual.total_flights 就地递增（params 对象上
+        additive 字段），持久化走既有预设保存机制（EEPROM_WRITE/参数页
+        落盘）。防御链：fake app 缺 drone_params（SimpleNamespace 桩）时
+        静默跳过。"""
         if armed and not self._stats_armed_prev:
             self._arm_start_s = self._flight_time_s   # 解锁沿：记时段起点
+            self._arm_flip = BOX_FLIP_OVER_AFTER_CRASH in boxes   # 锁存
         elif (not armed and self._stats_armed_prev
                 and self._arm_start_s is not None):
-            # 加锁沿：固件按整秒下取整比对阈值；阈值 0 下任意时长均计数
-            virt = getattr(getattr(self.app, "drone_params", None),
-                           "virtual", None)
-            if virt is not None:
-                virt.total_flights = getattr(virt, "total_flights", 0) + 1
+            # 加锁沿：固件按整秒下取整比对阈值；阈值 0 下任意时长均计数；
+            # 反乌龟锁存例外（core.c L469 同款门控）
+            if not self._arm_flip:
+                virt = getattr(getattr(self.app, "drone_params", None),
+                               "virtual", None)
+                if virt is not None:
+                    virt.total_flights = getattr(virt, "total_flights", 0) + 1
             self._arm_start_s = None
+            self._arm_flip = False                   # 固件 L474 加锁清零
         self._stats_armed_prev = armed
 
     def update(self, dt: float):
@@ -430,7 +442,8 @@ class FlightScreen(Screen):
         # 后的本帧值——解锁沿/累计/冻结判定见 _track_flight_distance
         self._track_flight_distance(self._world.pos, self._fc.armed)
         # 飞行统计（Task 52）：同帧沿检测——解锁→加锁沿 total_flights +1
-        self._track_flight_stats(self._fc.armed)
+        # （反乌龟解锁锁存例外，core.c L469 同款门控）
+        self._track_flight_stats(self._fc.armed, boxes)
         # 相机同步：位姿 + 机头对齐 + 摄像头仰角合成（纯函数在 physics.world）
         cam = compose_camera_quat(self._world.quat,
                                   self.app.drone_params.camera_angle_deg)
