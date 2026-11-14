@@ -25,11 +25,14 @@ ANGLE_P = 8.0
 # HORIZON 混合过渡带：|rc| ≥ 该值后自稳权重降为 0（杆外纯 acro/rate 区）
 HORIZON_TRANSITION = 0.6
 
-# 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13 → 42 → 48 固件开环模型重构）：固件
-# Betaflight 4.5.1 mixer.c applyFlipOverAfterCrashModeToMotors（L272-345）的
-# 等价实现——纯每帧开环函数，不走 PID、油门自始至终不参与（用户二轮复测裁定：
-# 开关开着抬油门也不得起飞，推翻 Task 42 的油门≥0.35 接管路径）；唯一退出 =
-# 撤 box；杆回中 = 电机全停待命（可随时再打杆再翻）。固件默认：
+# 反乌龟 FLIP_OVER_AFTER_CRASH（Task 13 → 42 → 48 → 54 固件开环模型重构 +
+# ARM 解锁锁存）：固件 Betaflight 4.5.1 mixer.c applyFlipOverAfterCrashMode
+# ToMotors（L272-345）的等价实现——纯每帧开环函数，不走 PID、油门自始至终
+# 不参与（用户二轮复测裁定：开关开着抬油门也不得起飞，推翻 Task 42 的
+# 油门≥0.35 接管路径）；激活/退出按解锁锁存（Task 54：解锁成功瞬间 box21
+# 两态锁存，飞行中不跟随开关，唯一退出 = 上锁——用户四轮复测裁定，推翻
+# Task 48「撤 box 即接管油门」）；杆回中 = 电机全停待命（可随时再打杆再翻）。
+# 固件默认：
 # crashflip_expo PG = 35（%）→ flipPowerFactor = 1 − 0.35 = 0.65；
 # CRASH_FLIP_STICK_MINF = 0.15（杆量域死区参数——死区阈值实为其 expo 值
 # ≈0.0987，作用在杆量 expo 域）；CRASH_FLIP_DEADBAND = 20（输出域待命阈，
@@ -234,10 +237,12 @@ class FlightController:
         # set_params 重建（换机体/参数页保存），不复用旧值
         self._tpa_throttle = TPA_THROTTLE_INIT
         # 飞控模式与解锁状态：set_params = 重建飞控（换机体/参数页保存）→ 回锁定态
-        # （反乌龟 Task 48 起为每帧开环纯函数、无内部状态，无需复位字段）
+        # （反乌龟解锁锁存 Task 54 起随回锁定态清零；flight.py MSP 写参数路径
+        # 同 armed 一并回写——真机写参数不 disarm、flipOverAfterCrashActive 保持）
         self._virtual_fc = params.virtual_fc
         self.armed = False
         self.arm_denied_once = False
+        self._flip_over_latched = False
 
     def update(self, ch: Channels, gyro_dps: tuple, dt: float,
                aux_us=None, boxes=frozenset(), angles_deg=None) -> list:
@@ -245,7 +250,10 @@ class FlightController:
         二期扩展（缺省参数保证一期三参调用零修改）：boxes = 本帧激活模式集合
         （eval_boxes 求值结果）。virtual_fc=True 时 ARM 门控生效——ARM 激活且油门
         <ARM_THROTTLE_MAX 才解锁，加锁期间电机归零、每帧清 PID；virtual_fc=False
-        门控整段跳过（一期行为不变）。angles_deg = (roll, pitch, yaw) 杆义姿态角
+        门控整段跳过（一期行为不变）。反乌龟接管门槛（Task 54）不读本帧 boxes
+        ——按解锁成功瞬间 box21 两态锁存 _flip_over_latched（core.c tryArm
+        L528-533，飞行中不跟随开关，加锁清零；用户 2026-11-14 实机经验裁定）。
+        angles_deg = (roll, pitch, yaw) 杆义姿态角
         度（与 gyro_dps 同义系），ANGLE/HORIZON 模式外环与反乌龟激活门槛消费，
         None 且相关模式激活时防御性跳过对应逻辑（飞行接线层保证传入）。aux_us
         为 MSP 任务预留，本任务不消费。"""
@@ -255,6 +263,14 @@ class FlightController:
                     if ch.throttle < ARM_THROTTLE_MAX:
                         self.armed = True
                         self.arm_denied_once = False
+                        # 反乌龟解锁锁存（Task 54，core.c tryArm L528-533）：
+                        # 解锁成功瞬间按 ARM 时 box21 两态锁存
+                        # flipOverAfterCrashActive，飞行中永不跟随开关（用户
+                        # 2026-11-14 实机经验裁定：没开反乌龟时解锁→飞行中
+                        # 误触开关不进入反乌龟；解锁时开着→本架次始终反乌龟，
+                        # 中途关开关不退出，直到上锁为止）
+                        self._flip_over_latched = (
+                            BOX_FLIP_OVER_AFTER_CRASH in boxes)
                     else:
                         # 油门保护：高油门尝试解锁被拒（ latch 一次供 UI 提示）
                         self.arm_denied_once = True
@@ -262,10 +278,12 @@ class FlightController:
                 self.armed = False    # 撤 ARM → 立即加锁
             if not self.armed:
                 # 加锁期每帧重置（幂等）：解锁瞬间 = 干净初态——三轴 PID 积分/D
-                # 状态清零 + TPA 油门记忆回悬停初值，等价全新飞控
+                # 状态清零 + TPA 油门记忆回悬停初值 + 反乌龟解锁锁存清零
+                # （core.c L474 加锁沿清 flipOverAfterCrashActive），等价全新飞控
                 for pid in self._pid.values():
                     pid.reset()
                 self._tpa_throttle = TPA_THROTTLE_INIT
+                self._flip_over_latched = False
                 return [0.0, 0.0, 0.0, 0.0]
         rt = self._tune.rate_type
         targets = (rate_setpoint(ch.roll, self._tune.rate["roll"], rt),
@@ -285,22 +303,27 @@ class FlightController:
             targets = (_horizon_mix(ch.roll, angles_deg[0], targets[0]),
                        _horizon_mix(ch.pitch, angles_deg[1], targets[1]),
                        targets[2])
-        # 反乌龟 FLIP_OVER_AFTER_CRASH（Task 48 固件开环模型重构，替代 Task
-        # 13/42 的状态机）：激活 = box 激活 + armed + angles 可用（angles 仅
-        # 作接线可用性防御门槛，翻转计算本身不消费姿态——纯开环）。激活时
-        # 整段接管：targets/PID 输出/TPA/油门全不参与（固件开环语义；用户
-        # 二轮复测裁定：抬油门也不得起飞，推翻 Task 42 的油门≥0.35 接管
-        # 路径），直接由杆量算电机并提前返回；杆回中 = 电机全停待命（可
-        # 随时再打杆再翻）。唯一退出 = 撤 box：当帧即走以下正常管线（油门
-        # 立即生效——真机肌肉记忆：关开关即接管）。三轴 PID 以零误差喂帧
-        # （积分不累积无 windup、_prev_measurement 逐帧刷新）——撤 box 当帧
-        # D 项不因历史冻结产生单帧尖峰，积分无翻面积累
-        if (BOX_FLIP_OVER_AFTER_CRASH in boxes and self.armed
+        # 反乌龟 FLIP_OVER_AFTER_CRASH（Task 48 固件开环模型重构，Task 54
+        # 接管门槛改 ARM 解锁锁存）：激活 = 解锁锁存 _flip_over_latched +
+        # armed + angles 可用（angles 仅作接线可用性防御门槛，翻转计算本身
+        # 不消费姿态——纯开环）。锁存语义（用户 2026-11-14 实机经验裁定，
+        # 推翻 Task 48「撤 box 即接管油门」）：真机反乌龟模式在解锁那一刻
+        # 锁存（固件 tryArm L528-533 随 ARM 时 box21 两态锁存
+        # flipOverAfterCrashActive，飞行中不跟随开关）——解锁时 box21 开 →
+        # 本架次始终反乌龟（油门停转待命 + 打杆翻面持续），中途关开关不退
+        # 出，直到上锁（disarm 清锁存，core.c L474）为止。激活时整段接管：
+        # targets/PID 输出/TPA/油门全不参与（固件开环语义；用户二轮复测
+        # 裁定：抬油门也不得起飞，推翻 Task 42 的油门≥0.35 接管路径），
+        # 直接由杆量算电机并提前返回；杆回中 = 电机全停待命（可随时再打
+        # 杆再翻）。三轴 PID 以零误差喂帧（积分不累积无 windup、
+        # _prev_measurement 逐帧刷新）——锁存语义下退出接管前必经加锁
+        # reset，喂帧保留为防御（翻转高 gyro 中途若走防御分支回正常管线，
+        # D 项不因历史冻结产生单帧尖峰）
+        if (self._flip_over_latched and self.armed
                 and angles_deg is not None):
             # 零误差喂帧保新鲜：setpoint=measurement → error=0（P/I 输出 0），
-            # 喂帧返回值弃用（开环电机不经 PID）。若不喂帧，翻转中 gyro 剧烈
-            # （如 300°/s）而 prev 停在进入前——撤 box 当帧 D 项单帧尖峰
-            # （fix round 1：翻转中关开关接管油门，"接管瞬间又抖一下"根源）
+            # 喂帧返回值弃用（开环电机不经 PID）。防御性保留（Task 54 前为
+            # 撤 box 接管尖峰修复，退出路径改加锁 reset 后主路径天然干净）
             for pid, meas in zip(self._pid.values(), gyro_dps):
                 pid.update(meas, meas, dt)
             motors = _crashflip_motors(ch.roll, ch.pitch, ch.yaw)
@@ -321,12 +344,22 @@ class FlightController:
 
     def disarm(self) -> None:
         """外部强制加锁（Esc 重置位置联动，Task 14）：armed=False + 三轴 PID
-        reset + TPA 油门记忆回悬停初值——清理集与 update() 加锁帧等价（等价
-        全新飞控），但由外部事件即时触发而非等待下一帧"""
+        reset + TPA 油门记忆回悬停初值 + 反乌龟解锁锁存清零（Task 54，core.c
+        L474 加锁沿清 flipOverAfterCrashActive）——清理集与 update() 加锁帧
+        等价（等价全新飞控），但由外部事件即时触发而非等待下一帧"""
         self.armed = False
+        self._flip_over_latched = False
         for pid in self._pid.values():
             pid.reset()
         self._tpa_throttle = TPA_THROTTLE_INIT
+
+    @property
+    def flip_over_latched(self) -> bool:
+        """本解锁架次的反乌龟锁存（只读；core.c flipOverAfterCrashActive
+        同构——解锁成功瞬间随 ARM 时 box21 置位/清零，飞行中永不跟随开关，
+        加锁沿清零；用户 2026-11-14 实机经验裁定）。flight.py 桨反转接线
+        与架次统计例外门控同源消费（Task 54），MSP 写参数路径随 armed 回写"""
+        return self._flip_over_latched
 
     def motor_thrusts(self, motors: list) -> list:
         """单电机最大推力 = 推重比(参考电压下)×重量/4 × (V/REF_VOLTAGE)²；实际 = T_max×motor²。
