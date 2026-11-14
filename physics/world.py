@@ -4,7 +4,11 @@ import glm
 import pybullet as p
 
 ARM = 0.115          # 电机臂长（米，5 寸机）
-SUBSTEPS = 4         # 每帧物理子步（60fps × 4 = 240Hz）
+# 固定飞控 tick（帧率解耦）：闭环控制频率与渲染帧率彻底解耦——设置页帧率
+# 只改渲染节拍，物理/飞控恒以 SIM_TICK 节拍推进（60fps 路径与原实现一致：
+# flight.py 每渲染帧恰 1 tick × SUBSTEPS=4 子步 × 1/240s）。
+SIM_TICK = 1 / 60    # 飞控/物理 tick（秒）——恒定，不随帧 dt 变
+SUBSTEPS = 4         # 每 tick 物理子步（1/60 × 4 = 240Hz 子步长）
 # 线性阻力默认值 N·s/m（T13 标定：默认机 550g/推重比 7 极速 ~30m/s）——仅作文档
 # 参照与 DroneParams.drag_k 的出厂默认；运行时消费点在 step()，读 self._params.drag_k
 # （用户可在参数页按机型手感调整，轻量高推机建议调低，见 config_store.DroneParams）
@@ -95,6 +99,8 @@ class FlightWorld:
         # 桨反转标志（Task 50 v4）：False=正常飞行（推力沿机体 +Z）；True=反乌龟
         # 双向 DShot 桨反转（推力沿机体 −Z，见 set_prop_reverse）——逐帧由接线层设置
         self._prop_reverse = False
+        # 渲染插值基准初始化（接线层 reset 前防御：body 初生位姿即基准）
+        self._prev_pos, self._prev_quat = self._pose_snapshot()
 
     def load_scene_mesh(self, obj_path: str, scale: float = 1.0):
         """场景 OBJ → 静态三角网格碰撞体（mass=0 → BVH 三角网格）"""
@@ -111,7 +117,7 @@ class FlightWorld:
 
     def step(self, motor_thrusts_N: list, dt: float):
         """施加电机推力（机体 +Z 向上、作用于臂位置）+ 桨反扭矩 + 阻力，推进 SUBSTEPS 子步。
-        每子步长 = dt/SUBSTEPS（需显式 setTimeStep：pybullet 默认 fixedTimeStep
+        生产路径接线层恒传 SIM_TICK → 子步长恒 (SIM_TICK/SUBSTEPS)=1/240（需显式 setTimeStep：pybullet 默认 fixedTimeStep
         固定 1/240，不随 dt 变化，模拟时间会与真实时间脱钩）。
         线性空气阻力 N = drag_k × v（drag_k 单位 N·s/m，来源 self._params.drag_k，
         默认 1.2 = T13 标定值，用户可在参数页按机型调整）；角阻尼 ANG_DAMP 与线性
@@ -119,6 +125,9 @@ class FlightWorld:
         桨反转（Task 50 v4）：set_prop_reverse(True) 时推力与桨反扭矩整体取反
         （双向 DShot 反乌龟——推力沿机体 −Z）。实现为 sign 乘子（±1.0），
         False 路径 1.0×x 与原实现 IEEE 逐位一致，零行为改动"""
+        # 渲染插值基准快照：prev = 本 tick 起点位姿（bullet 现值即 tick 末，
+        # render_pose 在两态间插值；flight.py 每 tick 调 step → 插值窗恒 SIM_TICK）
+        self._prev_pos, self._prev_quat = self._pose_snapshot()
         h = dt / SUBSTEPS
         drag_k = self._params.drag_k
         # setTimeStep 只在步长变化时设置（原每子步重复调用 PyBullet 包装，
@@ -205,6 +214,33 @@ class FlightWorld:
         与原实现逐位一致（见 step 注释）"""
         self._prop_reverse = bool(active)
 
+    def _pose_snapshot(self) -> tuple:
+        """当前位姿快照 (pos tuple, glm.quat)。glm.quat 为 (w,x,y,z)，
+        bullet 返回 (x,y,z,w)"""
+        pos, quat = p.getBasePositionAndOrientation(
+            self._body, physicsClientId=self._cid)
+        return pos, glm.quat(quat[3], quat[0], quat[1], quat[2])
+
+    def render_pose(self, alpha: float) -> tuple:
+        """tick 间渲染插值位姿：alpha=0 → 上一 tick 末（prev 快照）、
+        alpha=1 → bullet 现值（本 tick 末）。位置线性插值 + 四元数 nlerp
+        （相邻 tick 60Hz 角距小，nlerp 足够且稳定）。alpha 钳位 [0,1]。
+        flight.py 每帧以 acc/SIM_TICK 调用：固定 tick 后 bullet 状态 60Hz
+        更新，高帧率渲染设置下不插值会出现帧重复顿挫"""
+        a = max(0.0, min(1.0, alpha))
+        cur = self.pos
+        pos = tuple(self._prev_pos[i] + (cur[i] - self._prev_pos[i]) * a
+                    for i in range(3))
+        qa, qb = self._prev_quat, self.quat
+        d = qa.w*qb.w + qa.x*qb.x + qa.y*qb.y + qa.z*qb.z
+        s = -1.0 if d < 0.0 else 1.0        # 短弧：dot<0 取反后再插值
+        q = glm.quat(qa.w + a*(s*qb.w - qa.w),
+                     qa.x + a*(s*qb.x - qa.x),
+                     qa.y + a*(s*qb.y - qa.y),
+                     qa.z + a*(s*qb.z - qa.z))
+        n = q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z
+        return pos, glm.quat(q.w/n, q.x/n, q.y/n, q.z/n)
+
     def reset(self, spawn=(0, 0, 2), quat=(0, 0, 0, 1)):
         """重置：回出生点、指定姿态（quat 为 bullet (x,y,z,w)，默认水平；
         倒扣姿态注入等测试/复位场景用）、速度清零。桨反转标志一并回
@@ -215,6 +251,8 @@ class FlightWorld:
         p.resetBaseVelocity(self._body, (0, 0, 0), (0, 0, 0),
                             physicsClientId=self._cid)
         self._prop_reverse = False
+        # 插值快照同步：复位后 prev = cur = 出生位姿（render_pose 首帧无滑移）
+        self._prev_pos, self._prev_quat = self._pose_snapshot()
 
     def close(self):
         p.disconnect(physicsClientId=self._cid)

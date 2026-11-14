@@ -145,7 +145,7 @@ def _generate_sky_equirect(sun_yaw, sun_pitch, sun_color):
     return np.clip(sky * 255.0, 0.0, 255.0).astype(np.uint8)
 EXPOSURE = 0.65                 # 合成曝光（合成无 gamma：材质/灯光为显示参考值，
                                 # 0.65 使中间调与性能优先对齐，ACES 仅做高光滚降）
-SSR_STEPS = 64                 # SSR 光线步进次数（性能预算超限时减小/置 0 关闭反射）
+SSR_STEPS = 32                 # SSR 光线步进次数（性能预算超限时减小/置 0 关闭反射）
 SSR_REFINE = 4                 # 命中后二分细化次数
 SSR_THICKNESS = 0.5            # 命中判定厚度（米，视图空间）
 SSR_MAX_DIST = 60.0            # 最大步进距离（米；与 STEPS 决定步长 ~0.94m，
@@ -895,7 +895,12 @@ class QualityFrameRenderer:
     def __init__(self, width, height):
         self._shadow_rt = RenderTarget(SHADOW_SIZE, SHADOW_SIZE, "rgba8", "texture")
         self._hdr_rt = RenderTarget(width, height, "rgba16f", "texture")
-        self._rough_rt = RenderTarget(width, height, "rgba8", "renderbuffer")
+        # 粗糙度 RT 半分辨率：SSR 端按粗糙度调制模糊/强度，对分辨率不敏感
+        # （纹理 LINEAR 过滤 + 采样端 4 点模糊半径远大于半像素），带宽减半
+        self._rough_rt = RenderTarget(max(width // 2, 1), max(height // 2, 1),
+                                      "rgba8", "renderbuffer")
+        # 阴影隔帧渲染计数（见 render_frame：RT 内容沿帧间持续性，仅 1 帧滞后）
+        self._shadow_tick = 0
         # DepthSurface/RoughnessSurface 按 Face 对象弱引用缓存（face 释放自动
         # 清理，规避 id 复用风险）
         self._depth_surfaces = weakref.WeakKeyDictionary()
@@ -918,7 +923,14 @@ class QualityFrameRenderer:
         has_scene = len(draw_scene.faces) > 0
         has_sun = self._update_shadow_registry(draw_scene.faces)
         if has_sun:
-            self._render_shadow_pass(draw_scene.faces)
+            # 阴影隔帧渲染（60fps 帧预算击穿根因之一）：阴影 RT 内容沿帧间
+            # 持续性沿用上一帧，滞后 1 帧（60fps=16ms 不可感；太阳静止、场景
+            # 静态，动态的只有机体阴影，机体相对 80m 正交视野位移远小于
+            # 1 texel/帧）。首帧必渲（计数 0→1 触发），进场景即有阴影。
+            # 粗糙度/主/合成通道仍逐帧
+            self._shadow_tick += 1
+            if self._shadow_tick % 2 == 1:
+                self._render_shadow_pass(draw_scene.faces)
         self._render_roughness_pass(draw_scene.faces)
         self._render_main_pass(draw_scene, has_scene)
         self._render_composite()

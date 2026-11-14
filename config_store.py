@@ -122,6 +122,21 @@ def detect_cell_count(voltage_v: float) -> int:
         return 1
     return min(8, max(1, int(voltage_v / 4.30) + 1))
 
+@dataclass
+class BatteryParams:
+    """真实电池模拟配置（physics/battery.py 模型消费）。additive 域：旧预设
+    缺键 → dataclass 默认（sim_enabled=False 静态路径行为零变化），不升
+    schema（cells_auto/drag_k 先例）。关闭时全字段仅存储不消费"""
+    sim_enabled: bool = False
+    chem: str = "lipo"                # "lipo" | "lihv" | "liion"（physics.battery.CHEMS 键）
+    cells: int = 4                    # 节数（sim 模式节数唯一源，virtual.cells 镜像）
+    capacity_mah: int = 1500          # 容量 mAh
+    c_rating: int = 100               # 放电倍率 C（满油门电流 = Ah×C）
+    warning_cell_v: float = 3.5       # 单芯警告电压 V（OSD LOW BATTERY 阈）
+    min_cell_v: float = 3.3           # 单芯最低电压 V（OSD LAND NOW 阈）
+    max_cell_v: float = 4.3           # 单芯最高电压 V（OSD 图标段缩放上下限）
+
+
 # 参数 schema 版本：5 = 虚拟飞控域（DroneParams 新增 virtual_fc/virtual 字段，
 # additive 迁移：pid/rate 不重置）。4 = PID 刻度对齐 Betaflight 量级（P≈40，见
 # physics.drone.PID_MIX_SCALING）。3 = 三轴 rate + 小刻度 PID（仅 pid 过时）；
@@ -156,6 +171,9 @@ class DroneParams:
     # （physics.drone.REF_VOLTAGE）。默认 14.8（4S 标称）保持既有行为；参考：满电
     # 4S = 16.8（推力 ×1.288）、3S = 11.1（×0.563）。additive 字段不升 schema
     battery_voltage: float = 14.8
+    # 真实电池模拟配置（physics/battery.py 模型消费）：additive 域——旧预设缺键
+    # → dataclass 默认（sim_enabled=False），不升 schema（cells_auto 先例）
+    battery: BatteryParams = field(default_factory=BatteryParams)
     # 虚拟飞控开关（二期 MSP 打通）：True = 飞控仿真消费 virtual.tune（地面站调参
     # 生效）；False = 消费上方平铺调参字段（一期行为）
     virtual_fc: bool = False
@@ -202,12 +220,18 @@ def set_cells_manual(params: DroneParams, v: int) -> None:
     s8 解码会变负数）、cells_auto=False"""
     params.virtual.cells = min(8, max(1, int(v)))
     params.virtual.cells_auto = False
+    if params.battery.sim_enabled:
+        params.battery.cells = params.virtual.cells   # sim 模式节数源=电池配置
 
 def set_cells_auto(params: DroneParams) -> None:
     """节数转自动：cells_auto=True 并按当前 battery_voltage 重算
     （幂等：已是自动态时重算同值）"""
     params.virtual.cells_auto = True
-    params.virtual.cells = detect_cell_count(params.battery_voltage)
+    if params.battery.sim_enabled:
+        # sim 模式节数源=电池配置：auto 标志语义=镜像电池节数（不按电压识别）
+        params.virtual.cells = params.battery.cells
+    else:
+        params.virtual.cells = detect_cell_count(params.battery_voltage)
 
 @dataclass
 class AxisBinding:
@@ -246,7 +270,8 @@ def default_rc_config() -> RCConfig:
 _NESTED = {"pid": PIDGains, "rate": RateParams, "mappings": AxisBinding}
 # 字段值整体为单个 dataclass 的字段名 → 类型表（DroneParams.virtual →
 # VirtualFCParams，VirtualFCParams.tune → TuneParams；递归重建用）
-_NESTED_ONE = {"virtual": VirtualFCParams, "tune": TuneParams}
+_NESTED_ONE = {"virtual": VirtualFCParams, "tune": TuneParams,
+               "battery": BatteryParams}
 
 # int 键字典字段（Task 39）：osd_layout/osd_enabled 的键为 OSD 元素 id
 # （int）。JSON object 键恒序列化为 str（json 模块限制），round-trip 后
@@ -333,12 +358,15 @@ class ConfigStore:
                 if ver != 3:                # v3 档仅 pid 过时，rate 语义未变
                     obj.rate = d.rate
             obj.params_schema = PARAMS_SCHEMA
-        # 节数自动识别重算（Task 46）：cells_auto=True（含旧档缺键补默认）
-        # → 盘上 cells 按 battery_voltage 重算覆盖（auto 态 cells 为派生
-        # 值，与固件上电检测同型）；False 手动保持。schema 迁移在前（仅涉
-        # pid/rate，与本段无交集）
-        if cls is DroneParams and obj.virtual.cells_auto:
-            obj.virtual.cells = detect_cell_count(obj.battery_voltage)
+        # 节数源判定（真实电池模拟）：sim_enabled → 电池节数为唯一源（虚拟
+        # 飞控 cells 镜像电池配置，电压自动识别不适用——节数是显式配置）；
+        # 静态模式 auto 态按电压重算（Task 46 既有语义不变）。schema 迁移
+        # 在前（仅涉 pid/rate，与本段无交集）
+        if cls is DroneParams:
+            if obj.battery.sim_enabled:
+                obj.virtual.cells = obj.battery.cells
+            elif obj.virtual.cells_auto:
+                obj.virtual.cells = detect_cell_count(obj.battery_voltage)
         return obj
 
     def save(self, name: str, obj):
