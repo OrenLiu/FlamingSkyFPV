@@ -64,6 +64,8 @@ class FlightScreen(Screen):
         self._last_xy = None        # 上一帧水平位置（里程累计步进基准）
         self._dist_flown_m = 0.0    # 本次解锁累计水平飞行里程
         self._dist_home_m = 0.0     # 当前到起飞点水平距离
+        self._home_bearing = None   # 机→home 罗盘角·度（Task 55 HOME_DIR；
+                                    # None=从未解锁；0=在 home 点上 atan2(0,0))
         self._dist_armed_prev = False   # 距离跟踪的上一帧解锁态（上升沿检测）
         # 飞行统计（Task 52，OSD TOTAL_FLIGHTS 数据源）：解锁时段起止锚点
         # 与上升/下降沿检测（固件 stats.c statsOnArm/statsOnDisarm 语义）；
@@ -288,7 +290,9 @@ class FlightScreen(Screen):
         renderOsdWarning 按实时 armingDisableFlags 渲染的语义）。
         Task 54 增 flip_latched=反乌龟解锁锁存（fc.flip_over_latched；
         OSD FLIP_ARROW 门控消费——固件 osdElementCrashFlipArrow L874 读
-        isFlipOverAfterCrashActive() 锁存标志而非实时开关）。"""
+        isFlipOverAfterCrashActive() 锁存标志而非实时开关）。Task 55 增
+        home_bearing_deg=机→home 罗盘角 int 度（OSD HOME_DIR 消费；None=
+        从未解锁——与 dist_home_m 的 0 缺省区分两种「零距离」语义）。"""
         if (self.stage != "flying" or self._paused
                 or self._world is None or self._fc is None):
             return None
@@ -325,6 +329,10 @@ class FlightScreen(Screen):
             "alt_m": self._world.pos[2],
             "dist_home_m": int(self._dist_home_m),     # Task 47：int 米（OSD
             "dist_flown_m": int(self._dist_flown_m),   # HOME_DIST/FLIGHT_DIST）
+            "home_bearing_deg": (int(round(self._home_bearing)) % 360
+                                 if self._home_bearing is not None else None),
+            # ↑ Task 55：机→home 罗盘角 int 度（OSD HOME_DIR；None=从未
+            # 解锁哨兵——与 dist_home_m 的 0 缺省区分「无 home」与「在 home 上」
             "vario_mps": v[2],
             "flight_time_s": self._flight_time_s,
             "arm_denied": bool(getattr(self._fc, "arm_denied_once", False)),
@@ -344,12 +352,15 @@ class FlightScreen(Screen):
         （armed False→True）记录起飞点水平位置并清零里程；解锁期间每帧累计
         帧间水平位移模长、更新到起飞点距离；锁定后保持上次飞行值不再累计
         （真机语义：落地后 OSD 距离冻结至下次解锁）。水平面取 bullet (x,y)
-        ——z 为高度轴，纯垂直移动不计入；param 模式 armed 恒 False 恒空转。"""
+        ——z 为高度轴，纯垂直移动不计入；param 模式 armed 恒 False 恒空转。
+        Task 55 增 home bearing 跟踪（OSD HOME_DIR 数据源，固件 GPS_
+        directionToHome 同构——机→home 正向量罗盘角，与距离同帧冻结）。"""
         if armed and not self._dist_armed_prev:
             self._home_xy = (pos[0], pos[1])
             self._last_xy = self._home_xy
             self._dist_flown_m = 0.0
             self._dist_home_m = 0.0
+            self._home_bearing = 0.0   # 起飞点=当前位置（atan2(0,0)=0）
         elif armed:
             cur = (pos[0], pos[1])
             self._dist_flown_m += math.hypot(cur[0] - self._last_xy[0],
@@ -357,6 +368,12 @@ class FlightScreen(Screen):
             self._last_xy = cur
             self._dist_home_m = math.hypot(cur[0] - self._home_xy[0],
                                            cur[1] - self._home_xy[1])
+            # 机→home 罗盘角（固件 GPS_directionToHome 同构，osd HOME_DIR
+            # 消费）：北=世界 +X、东=−Y（heading=-att[2] 同一符号链）→
+            # bearing = atan2(东分量, 北分量) = atan2(pos.y−home.y, home.x−pos.x)
+            self._home_bearing = math.degrees(math.atan2(
+                cur[1] - self._home_xy[1],
+                self._home_xy[0] - cur[0])) % 360.0
         self._dist_armed_prev = armed
 
     def _track_flight_stats(self, armed: bool) -> None:
