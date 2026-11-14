@@ -149,11 +149,14 @@ def _crashflip_motors(roll: float, pitch: float, yaw: float) -> list:
     """反乌龟开环杆量→四电机（纯函数）：Betaflight 4.5.1 mixer.c
     applyFlipOverAfterCrashModeToMotors（L272-345）的等价实现。油门通道
     完全不参与（用户裁定：反乌龟开着时抬油门不得起飞，唯一退出 = 撤 box）。
-    方向语义：杆量原符号直接进 mix_quad_x 对应 cmd 轴——正 roll → 左电机
-    FL/BL 加力（右滚力矩）、pitch 拉杆+ → 前电机 FL/FR 加力（抬头杆义）、
-    yaw 右+ → FL/BR 加力，方向由 test_mixer/test_world 锚定（固件
-    getRcDeflection 符号链与本仿真杆义不同源，取闭环自洽语义，勿另造符号
-    翻转）。固件算法（L272-345）：
+    方向语义（Task 50 fix round 1 镜像裁定）：反乌龟配桨反转（推力沿机体
+    −Z，见 world.set_prop_reverse）——杆量符号取反后进 mix_quad_x：正 roll
+    → 右电机 FR/BR 加力，反转推力抬升该侧（倒扣时位于世界左侧）→ 机体向
+    世界右翻越 = 往杆向翻（用户 2026-11-14 实机经验裁定，取代 Task 48 的
+    「杆量原符号直进、与飞行杆向一致」旧语义）；pitch 拉杆+ → 后电机 BL/BR
+    加力、yaw 右+ → FR/BL 加力，三轴统一镜像保持全轴「往杆向翻」一致。
+    方向由 test_drone_modes Task 48 断言（fix round 1 已镜像更新）与
+    test_crashflip_physics 世界视角探针锚定。固件算法（L272-345）：
       1. 三轴杆绝对值各自过 expo 曲线（flipPowerFactor = 1 − 35/100 = 0.65）；
       2. 主导仲裁：|yaw 杆| 最大 → yaw 独占（roll/pitch 分量归零、杆量长度
          取 yaw expo 幅）；否则 roll/pitch 主导 → yaw 分量归零；
@@ -166,6 +169,9 @@ def _crashflip_motors(roll: float, pitch: float, yaw: float) -> list:
          分量不足的电机全停待命）。crashflip_motor_percent 默认 0（不走
          对侧电机反转比例分支）。
     """
+    # 全轴镜像（fix round 1 裁定）：杆量符号取反——expo/主导仲裁/对角检查/
+    # 死区全部在 |杆量| 域运算，不受取反影响，仅电机侧别镜像
+    roll, pitch, yaw = -roll, -pitch, -yaw
     factor = 1.0 - CRASHFLIP_EXPO / 100.0
     roll_a, pitch_a, yaw_a = abs(roll), abs(pitch), abs(yaw)
     roll_e = _crashflip_expo(roll_a, factor)
