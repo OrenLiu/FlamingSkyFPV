@@ -809,25 +809,35 @@ def _battery_state_payload(payload: bytes, state: "dict | None" = None) -> bytes
 
     [cellCount u8][capacity u16][voltage×10 u8（legacy，constrain
     0-255）][mAhDrawn u16][amperage i16 0.01A][batteryState u8][voltage×100
-    u16]。cellCount=virtual.cells、双标度电压=params.battery_voltage——
-    与 OSD compose_state 同源（build_frame 平均芯压 = 尾段 cV ÷ cellCount，
-    节数经 95 写入后本应答与 OSD 同帧联动；Task 46 auto 态 cells 为
-    detect_cell_count 派生值，经加载/电压编辑重算后自然流经本字段）；
-    capacity/mAhDrawn/amperage
-    恒 0（模拟器电池为理想静态电源：无容量/消耗/压降模型，诚实值）；
-    batteryState=0（battery.h batteryState_e BATTERY_OK——静态电压无
-    告警状态机）。无参数源 → 空载荷降级（Configurator readU8 越界
-    null 容错 →「未接电池」显示，与 _pid_payload 同款）。"""
+    u16]。真实电池模拟开启时全字段实时：cells/capacity/mAhDrawn/amperage/
+    batteryState/voltage 来自 flight 快照 battery 域
+    （BatterySim.snapshot），batteryState ok/warning/critical → 0/1/2
+    （battery.h batteryState_e 同值）；关闭时维持既有诚实零值
+    （capacity/mAhDrawn/amperage 恒 0、batteryState=BATTERY_OK）。
+    cellCount 恒 virtual.cells（sim 模式被镜像为电池节数，节数经 95 写入
+    后本应答与 OSD 同帧联动）。无参数源 → 空载荷降级（Configurator
+    readU8 越界 null 容错 →「未接电池」显示，与 _pid_payload 同款）。"""
     params = (state or {}).get("params")
     if params is None:
         return b""
-    voltage = params.battery_voltage
+    batt = ((state or {}).get("flight") or {}).get("battery")
+    if batt is not None:
+        voltage = batt["voltage_v"]
+        capacity = min(65535, max(0, batt["capacity_mah"]))
+        drawn = min(65535, max(0, batt["mah_drawn"]))
+        amps = max(-327.68, min(327.67, batt["amperage_a"]))
+        bstate = {"ok": 0, "warning": 1, "critical": 2}.get(batt.get("state"), 0)
+    else:
+        voltage = params.battery_voltage
+        capacity = drawn = amps = 0
+        bstate = 0
     return (struct.pack("<B", _u8(params.virtual.cells))
-            + struct.pack("<H", 0)                    # capacity（无电量域）
-            + bytes([_u8(voltage * 10)])              # legacy 0.1V（u8 钳位）
-            + struct.pack("<HH", 0, 0)                # mAhDrawn / amperage
-            + bytes([0])                              # batteryState = OK
-            + struct.pack("<H", _u16(voltage * 100))) # 0.01V 主段
+            + struct.pack("<H", capacity)
+            + bytes([_u8(voltage * 10)])
+            + struct.pack("<H", drawn)
+            + struct.pack("<h", int(round(amps * 100)))
+            + bytes([bstate])
+            + struct.pack("<H", _u16(voltage * 100)))
 
 
 # ---- RX 配置组（Task 33） ----

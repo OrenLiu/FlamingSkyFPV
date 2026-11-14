@@ -324,18 +324,20 @@ def _avg_cell_cv(voltage_v: float, cells: int) -> int:
     return (round(voltage_v * 100) // cells) if cells > 0 else 0
 
 
-def _battery_glyph(voltage_v: float, cells: int) -> int:
+def _battery_glyph(voltage_v: float, cells: int, min_cv: int = 330,
+                   max_cv: int = 430) -> int:
     """固件 osdGetBatterySymbol：平均芯压 → 电池图标段数字形。
 
-    cv 见 _avg_cell_cv；段数 = scaleRange(cv, 330, 430, 0, 8) 即
-    (8×(cv-330))//100 截断除（maths.c 整数版），钳 0..6；图标 =
-    SYM_BATT_EMPTY(0x96) - 段数（330/430 = vbatmin/maxcellvoltage 厘伏
-    默认值）。BATTERY_CRITICAL → SYM_MAIN_BATT(0x97) 分支不模拟：
-    模拟器 battery_voltage 为静态配置、无电量消耗/告警状态机（恒
-    BATTERY_OK 语义）。
+    cv 见 _avg_cell_cv；段数 = scaleRange(cv, min, max, 0, 8) 即
+    (8×(cv-min))//(max-min) 截断除（maths.c 整数版），钳 0..6；图标 =
+    SYM_BATT_EMPTY(0x96) - 段数（min/max = vbatmin/maxcellvoltage 厘伏，
+    默认 330/430）。真实电池模拟开启时取配置阈值（batt_min_v/batt_max_v）。
+    BATTERY_CRITICAL → SYM_MAIN_BATT(0x97) 分支不模拟（告警文本由
+    WARNINGS 元素承担——LOW BATTERY / LAND NOW，见 build_frame 元素 21）。
     """
     cv = _avg_cell_cv(voltage_v, cells)
-    seg = min(6, max(0, (8 * (cv - 330)) // 100))
+    span = max(1, max_cv - min_cv)
+    seg = min(6, max(0, (8 * (cv - min_cv)) // span))
     return GLYPH_BATT_EMPTY - seg
 
 
@@ -391,7 +393,12 @@ def compose_state(params, flight, preset_id, now_s) -> dict:
         "boxes": f.get("boxes") or frozenset(),
         "flip_latched": bool(f.get("flip_latched", False)),
         "throttle": f.get("throttle", 0.0),
-        "voltage_v": params.battery_voltage,
+        "voltage_v": f.get("voltage_v", params.battery_voltage),
+        # 真实电池模拟实时域（flight 快照注入；None=静态模式——告警/实时功率
+        # 元素按缺席回落静态行为）；图标段缩放阈值走配置（sim 模式生效）
+        "battery": f.get("battery"),
+        "batt_min_v": params.battery.min_cell_v,
+        "batt_max_v": params.battery.max_cell_v,
         "cells": params.virtual.cells,
         "speed_mps": f.get("speed_mps", 0.0),
         "alt_m": f.get("alt_m", 0.0),
@@ -456,6 +463,13 @@ def build_frame(state: dict) -> dict:
     total_flights = state.get("total_flights", 0)
     stick_us = state.get("stick_us")         # None=缺键 → RC_CHANNELS/叠层不渲染
     arming_blocked = bool(state.get("arming_blocked", False))
+    # 真实电池模拟实时域（None=静态模式）：告警/功率元素按缺席回落静态行为
+    batt = state.get("battery")
+    batt_min_cv = 330                     # 图标段缩放 cV 阈值（固件默认同值）
+    batt_max_cv = 430
+    if batt is not None:
+        batt_min_cv = round(state.get("batt_min_v", 3.3) * 100)
+        batt_max_cv = round(state.get("batt_max_v", 4.3) * 100)
     # 注：state["arm_denied"]（Task 49 闩锁键，compose_state 恒填充）自
     # Task 52 起 WARNINGS 改读实时 arming_blocked，不再消费——键保留供
     # 快照层既有消费方（flight_snapshot 字段/单测）向后兼容
@@ -496,7 +510,8 @@ def build_frame(state: dict) -> dict:
             dp = 1 if voltage_v >= 10 else 2
             ip, fp = _osd_float(voltage_v, dp, True)
             text = f"{ip}.{fp}"
-            put(col, row, _battery_glyph(voltage_v, cells))
+            put(col, row, _battery_glyph(voltage_v, cells,
+                                         batt_min_cv, batt_max_cv))
             put_text(text, col + 1, row)
             put(col + 1 + len(text), row, GLYPH_VOLT)
         elif elem_id == 2:        # CROSSHAIRS：锚点=左段格（固件 buff 自
@@ -551,13 +566,12 @@ def build_frame(state: dict) -> dict:
             put_text(craft_name, col, row)
         elif elem_id == 9:        # THROTTLE_POS
             put_text(f"{throttle * 100:.0f}", col, row)
-        elif elem_id == 11:       # CURRENT_DRAW（Task 49）：无电流计量模型
-            put_text("0.0A", col, row)   # ——诚实零值（BATTERY_STATE(130)
-            # 电流恒 0 同源；固件格式 %3u+2 位小数+SYM_AMP 图标，无模型
-            # 不模拟其字形序列）
-        elif elem_id == 12:       # MAH_DRAWN（Task 49）：同上诚实零值
-            put_text("0mAh", col, row)   # （固件 %4d+SYM_MAH；'m' 小写
-            # 映射大写字形，渲染观感 "0MAH"——HOME_DIST 同惯例）
+        elif elem_id == 11:       # CURRENT_DRAW：sim → 实时电流 A（.1f 一位
+            amps = batt["amperage_a"] if batt else 0.0   # 小数，与静态诚实
+            put_text(f"{amps:.1f}A", col, row)   # 零值同宽度格式）
+        elif elem_id == 12:       # MAH_DRAWN：sim → 实时消耗 mAh（'m' 小写
+            mah = batt["mah_drawn"] if batt else 0       # 映射大写字形，
+            put_text(f"{mah}mAh", col, row)   # 渲染观感 "…MAH"——HOME_DIST 同惯例）
         elif elem_id == 13:       # GPS_SPEED（小写映射大写字形）
             put_text(f"{speed_mps * 3.6:.0f}Kmh", col, row)
         elif elem_id == 14:       # GPS_SATS（Task 49）：无 GPS 域——真机
@@ -565,26 +579,29 @@ def build_frame(state: dict) -> dict:
             # 图标对+%2d；模拟器连 GPS 设备都无，只显示数值）
         elif elem_id == 15:       # ALTITUDE
             put_text(f"{alt_m:.0f}M", col, row)
-        elif elem_id == 19:       # POWER（Task 55）：固件 osdElementPower
-            put_text("   0W", col, row)   # "%4dW"（电流 cA×电压 cV/10000=瓦），
-            # 无电流计量模型 → 诚实零值（CURRENT_DRAW/WATT_HOURS 同语义，
-            # 公式注明防有电流域后误当占位遗留）
-        elif elem_id == 21:       # WARNINGS（Task 49；Task 52 改实时条件）：
-            # 有数据源的警告子集——ARMING DISABLED。原读 fc.arm_denied_once
-            # 闩锁在放弃解锁后仍持续闪烁；固件 renderOsdWarning（osd_
-            # warnings.c）按实时状态逐帧求值，故改读快照实时字段
-            # arming_blocked（ARM box 激活 ∧ 油门 ≥ ARM_THROTTLE_MAX ∧
-            # 未解锁，flight_snapshot 逐帧计算——drone.py 闩锁本体保留供
-            # UI 既有消费）。blink=True 2Hz 闪烁（与 DISARMED 同相位源）。
-            # 固件全量警告（osd_warnings.c：电池/FAILSAFE/CRASH FLIP/蜂鸣/
-            # 温度/RSSI 等 19 项）无对应仿真域，仅实现此一项
-            if arming_blocked:
+        elif elem_id == 19:       # POWER：sim → 实时功率 W（V×A，固件电流
+            p_w = batt["voltage_v"] * batt["amperage_a"] if batt else 0.0
+            put_text(f"{p_w:4.0f}W", col, row)   # cA×电压cV/10000 同式；
+            # 静态模式诚实零值——宽度格式与旧零值一致
+        elif elem_id == 21:       # WARNINGS：电池告警优先于 ARMING DISABLED。
+            # 电池分支（真实电池模拟）：critical → LAND NOW、warning → LOW
+            # BATTERY（用户裁定：阈值走配置 warning_cell_v/min_cell_v 不写死，
+            # BatterySim.state 按负载芯压逐帧求值——空载回弹告警自然解除，
+            # 真机同行为）。blink=True 2Hz 闪烁（与 DISARMED 同相位源）。
+            # batt None（静态模式）→ 仅 ARMING DISABLED 既有路径
+            # （Task 49/52 语义：读快照实时 arming_blocked，闩锁键保留兼容）
+            if batt is not None and batt.get("state") == "critical":
+                put_text("LAND NOW", col, row, blink=True)
+            elif batt is not None and batt.get("state") == "warning":
+                put_text("LOW BATTERY", col, row, blink=True)
+            elif arming_blocked:
                 put_text("ARMING DISABLED", col, row, blink=True)
         elif elem_id == 22:       # AVG_CELL_VOLTAGE：图标+2 位小数+V（cells
             if cells > 0:         # 非法则不画；数值段走 cV 整数整除路径
                 cell_cv = _avg_cell_cv(voltage_v, cells)   # （固件两处
                 text = f"{cell_cv // 100}.{cell_cv % 100:02d}"  # 同读 getBattery-
-                put(col, row, _battery_glyph(voltage_v, cells))  # AverageCell-
+                put(col, row, _battery_glyph(voltage_v, cells,
+                                             batt_min_cv, batt_max_cv))  # AverageCell-
                 put_text(text, col + 1, row)               # Voltage）
                 put(col + 1 + len(text), row, GLYPH_VOLT)
         elif elem_id in (23, 24):  # GPS_LON/GPS_LAT（Task 55）：逐字照抄固件

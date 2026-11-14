@@ -8,7 +8,8 @@ from .base import Screen
 from input.joystick import JoystickInput
 from physics.drone import (ARM_THROTTLE_MAX, BOX_ARM,
                            FlightController, eval_boxes)
-from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
+from physics.world import (FlightWorld, bullet_to_render, compose_camera_quat,
+                           SIM_TICK)
 from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
                          COVER_BOX_W, COVER_BOX_H)
 from osd import compose_state, build_frame, OSD_COLS, OSD_ROWS
@@ -56,6 +57,9 @@ class FlightScreen(Screen):
         self._world = None
         self._fc = None
         self._paused = False
+        # 固定 tick 累加器（SIM_TICK）：物理/飞控节拍与渲染帧率解耦——设置页
+        # 帧率不再触碰物理（根因修复，帧率不变性回归 test/test_fps_invariance.py）
+        self._sim_acc = 0.0
         self._esc_open = False
         self._flight_time_s = 0.0   # 飞行计时（MSP 快照/OSD 消费，暂停不累计）
         # OSD 距离状态（Task 47，HOME_DIST/FLIGHT_DIST 数据源）：水平面取
@@ -309,8 +313,18 @@ class FlightScreen(Screen):
         recv = getattr(virt, "rtc_recv_unix", 0.0)
         if rtc > 0 and recv > 0:
             rtc += time.time() - recv       # 走时：设置时刻 + 流逝墙钟
+        # 真实电池模拟实时域（physics/battery.py）：voltage_v 实时负载电压
+        # （sim 关闭 = 静态 battery_voltage）；battery = BatterySim.snapshot()
+        # （sim 关闭 None——OSD 告警/功率元素与 MSP 130 按 None 回落静态行为）。
+        # getattr 防御同 rtc 链（单测 fake fc 桩缺属性不崩）
+        batt = getattr(self._fc, "battery", None)
+        lv = getattr(self._fc, "live_voltage", None)
         return {
             "armed": self._fc.armed,
+            "voltage_v": (lv if lv is not None
+                          else getattr(getattr(self.app, "drone_params", None),
+                                       "battery_voltage", 14.8)),
+            "battery": batt.snapshot() if batt is not None else None,
             "boxes": self._boxes,
             # 反乌龟解锁锁存（Task 54）：OSD FLIP_ARROW 门控消费（与实时
             # boxes 分离——锁存会话中途关开关箭头不消失）。getattr 防御
@@ -428,7 +442,14 @@ class FlightScreen(Screen):
         # 2 秒巨型物理步会使机体穿透地面平面坠入世界下方（bullet 平面碰撞单面）。
         # 物理步长钳位到 33ms（仿真常规做法；不动 PID/物理参数）。
         dt = min(dt, 1.0 / 30.0)
-        self._flight_time_s += dt   # 与物理同步（同钳位后 dt）
+        # 固定 tick 累加器（帧率解耦核心）：帧 dt（钳位后）只决定本帧 tick 数 n，
+        # 物理/飞控恒按 SIM_TICK 节拍推进——设置页帧率不再改变闭环动力学
+        # （clock.tick 整数毫秒量化抖动一并消除；60fps 设置下每帧恰 1 tick，
+        # 飞行手感与原 60fps 路径一致）。超限兜底 8 tick 防死亡螺旋
+        self._sim_acc += dt
+        n = min(int(self._sim_acc / SIM_TICK), 8)
+        self._sim_acc -= n * SIM_TICK
+        self._flight_time_s += n * SIM_TICK   # 飞行时长按仿真时间累计
         ch = self.app.rc_input.read(dt)
         if self.app.drone_params.virtual_fc:
             # MSP SET 写参数即时生效（Task 19/21）：地面站写参数 → on_change 置
@@ -445,30 +466,38 @@ class FlightScreen(Screen):
                 self._fc.restore_after_rebuild(was_armed, was_flip)
                 self.app.msp_params_dirty = False
             # 虚拟飞控接线（Task 14）：aux [-1,1] → µs（1500 中位 ±500）、
-            # mode_ranges 求值激活 box 集、杆义姿态角随帧传递（自稳外环消费；
-            # 反乌龟接管门槛 Task 54 起不读 boxes——按解锁锁存判定）。
+            # mode_ranges 求值激活 box 集（帧级 ZOH，同帧多 tick 间不重估；
+            # 杆义姿态角在下方 tick 循环内按 bullet 现值逐 tick 重读）。反乌龟
+            # 接管门槛 Task 54 起不读 boxes——按解锁锁存判定。
             # 无 ARM box 配置时 eval_boxes 恒空 → 永不解锁（零推）
             aux_us = [1500.0 + v * 500.0 for v in ch.aux]
             boxes = eval_boxes(self.app.drone_params.virtual.mode_ranges, aux_us)
             self._aux_us = aux_us    # 快照缓存（flight_snapshot 消费）
             self._boxes = boxes
-            motors = self._fc.update(ch, self._world.gyro_dps, dt,
-                                     aux_us=aux_us, boxes=boxes,
-                                     angles_deg=self._world.euler_stick_deg)
-        else:
-            # 参数模式：一期三参调用形态，行为零修改
-            motors = self._fc.update(ch, self._world.gyro_dps, dt)
-        # 反乌龟桨反转接线（Task 50 v4；Task 54 锁存同源）：判定改读 fc 解锁
-        # 锁存 flip_over_latched ∧ armed（与 drone.py 接管门槛同帧一致——解锁
-        # 时刻锁存、飞行中不跟随开关、加锁清零，用户 2026-11-14 实机经验
-        # 裁定；angles_deg 恒非空由本层接线保证）。真机反乌龟靠双向 DShot
-        # 反转螺旋桨，推力沿机体 −Z——倒扣时被驱动侧推力从压向地面变为
-        # 抬离地面（用户实机经验裁定）。每帧先于 step 设置（激活帧的电机
-        # 与推力方向同帧生效）；加锁当帧恢复正常推力。参数模式 armed 恒
-        # False → 恒 False
-        self._world.set_prop_reverse(
-            self._fc.flip_over_latched and self._fc.armed)
-        self._world.step(self._fc.motor_thrusts(motors), dt)
+        # 固定 tick 循环（帧率解耦核心）：fc.update + world.step 恒按 SIM_TICK
+        # 节拍推进 n 次，帧 dt 不再进入闭环——设置页帧率只改渲染节拍。
+        # 60fps 设置下每帧恰 1 tick，手感与原 60fps 路径一致
+        for _ in range(n):
+            if self.app.drone_params.virtual_fc:
+                # 杆义姿态角按 tick 重读（bullet 现值，自稳外环/反乌龟消费）；
+                # aux/boxes 为帧级 ZOH（上方帧级求值，同帧多 tick 间不重估）
+                motors = self._fc.update(ch, self._world.gyro_dps, SIM_TICK,
+                                         aux_us=aux_us, boxes=boxes,
+                                         angles_deg=self._world.euler_stick_deg)
+            else:
+                # 参数模式：一期三参调用形态，行为零修改
+                motors = self._fc.update(ch, self._world.gyro_dps, SIM_TICK)
+            # 反乌龟桨反转接线（Task 50 v4；Task 54 锁存同源）：判定读 fc
+            # 解锁锁存 flip_over_latched ∧ armed（解锁时刻锁存、飞行中不
+            # 跟随开关、加锁清零）。真机靠双向 DShot 反转螺旋桨——倒扣时
+            # 推力从压向地面变为抬离地面。每 tick 先于 step 设置（激活帧
+            # 电机与推力方向同 tick 生效）；加锁当帧恢复正常推力。参数模式
+            # armed 恒 False → 恒 False
+            # 反乌龟桨反转标志每 tick 先于 step 设置（激活帧电机与推力方向
+            # 同 tick 生效，语义与原实现同帧一致）
+            self._world.set_prop_reverse(
+                self._fc.flip_over_latched and self._fc.armed)
+            self._world.step(self._fc.motor_thrusts(motors), SIM_TICK)
         # OSD 距离状态（Task 47）：world.step 后位置已就绪，armed 为 fc.update
         # 后的本帧值——解锁沿/累计/冻结判定见 _track_flight_distance
         self._track_flight_distance(self._world.pos, self._fc.armed)
@@ -477,9 +506,12 @@ class FlightScreen(Screen):
         # drone.py 同源）
         self._track_flight_stats(self._fc.armed)
         # 相机同步：位姿 + 机头对齐 + 摄像头仰角合成（纯函数在 physics.world）
-        cam = compose_camera_quat(self._world.quat,
+        # 相机按 tick 间插值位姿渲染（render_pose prev→cur，alpha=acc/SIM_TICK）：
+        # 固定 tick 后 bullet 状态以 60Hz 更新，高帧率渲染设置下不插值会帧重复顿挫
+        rpos, rquat = self._world.render_pose(self._sim_acc / SIM_TICK)
+        cam = compose_camera_quat(rquat,
                                   self.app.drone_params.camera_angle_deg)
-        px, py, pz = bullet_to_render(self._world.pos)
+        px, py, pz = bullet_to_render(rpos)
         soup3D.camera.goto(px, py, pz)
         soup3D.camera.turn_quat(cam)
         soup3D.camera.update()
@@ -610,6 +642,9 @@ class FlightScreen(Screen):
             if imgui.button("重置位置", 220, 44):
                 self._world.reset(self._scene.spawn)
                 self._fc.disarm()   # 位置重置联动加锁（Task 14）：重置后须重新解锁
+                br = getattr(self._fc, "battery_reset", None)
+                if br is not None:
+                    br()            # 重置位置=换新电池（真实电池模拟满电恢复）
                 self._esc_open = False; self._paused = False
                 imgui.close_current_popup()
             if imgui.button("返回主菜单", 220, 44):

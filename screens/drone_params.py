@@ -13,6 +13,7 @@ from config_store import (DRONES_DIR, DroneParams, PIDGains, RateParams,
                           DEFAULT_PRESET_ID, copy_preset, delete_preset,
                           list_preset_ids, load_preset, save_preset,
                           sanitize_preset_id, set_cells_auto, set_cells_manual)
+from physics.battery import CHEMS   # 真实电池模拟：化学体系标签/满电放空参考值
 
 RATE_TYPES = ["betaflight_actual", "linear"]
 AXES = ["roll", "pitch", "yaw"]
@@ -395,13 +396,37 @@ class DroneParamsScreen(Screen):
         p.motor_kv = int(p.motor_kv)
         imgui.text(f"KV 建议推重比: {p.motor_kv / 250.0:.1f}")
         p.thrust_ratio = _input("推重比", p.thrust_ratio, 0.1)
-        # 电池电压 V：推力按 (V/14.8)² 缩放（参考 4S 标称；满电 4S=16.8、3S=11.1）
-        p.battery_voltage = _input("电池电压 (V)", p.battery_voltage, 0.1)
-        # 自动识别态同帧重算节数（Task 46）：电压编辑即联动，_render_vfc_form
-        # 的节数显示行同帧生效（重算在文本渲染前；非虚拟飞控模式同样维护
-        # 派生值，转 vfc 时自洽）
-        if p.virtual.cells_auto:
-            set_cells_auto(p)
+        # 真实电池模拟（physics/battery.py）：开启后电压输入替换为电池配置；
+        # 容量/C数/告警阈值直连压降模型与 OSD 告警（阈值不写死，用户裁定）
+        b = p.battery
+        _, b.sim_enabled = imgui.checkbox("真实电池模拟", b.sim_enabled)
+        if b.sim_enabled:
+            choices = [("lipo", "LiPo"), ("lihv", "LiHV"), ("liion", "Li-ion")]
+            cur = next((i for i, (k, _) in enumerate(choices) if k == b.chem), 0)
+            _, picked = imgui.combo("电池类型", cur, [lab for _, lab in choices])
+            b.chem = choices[picked][0]
+            _, c = imgui.input_int("节数 (S)", int(b.cells), 1, 10)
+            b.cells = min(8, max(1, int(c)))
+            if p.virtual.cells != b.cells:
+                p.virtual.cells = b.cells   # sim 模式节数源=电池配置（镜像）
+            _, cap = imgui.input_int("容量 (mAh)", int(b.capacity_mah), 50, 500)
+            b.capacity_mah = max(1, int(cap))
+            _, cr = imgui.input_int("放电倍率 (C)", int(b.c_rating), 5, 50)
+            b.c_rating = max(1, int(cr))
+            b.warning_cell_v = _input("警告单芯电压 (V)", b.warning_cell_v, 0.05, "%.2f")
+            b.min_cell_v = _input("最低单芯电压 (V)", b.min_cell_v, 0.05, "%.2f")
+            b.max_cell_v = _input("最高单芯电压 (V)", b.max_cell_v, 0.05, "%.2f")
+            chem = CHEMS.get(b.chem, CHEMS["lipo"])
+            i_full = max(1, b.capacity_mah) / 1000.0 * max(1, b.c_rating)
+            imgui.text(f"满电 {chem['full'] * b.cells:.2f}V · 放空 {chem['empty'] * b.cells:.1f}V · 额定放电 {i_full:.0f}A")
+        else:
+            # 电池电压 V：推力按 (V/14.8)² 缩放（参考 4S 标称；满电 4S=16.8、3S=11.1）
+            p.battery_voltage = _input("电池电压 (V)", p.battery_voltage, 0.1)
+            # 自动识别态同帧重算节数（Task 46）：电压编辑即联动，_render_vfc_form
+            # 的节数显示行同帧生效（重算在文本渲染前；非虚拟飞控模式同样维护
+            # 派生值，转 vfc 时自洽）
+            if p.virtual.cells_auto:
+                set_cells_auto(p)
         # 线性空气阻力 N·s/m：默认 1.2 为默认机标定值，轻量高推机按手感调低
         p.drag_k = _input("空气阻力", p.drag_k, 0.1)
         p.camera_angle_deg = _input("摄像头角度 (°)", p.camera_angle_deg, 1.0)

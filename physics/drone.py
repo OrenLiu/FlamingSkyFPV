@@ -2,6 +2,7 @@
 纯计算模块：不依赖 PyBullet/渲染，gyro 数据由 world.py 提供（杆义角速度）。"""
 from input.channels import Channels
 from config_store import DroneParams, RateParams
+from physics.battery import BatterySim
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
@@ -243,6 +244,21 @@ class FlightController:
         self.armed = False
         self.arm_denied_once = False
         self._flip_over_latched = False
+        # 真实电池模拟（physics/battery.py）：sim_enabled 才建 BatterySim。
+        # set_params 重建时电池配置未变 → 保留 SoC/消耗（MSP 写参数≠换电池，
+        # restore_after_rebuild 同语义家族）；配置变更 → 换新电池（满电重建）
+        bp = params.battery
+        if bp.sim_enabled:
+            if not (hasattr(self, "_battery") and self._battery is not None
+                    and self._battery.config_matches(bp)):
+                self._battery = BatterySim(bp, params.thrust_ratio)
+            else:
+                # 配置未变=同一块电池：只刷新电流需求锚（推重比可被调参改）
+                self._battery.set_thrust_ratio(params.thrust_ratio)
+        else:
+            self._battery = None
+        # 电池推进的上一帧电机负载缓存（update 各返回路径统一落盘）
+        self._last_motors = [0.0] * 4
 
     def update(self, ch: Channels, gyro_dps: tuple, dt: float,
                aux_us=None, boxes=frozenset(), angles_deg=None) -> list:
@@ -257,6 +273,10 @@ class FlightController:
         度（与 gyro_dps 同义系），ANGLE/HORIZON 模式外环与反乌龟激活门槛消费，
         None 且相关模式激活时防御性跳过对应逻辑（飞行接线层保证传入）。aux_us
         为 MSP 任务预留，本任务不消费。"""
+        # 真实电池模拟逐帧推进：消费上一帧电机负载（统一覆盖全部返回路径——
+        # 加锁零转/反乌龟开环/正常 PID 路径的电流-压降-消耗一帧不落）
+        if self._battery is not None:
+            self._battery.update(self._last_motors, dt)
         if self._virtual_fc:
             if BOX_ARM in boxes:
                 if not self.armed:
@@ -284,6 +304,7 @@ class FlightController:
                     pid.reset()
                 self._tpa_throttle = TPA_THROTTLE_INIT
                 self._flip_over_latched = False
+                self._last_motors = [0.0] * 4   # 加锁=零负载（电池空载回弹）
                 return [0.0, 0.0, 0.0, 0.0]
         rt = self._tune.rate_type
         targets = (rate_setpoint(ch.roll, self._tune.rate["roll"], rt),
@@ -328,6 +349,7 @@ class FlightController:
                 pid.update(meas, meas, dt)
             motors = _crashflip_motors(ch.roll, ch.pitch, ch.yaw)
             self._tpa_throttle = sum(motors) / len(motors)
+            self._last_motors = motors      # 电池负载缓存（真实电池模拟）
             return motors
         # TPA：衰减因子乘到三轴 PID 输出后进混控。油门取上一帧四电机均值——比杆量
         # 多含饱和信息（饱和时均值≠杆量），且用历史值无代数环。真实 BF 只衰减 P/I
@@ -340,6 +362,7 @@ class FlightController:
                 self._pid["yaw"].update(targets[2], gyro_dps[2], dt) * f)
         motors = mix_quad_x(ch.throttle, outs[2], outs[0], outs[1])
         self._tpa_throttle = sum(motors) / len(motors)
+        self._last_motors = motors          # 电池负载缓存（真实电池模拟）
         return motors
 
     def disarm(self) -> None:
@@ -352,6 +375,30 @@ class FlightController:
         for pid in self._pid.values():
             pid.reset()
         self._tpa_throttle = TPA_THROTTLE_INIT
+
+    def battery_reset(self) -> None:
+        """电池恢复满电（重置位置=换新电池，flight.py 重置位置按钮消费；
+        静态模式 _battery None 为 no-op）"""
+        if self._battery is not None:
+            self._battery.reset()
+
+    def update_battery_only(self, motors, dt: float) -> None:
+        """电池模型直驱推进（单测/工具路径用；正常闭环在 update() 入口自动
+        推进）。motors = 四电机输出 [0,1]"""
+        if self._battery is not None:
+            self._battery.update(motors, dt)
+
+    @property
+    def battery(self):
+        """BatterySim 实例（sim 关闭 None；flight_snapshot/单测消费）"""
+        return self._battery
+
+    @property
+    def live_voltage(self) -> float:
+        """当前有效电池电压 V：sim 开启=实时负载电压，关闭=静态
+        battery_voltage（motor_thrusts 推力缩放唯一电压源）"""
+        return (self._battery.voltage if self._battery is not None
+                else self._params.battery_voltage)
 
     @property
     def flip_over_latched(self) -> bool:
@@ -373,8 +420,9 @@ class FlightController:
     def motor_thrusts(self, motors: list) -> list:
         """单电机最大推力 = 推重比(参考电压下)×重量/4 × (V/REF_VOLTAGE)²；实际 = T_max×motor²。
         电池电压越高推力越大（满电 4S 16.8V → ×1.288、3S 11.1V → ×0.563），
-        悬停油门相应降低"""
+        悬停油门相应降低。真实电池模拟开启时 V 取实时负载电压（physics/
+        battery.py 推油压降/耗电衰减直折推力）；关闭时按静态 battery_voltage"""
         weight_kg = self._params.weight_g / 1000.0
-        v_scale = (self._params.battery_voltage / REF_VOLTAGE) ** 2
+        v_scale = (self.live_voltage / REF_VOLTAGE) ** 2
         t_max = weight_kg * 9.81 * self._params.thrust_ratio * v_scale / 4.0
         return [t_max * m * m for m in motors]

@@ -5,7 +5,10 @@ import traceback
 import pygame
 import imgui
 from imgui.integrations.pygame import PygameRenderer
-from OpenGL.GL import glActiveTexture, GL_TEXTURE0
+from OpenGL.GL import (glActiveTexture, glClear, glClearColor, glViewport,
+                       glGetFloatv, GL_COLOR_BUFFER_BIT, GL_COLOR_CLEAR_VALUE,
+                       GL_TEXTURE0)
+from soup3D.target import RenderTarget
 import soup3D
 
 from config_store import (CONFIG_DIR, DRONES_DIR, ConfigStore, Settings,
@@ -21,6 +24,7 @@ from input.joystick import JoystickInput
 from msp.handlers import make_identity_handlers
 from msp.server import VfcServer
 from screens.flight import FlightScreen   # _msp_state 的 isinstance 判定（app → screens 单向合法）
+from debug_frame_log import FrameLogger, frame_log_enabled  # 卡顿记录仪（FLAME_STUTTER_LOG 门控）
 
 RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选
 # 配置根/预设目录常量在 config_store 定义（app 与 screens 同源引用，防漂移）
@@ -100,6 +104,9 @@ class App:
         if self.font:
             self._impl.refresh_font_texture()
         self.clock = pygame.time.Clock()
+        # 卡顿诊断记录仪（环境变量 FLAME_STUTTER_LOG 门控）：未设置时为 None，
+        # run() 各打点全 if 守卫，行为与无记录仪时一致
+        self._flog = FrameLogger(self) if frame_log_enabled else None
         self.rc_input = self._make_rc_input()
         # 手柄热插拔状态（poll_joysticks 双向维护）：lost=配置手柄消失已回落
         # 键盘（rc_setup 明示）；recovered=消失后自动拾取成功（对称提示）
@@ -123,17 +130,56 @@ class App:
     # ---- 窗口 ----
     def _open_window(self):
         flags = pygame.DOUBLEBUF | pygame.OPENGL
-        if self.settings.fullscreen:
-            flags |= pygame.FULLSCREEN
+        # 全屏缩放模式（不切显示模式保原生刷新率）：全屏开在桌面原生分辨率
+        # （请求尺寸==当前模式 → RandR 不做模式切换），引擎仍按设置的逻辑
+        # 分辨率渲染，上屏时 GPU 等比缩放居中（宽高比不同留黑边）。
+        # _scale_rt=None 表示不用缩放（窗口化，或全屏尺寸恰等逻辑分辨率）
+        self._scale_rt = None
+        self._scale_rect = None
         w, h = self.settings.resolution
         pygame.display.set_caption("FlamingSkyFPV")
-        pygame.display.set_mode((w, h), flags)
-        soup3D.init(w, h, 75, (0.55, 0.75, 0.95), 0.1, 2048)
+        if self.settings.fullscreen:
+            flags |= pygame.FULLSCREEN
+            dw, dh = pygame.display.get_desktop_sizes()[0]
+            pygame.display.set_mode((dw, dh), flags)
+            soup3D.init(w, h, 75, (0.55, 0.75, 0.95), 0.1, 2048)
+            if (dw, dh) != (w, h):
+                # 缩放离屏目标：引擎按逻辑分辨率渲进 RT，上屏 present 等比放大
+                self._scale_rt = RenderTarget(w, h, "rgba8", "renderbuffer")
+                scale = min(dw / w, dh / h)   # 等比取较小比例（16:9 进 16:10 高度受限）
+                sw, sh = int(w * scale), int(h * scale)
+                self._scale_rect = ((dw - sw) // 2, (dh - sh) // 2, sw, sh)  # 居中留黑边
+        else:
+            pygame.display.set_mode((w, h), flags)
+            soup3D.init(w, h, 75, (0.55, 0.75, 0.95), 0.1, 2048)
+
         # 垂直同步：两层生效路径——设置保存 → rebuild_window → _open_window
         # 重跑 → 交换间隔随新 GL 上下文重设（vsync 热生效，重建失败回落
         # restart_needed 重启生效）；tick 数字档变更由 run() 每帧读 settings
         # 即时生效。soup3D 引擎默认不限速，零改动
         self._set_swap_interval(1 if self.settings.fps_mode == "vsync" else 0)
+
+    def _scaled_frame_begin(self):
+        """全屏缩放模式帧首（run() 每帧渲染分支前调用）：
+        1) 视口先设整窗，用黑色清整个窗口——等比上屏后窗口边缘（黑边区）
+           必须有底色，否则残留上一帧像素；
+        2) 清屏色取自引擎背景色（soup3D.init 传入），临时改黑清完即还原，
+           不污染引擎自身的清屏状态；
+        3) 视口切到等比居中矩形——后续引擎渲染 / 画质包合成通道 / present
+           直绘全部落在此矩形内，实现 RT 内容等比放大上屏。"""
+        win_w, win_h = pygame.display.get_surface().get_size()
+        clear = glGetFloatv(GL_COLOR_CLEAR_VALUE)   # 存引擎清屏色
+        glClearColor(0.0, 0.0, 0.0, 1.0)
+        glViewport(0, 0, win_w, win_h)              # 清整窗（含黑边区）
+        glClear(GL_COLOR_BUFFER_BIT)
+        glClearColor(*clear)                        # 还原清屏色
+        glViewport(*self._scale_rect)               # 本帧绘制收窄到上屏矩形
+
+    def _scaled_frame_end(self):
+        """全屏缩放模式帧尾：视口恢复整窗。imgui 集成层按整窗 display_size
+        布局绘制 UI，若视口仍收窄在等比矩形会把整窗 UI 裁剪/挤压到矩形内。"""
+        win_w, win_h = pygame.display.get_surface().get_size()
+        glViewport(0, 0, win_w, win_h)
 
     @staticmethod
     def _set_swap_interval(interval: int) -> bool:
@@ -265,6 +311,7 @@ class App:
             # 数字模式时钟限速（每帧读取 settings，设置页改动即时生效）
             dt = self.clock.tick(0 if self.settings.fps_mode in ("vsync", "unlimited")
                                  else int(self.settings.fps_mode)) / 1000.0
+            if self._flog: self._flog.mark("tick")
             # 帧率统计：0.5s 真实时间窗口计数（perf_counter 浮点精度，不受
             # clock.tick 整数毫秒量化影响——高帧率下 tick 可返回 0ms，
             # 倒数成百万 fps 毛刺污染 EMA）
@@ -293,6 +340,8 @@ class App:
                     return
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
                     self.debug_overlay = not self.debug_overlay  # 全局热键，任意界面可用
+                if self._flog and event.type == pygame.KEYDOWN and event.key == pygame.K_F9:
+                    self._flog.mark_user()  # 用户体感卡顿标记（记录仪开着才生效）
                 if event.type == pygame.VIDEORESIZE:
                     # 不透传 pyimgui 集成层：其 VIDEORESIZE 分支会再 set_mode，
                     # 全屏切换的中间态尺寸可越界致 OverflowError；窗口尺寸与
@@ -302,6 +351,7 @@ class App:
                     continue
                 self._impl.process_event(event)
                 self.screen.handle_event(event)
+            if self._flog: self._flog.mark("ev")
 
             # 键盘输入喂给 RC 层（只传按下集合，避免 input 层依赖 pygame）
             pressed = {i for i, on in enumerate(pygame.key.get_pressed()) if on}
@@ -311,8 +361,13 @@ class App:
             # MSP 请求分派（Task 16）：accept 新连接 + 取空队列应答；
             # 服务器未启动直返，不阻塞主循环
             self.msp_server.drain()
+            if self._flog: self._flog.mark("inp")
 
             self.screen.update(dt)
+            if self._flog: self._flog.mark("upd")
+
+            if self._scale_rect is not None:
+                self._scaled_frame_begin()  # 缩放模式帧首：整窗清黑边 + 视口收窄上屏矩形
 
             if self._frame_renderer is not None:
                 fr = self._frame_renderer
@@ -328,8 +383,22 @@ class App:
                     soup3D.update()
                     self.screen.render_scene()
             else:
-                soup3D.update()               # 先渲 3D（spike 验证的顺序）
-                self.screen.render_scene()    # 3D 直渲钩子（显示列表失效，见 base.py）
+                if self._scale_rt is not None:
+                    # 缩放模式默认管线：场景渲进离屏 RT（保持逻辑分辨率的 GPU
+                    # 成本），场景直渲钩子同进 RT；present 把 RT 内容直通绘制到
+                    # 帧首收窄的等比视口矩形内放大上屏——全屏不切显示模式保
+                    # 面板原生刷新率（165Hz）
+                    soup3D.update(target=self._scale_rt)
+                    self._scale_rt.bind()
+                    self.screen.render_scene()    # 3D 直渲钩子（显示列表失效，见 base.py）
+                    self._scale_rt.unbind()
+                    self._scale_rt.present()
+                else:
+                    soup3D.update()               # 先渲 3D（spike 验证的顺序）
+                    self.screen.render_scene()    # 3D 直渲钩子（显示列表失效，见 base.py）
+            if self._scale_rect is not None:
+                self._scaled_frame_end()  # 缩放模式帧尾：恢复整窗视口（imgui 全窗绘制）
+            if self._flog: self._flog.mark("rnd")
             # imgui 内部时间每帧 io.Time += io.DeltaTime（光标闪烁、退格/方向键
             # 重复、双击判定全吃这个时间）。集成层 process_inputs() 从不被调
             # （主循环只走 process_event 事件流），delta_time 恒为初始 1/60 →
@@ -356,8 +425,12 @@ class App:
             # 单元上导致 UI 整体隐形（飞行界面 UI 消失之谜的根因）
             glActiveTexture(GL_TEXTURE0)
             self._impl.render(imgui.get_draw_data())
+            if self._flog: self._flog.mark("cnt")
 
             pygame.display.flip()
+            if self._flog:
+                self._flog.mark("flip")
+                self._flog.frame(dt * 1000)   # 本帧收口：写一行（dt 毫秒=clock.tick 返回×1000）
 
             if self._frames_left is not None:
                 self._frames_left -= 1
