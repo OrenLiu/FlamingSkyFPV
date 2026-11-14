@@ -6,7 +6,8 @@ import pygame
 import soup3D
 from .base import Screen
 from input.joystick import JoystickInput
-from physics.drone import FlightController, eval_boxes
+from physics.drone import (BOX_FLIP_OVER_AFTER_CRASH, FlightController,
+                           eval_boxes)
 from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
 from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
                          COVER_BOX_W, COVER_BOX_H)
@@ -244,6 +245,12 @@ class FlightScreen(Screen):
                 and self.stage == "flying"):
             self._esc_open = not self._esc_open   # Esc 菜单开关
             self._paused = self._esc_open
+            if self._paused and self._world is not None:
+                # 暂停即恢复默认接触摩擦（Task 50）：暂停期无物理步，此处
+                # 防御性复位防低摩擦残留（恢复后首帧 update 会按反乌龟激活
+                # 态重设）；进入飞行页无需处理——_load_scene 新建
+                # FlightWorld 即默认摩擦，退出飞行页世界整体销毁
+                self._world.set_ground_grab(False)
 
     # ---- 每帧 ----
     def flight_snapshot(self) -> "dict | None":
@@ -366,6 +373,16 @@ class FlightScreen(Screen):
         else:
             # 参数模式：一期三参调用形态，行为零修改
             motors = self._fc.update(ch, self._world.gyro_dps, dt)
+            boxes = frozenset()
+        # 反乌龟接触摩擦动态切换（Task 50）：激活帧（box 21 + 解锁，与
+        # drone.py 反乌龟接管门槛同帧一致——angles_deg 恒非空由本层接线
+        # 保证）把机-地接触摩擦降到桨尖打地量级：无人机碰撞体是 ARM×ARM
+        # 大薄板盒，默认摩擦 0.5 的切向约束会显著吃掉地面滚转能量（倒扣
+        # 大面积贴合时尤甚）。每帧先于 step 设置（激活帧的电机与摩擦同帧
+        # 生效）；撤 box/加锁当帧即恢复默认。参数模式 boxes 恒空 → 恒 False
+        # （set_ground_grab 幂等，值不变不调 bullet）
+        self._world.set_ground_grab(
+            BOX_FLIP_OVER_AFTER_CRASH in boxes and self._fc.armed)
         self._world.step(self._fc.motor_thrusts(motors), dt)
         # OSD 距离状态（Task 47）：world.step 后位置已就绪，armed 为 fc.update
         # 后的本帧值——解锁沿/累计/冻结判定见 _track_flight_distance
