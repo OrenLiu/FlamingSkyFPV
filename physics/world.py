@@ -12,6 +12,14 @@ DRAG_K = 1.2
 ANG_DAMP = 0.01      # 角阻尼 N·m·s（桨气动阻尼，防 PID 振荡；与线性阻力是两回事，
                      # 作用对象是角速度、维持 rate 跟踪稳定，不做用户可调）
 REACT_K = 0.02       # 桨反扭矩系数 N·m/N（5寸桨动量理论悬停 Q/T≈0.013，取整偏稳）
+# 机-地接触摩擦（Task 50）：bullet 默认 lateralFriction=0.5。无人机碰撞体是
+# ARM×ARM 大薄板盒，倒扣时板面与无限地面大面积贴合，默认摩擦的切向约束会把
+# 反乌龟翻转扭矩完全吃掉（倒扣从起翻不动、水平翻到 180° 板面贴地同因卡死——
+# 用户三轮复测主诉；真机能翻靠细机架+桨尖小面积打地滑动）→ crashflip 激活帧
+# 动态切换到低摩擦（等效桨尖打地）。0.05 为 headless 探针标定值（见
+# test_crashflip_physics.py 场景 A/B），默认值显式设置保证恢复值确定
+DEFAULT_FRICTION = 0.5
+GROUND_GRAB_FRICTION = 0.05
 
 # 电机臂位置（机体系：+X 前 / +Y 左 / +Z 上），顺序 [FL, FR, BL, BR]
 ARMS = [(ARM, ARM, 0), (ARM, -ARM, 0), (-ARM, ARM, 0), (-ARM, -ARM, 0)]
@@ -80,8 +88,12 @@ class FlightWorld:
         # 标定实测：bullet 默认 linearDamping/angularDamping=0.04 是隐藏阻尼（零外力
         # 20m/s 滑行 0.5s 衰减至 14m/s，不在 getDynamicsInfo 返回中），使 DRAG_K 失真
         # ~23% → 显式清零，线性/角阻尼全部由下方 DRAG_K/ANG_DAMP 显式承担
+        # lateralFriction 同步显式设置（Task 50）：bullet 默认 0.5，显式化保证
+        # set_ground_grab 恢复值确定；_friction 跟踪当前值供幂等切换
         p.changeDynamics(self._body, -1, linearDamping=0.0, angularDamping=0.0,
+                         lateralFriction=DEFAULT_FRICTION,
                          physicsClientId=self._cid)
+        self._friction = DEFAULT_FRICTION
 
     def load_scene_mesh(self, obj_path: str, scale: float = 1.0):
         """场景 OBJ → 静态三角网格碰撞体（mass=0 → BVH 三角网格）"""
@@ -177,12 +189,36 @@ class FlightWorld:
         wb = inv * glm.vec3(*av)                  # 世界系→体系
         return (math.degrees(wb.x), -math.degrees(wb.y), -math.degrees(wb.z))
 
-    def reset(self, spawn=(0, 0, 2)):
-        """重置：回出生点、姿态水平、速度清零"""
+    def set_ground_grab(self, active: bool) -> None:
+        """反乌龟接触摩擦切换（Task 50）：active=True 把机-地接触摩擦降到
+        GROUND_GRAB_FRICTION（等效真机桨尖小面积打地滑动——大薄板盒默认
+        摩擦的切向约束会吃掉翻转扭矩，倒扣大面积贴合时尤甚），False 恢复
+        默认 0.5。幂等：值未变化不调 bullet（防逐帧冗余 C 包装调用，同
+        step() 的 setTimeStep 惯例）。physics 层不感知调用方语义
+        （crashflip box/解锁态由 flight.py 裁定），只收 bool"""
+        target = GROUND_GRAB_FRICTION if active else DEFAULT_FRICTION
+        if target == self._friction:
+            return
+        p.changeDynamics(self._body, -1, lateralFriction=target,
+                         physicsClientId=self._cid)
+        self._friction = target
+
+    @property
+    def friction(self) -> float:
+        """当前接触摩擦系数（getDynamicsInfo 直读 bullet 权威值，非缓存——
+        测试断言/调试用）"""
+        return p.getDynamicsInfo(self._body, -1,
+                                 physicsClientId=self._cid)[1]
+
+    def reset(self, spawn=(0, 0, 2), quat=(0, 0, 0, 1)):
+        """重置：回出生点、指定姿态（quat 为 bullet (x,y,z,w)，默认水平；
+        倒扣注入等测试/复位场景用）、速度清零。接触摩擦一并回默认
+        （Task 50）：重置=全新起手，防低摩擦跨重置残留"""
         p.resetBasePositionAndOrientation(
-            self._body, spawn, (0, 0, 0, 1), physicsClientId=self._cid)
+            self._body, spawn, quat, physicsClientId=self._cid)
         p.resetBaseVelocity(self._body, (0, 0, 0), (0, 0, 0),
                             physicsClientId=self._cid)
+        self.set_ground_grab(False)
 
     def close(self):
         p.disconnect(physicsClientId=self._cid)
