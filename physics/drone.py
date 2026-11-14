@@ -357,9 +357,18 @@ class FlightController:
     def flip_over_latched(self) -> bool:
         """本解锁架次的反乌龟锁存（只读；core.c flipOverAfterCrashActive
         同构——解锁成功瞬间随 ARM 时 box21 置位/清零，飞行中永不跟随开关，
-        加锁沿清零；用户 2026-11-14 实机经验裁定）。flight.py 桨反转接线
-        与架次统计例外门控同源消费（Task 54），MSP 写参数路径随 armed 回写"""
+        加锁沿清零；用户 2026-11-14 实机经验裁定）。flight.py 桨反转接线、
+        架次统计例外门控与 OSD FLIP_ARROW 同源消费（Task 54）"""
         return self._flip_over_latched
+
+    def restore_after_rebuild(self, armed: bool,
+                              flip_over_latched: bool) -> None:
+        """set_params 重建后恢复解锁态与反乌龟解锁锁存（MSP 写参数路径
+        专用，flight.py 消费——封装跨模块写边界）：真机写参数不 disarm、
+        固件 flipOverAfterCrashActive 保持（无 tryArm 重估）。非 MSP 路径
+        （换预设/参数页保存 → 新 fc 实例或保持回锁定态）不适用本方法"""
+        self.armed = armed
+        self._flip_over_latched = flip_over_latched
 
     def motor_thrusts(self, motors: list) -> list:
         """单电机最大推力 = 推重比(参考电压下)×重量/4 × (V/REF_VOLTAGE)²；实际 = T_max×motor²。

@@ -285,7 +285,10 @@ class FlightScreen(Screen):
         Task 52 增 arming_blocked=实时解锁被拒条件（ARM box 激活 ∧ 油门
         ≥ ARM_THROTTLE_MAX ∧ 未解锁，逐帧计算——与 drone.py 置
         arm_denied_once 的条件同式但非闩锁；OSD WARNINGS 消费，对应固件
-        renderOsdWarning 按实时 armingDisableFlags 渲染的语义）。"""
+        renderOsdWarning 按实时 armingDisableFlags 渲染的语义）。
+        Task 54 增 flip_latched=反乌龟解锁锁存（fc.flip_over_latched；
+        OSD FLIP_ARROW 门控消费——固件 osdElementCrashFlipArrow L874 读
+        isFlipOverAfterCrashActive() 锁存标志而非实时开关）。"""
         if (self.stage != "flying" or self._paused
                 or self._world is None or self._fc is None):
             return None
@@ -305,6 +308,11 @@ class FlightScreen(Screen):
         return {
             "armed": self._fc.armed,
             "boxes": self._boxes,
+            # 反乌龟解锁锁存（Task 54）：OSD FLIP_ARROW 门控消费（与实时
+            # boxes 分离——锁存会话中途关开关箭头不消失）。getattr 防御
+            # 同 arm_denied（SimpleNamespace 桩缺该属性）
+            "flip_latched": bool(getattr(self._fc, "flip_over_latched",
+                                         False)),
             "aux_us": list(self._aux_us),
             "stick_us": (1500.0 + ch.roll * 500.0,
                          1500.0 + ch.pitch * 500.0,
@@ -417,8 +425,7 @@ class FlightScreen(Screen):
                 was_armed = self._fc.armed
                 was_flip = self._fc.flip_over_latched
                 self._fc.set_params(self.app.drone_params)
-                self._fc.armed = was_armed
-                self._fc._flip_over_latched = was_flip
+                self._fc.restore_after_rebuild(was_armed, was_flip)
                 self.app.msp_params_dirty = False
             # 虚拟飞控接线（Task 14）：aux [-1,1] → µs（1500 中位 ±500）、
             # mode_ranges 求值激活 box 集、杆义姿态角随帧传递（自稳外环消费；
