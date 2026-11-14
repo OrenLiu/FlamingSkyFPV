@@ -7,7 +7,10 @@ Task 49 修 AH 俯仰方向（bullet 语义 pitch 正=低头 → 线上移）并
 11 元素：电流/电量/GPS 星数诚实零值、警告、数值航向、RTC 日期时间、
 反乌龟箭头、三 profile 名、天顶天底参考点；Task 52 批二：RC 通道/
 累计飞行次数/瓦时/AUX 值四数值元素 + 双摇杆叠层（字形经 .mcm 位图
-实测齐备）+ WARNINGS 改实时条件 + RTC 走时（快照侧））。
+实测齐备）+ WARNINGS 改实时条件 + RTC 走时（快照侧）；Task 55 批三
+收尾：POWER/DEBUG 诚实零值、GPS_LON/LAT 照抄固件无 fix 输出、
+HOME_DIR 十六方位箭头（字形族 0x60-0x6F 位图实测齐备）、COMPASS_BAR
+固件 24 格环形表九宽窗口（home_bearing_deg 快照新键））。
 
 仅纯数据表与无依赖纯函数，不 import 项目模块（依赖方向单向：
 msp/handlers 与 screens 可 import 本表；改动需保持无 GL/pygame/imgui——
@@ -26,6 +29,7 @@ import 纪律含标准库（连 math 也不用）：三角/时间换算在调用
 # osd.h osd_items_e 自 OSD_RSSI_VALUE=0 逐项机械计数（与现有表锚点
 # 15/22/26/27/29/33 及 3/31/47 全部交叉吻合）。注意 UP_DOWN_REFERENCE=60
 # （61 是 TX_UPLINK_POWER——简报曾标 61 系计数偏差，以固件枚举为准）
+# Task 55 批三增补 6 元素：19/23/24/25/30/34（id 同源核对）
 OSD_IMPLEMENTED: dict[int, str] = {
     0: "RSSI_VALUE",
     1: "MAIN_BATT_VOLTAGE",
@@ -42,14 +46,20 @@ OSD_IMPLEMENTED: dict[int, str] = {
     13: "GPS_SPEED",
     14: "GPS_SATS",
     15: "ALTITUDE",
+    19: "POWER",
     21: "WARNINGS",
     22: "AVG_CELL_VOLTAGE",
+    23: "GPS_LON",
+    24: "GPS_LAT",
+    25: "DEBUG",
     26: "PITCH_ANGLE",
     27: "ROLL_ANGLE",
     29: "DISARMED",
+    30: "HOME_DIR",
     31: "HOME_DIST",
     32: "NUMERICAL_HEADING",
     33: "NUMERICAL_VARIO",
+    34: "COMPASS_BAR",
     38: "RTC_DATETIME",
     45: "FLIP_ARROW",
     47: "FLIGHT_DIST",
@@ -65,25 +75,23 @@ OSD_IMPLEMENTED: dict[int, str] = {
     63: "AUX_VALUE",
 }
 
-# Task 49 跳过清单（有据不实现；id 均经 osd_items_e 逐项数出核对；
-# Task 52 批二移出并实装：STICK_OVERLAY_LEFT/RIGHT(48/49)——字形经
-# assets/osd_betaflight.mcm 位图实测齐备（0x0B/0x16/0x17/0x08-0x0A，
-# 对照固件 drivers/osd_symbols.h 同码位，见 GLYPH_STICK_* 注释）；
-# RC_CHANNELS(56)/TOTAL_FLIGHTS(59)/WATT_HOURS_DRAWN(62)/AUX_VALUE(63)
-# ——数值元素，真值/诚实零值均有落点）：
+# 跳过清单（有据不实现；id 均经 osd_items_e 逐项数出核对；Task 55 批三
+# 移出并实装：POWER(19)/GPS_LON/LAT(23/24)/DEBUG(25)/HOME_DIR(30)/
+# COMPASS_BAR(34)——字形族 0x60-0x6F 十六方位箭头与航向带族 0x18-0x1D
+# 均经 assets/osd_betaflight.mcm 位图实测齐备（旋转/镜像矩阵验证方向），
+# 简报「16 方位缺则降级 4 方位」预案未启用）。剩余未实现 38 项：
 # - G_FORCE(42)：world 无加速度输出——RAW_IMU(102) 的 acc 为静态常量
 #   (0,0,2048)=1g 占位非真实数据，不许编造，待物理域有 acc 再接入
-# - 字形依赖（不可 ASCII 化）：VTX_CHANNEL(10)、COMPASS_BAR(34)、
-#   CAMERA_FRAME(57)
+# - 字形依赖（不可 ASCII 化）：VTX_CHANNEL(10)、CAMERA_FRAME(57)
 # - 无容量/电流模型（诚实零值原则不够——依赖容量积分）：MAIN_BATT_
 #   USAGE(28)、REMAINING_TIME_ESTIMATE(37)、EFFICIENCY(58)
-# - 无 GPS 域：GPS_LON/LAT(23/24)、HOME_DIR(30)
-# - 无对应仿真域/简报未列：ROLL/PITCH/YAW_PIDS(16-18)、POWER(19)、
-#   PIDRATE_PROFILE(20)、DEBUG(25)、ESC_TMP/RPM/RPM_FREQ(35/36/51)、
-#   ADJUSTMENT_RANGE(39)、CORE_TEMPERATURE(40)、ANTI_GRAVITY(41)、
-#   MOTOR_DIAG(43)、LOG_STATUS(44)、LINK_QUALITY(46)、PILOT_NAME(50)、
-#   RSSI_DBM(55)、TX_UPLINK_POWER(61)、READY_MODE(64)、RSNR(65)、
-#   SYS_*(66-76)、GPS_LAP_*(77-79)
+# - 无 PID 展示域（参数在参数页整组呈现，无单值 OSD 语义）：
+#   ROLL/PITCH/YAW_PIDS(16-18)、PIDRATE_PROFILE(20)
+# - 无遥测/外设域：ESC_TMP/RPM/RPM_FREQ(35/36/51)、CORE_TEMPERATURE(40)、
+#   MOTOR_DIAG(43)、LOG_STATUS(44)、LINK_QUALITY(46)、RSSI_DBM(55)、
+#   TX_UPLINK_POWER(61)、READY_MODE(64)、RSNR(65)、SYS_*(66-76)、
+#   GPS_LAP_*(77-79)、ADJUSTMENT_RANGE(39)、ANTI_GRAVITY(41)、
+#   PILOT_NAME(50)
 
 # 元素总数 = 固件 osd.h OSD_ITEM_COUNT（MSP_OSD_CONFIG 的 item_count 与
 # SET_OSD_CONFIG 元素 addr 上界）
@@ -112,15 +120,21 @@ DEFAULT_LAYOUT: dict[int, int] = {
     13: 2393,  # GPS_SPEED         (25,10)
     14: 0,     # GPS_SATS——Task 49 出厂未摆放（同 3 注释）
     15: 2391,  # ALTITUDE          (23,10)
+    19: 0,     # POWER——Task 55 出厂未摆放（同 3 注释）
     21: 0,     # WARNINGS——Task 49 出厂未摆放（同 3 注释）
     22: 2451,  # AVG_CELL_VOLTAGE  (19,12)——Task 40 起图标化 6 格，默认锚点
                # 左移 1 列（原 (20,12) 5 格）避免与 vario 默认 (25,12) 首格重叠
+    23: 0,     # GPS_LON——Task 55 出厂未摆放（同 3 注释）
+    24: 0,     # GPS_LAT——同上
+    25: 0,     # DEBUG——同上
     26: 2479,  # PITCH_ANGLE       (15,13)
     27: 2466,  # ROLL_ANGLE        (2,13)
     29: 2188,  # DISARMED          (12,4)
+    30: 0,     # HOME_DIR——Task 55 出厂未摆放（同 3 注释）
     31: 0,     # HOME_DIST——Task 47 出厂未摆放（同 3 注释）
     32: 0,     # NUMERICAL_HEADING——Task 49 出厂未摆放（同 3 注释）
     33: 2457,  # NUMERICAL_VARIO   (25,12)
+    34: 0,     # COMPASS_BAR——Task 55 出厂未摆放（同 3 注释）
     38: 0,     # RTC_DATETIME——Task 49 出厂未摆放（同 3 注释）
     45: 0,     # FLIP_ARROW——同上
     47: 0,     # FLIGHT_DIST——Task 47 出厂未摆放（同 3 注释）
@@ -193,6 +207,35 @@ GLYPH_STICK_HORIZONTAL = 0x17        # 叠层横杆（SYM_STICK_OVERLAY_HORIZONT
                                      # mcm 位图实测齐备（0x0B=十字、0x16=
                                      # 竖线、0x17=横线、0x08-0x0A=上/中/
                                      # 下三片光标点，'_' 0x5F 同款核对手法）
+# ---- Task 55 批三字形（4.5.1 osd_symbols.h 同码位，位图实测齐备） ----
+GLYPH_OVER_HOME = 0x05               # 「在 home 点上」图标（SYM_OVER_HOME，
+                                     # osdElementGpsHomeDirection 距离 0 分支）
+GLYPH_HEADING_N = 0x18               # 航向带方位字母（SYM_HEADING_N/S/E/W，
+GLYPH_HEADING_S = 0x19               # COMPASS_BAR 消费——非 ASCII 'N' 等字符，
+GLYPH_HEADING_E = 0x1A               # _to_glyph 不可达，GLYPH 常量直出）
+GLYPH_HEADING_W = 0x1B
+GLYPH_HEADING_DIVIDED_LINE = 0x1C    # 航向带长刻度（逢 90° 方位中点）
+GLYPH_HEADING_LINE = 0x1D            # 航向带短刻度
+GLYPH_LAT = 0x89                     # 纬度前导图标（SYM_LAT，GPS_LAT 消费）
+GLYPH_LON = 0x98                     # 经度前导图标（SYM_LON，GPS_LON 消费）
+
+# 固件 COMPASS_BAR 环形刻度表（osd_elements.c L212-227 compassBar 逐项）：
+# 24 格 = 360°/15°，每 6 格（90°）一方位字母、间排 短-长-短 刻度；窗口
+# 起点按 heading16 离散（0..15），k+8 ≤ 23 恒在表内（固件 memcpy 同款）
+_COMPASS_BAR = (
+    GLYPH_HEADING_W,
+    GLYPH_HEADING_LINE, GLYPH_HEADING_DIVIDED_LINE, GLYPH_HEADING_LINE,
+    GLYPH_HEADING_N,
+    GLYPH_HEADING_LINE, GLYPH_HEADING_DIVIDED_LINE, GLYPH_HEADING_LINE,
+    GLYPH_HEADING_E,
+    GLYPH_HEADING_LINE, GLYPH_HEADING_DIVIDED_LINE, GLYPH_HEADING_LINE,
+    GLYPH_HEADING_S,
+    GLYPH_HEADING_LINE, GLYPH_HEADING_DIVIDED_LINE, GLYPH_HEADING_LINE,
+    GLYPH_HEADING_W,
+    GLYPH_HEADING_LINE, GLYPH_HEADING_DIVIDED_LINE, GLYPH_HEADING_LINE,
+    GLYPH_HEADING_N,
+    GLYPH_HEADING_LINE, GLYPH_HEADING_DIVIDED_LINE, GLYPH_HEADING_LINE,
+)
 
 # 固件侧边栏几何（osd_elements.c AH_SIDEBAR_WIDTH_POS/HEIGHT_POS）：
 # 锚点 ±7 列竖轨、锚点行 ±3 共 7 行，水平箭头在 ±(7-1) 列
@@ -333,7 +376,9 @@ def compose_state(params, flight, preset_id, now_s) -> dict:
     缺键→两元素不渲染）、arming_blocked（实时解锁被拒条件，WARNINGS
     消费——闩锁 arm_denied 键保留但渲染侧不再消费）。Task 54 增
     flip_latched（反乌龟解锁锁存，FLIP_ARROW 门控消费——与实时 boxes
-    分离：锁存会话中途关开关箭头不消失）。
+    分离：锁存会话中途关开关箭头不消失）。Task 55 增 home_bearing_deg
+    （机→home 罗盘角 int 度，HOME_DIR 消费；None=从未解锁哨兵——与
+    dist_home_m 的 0 缺省不同，None 区分「无 home 点」与「在 home 上」）。
     """
     f = flight or {}
     return {
@@ -349,6 +394,7 @@ def compose_state(params, flight, preset_id, now_s) -> dict:
         "alt_m": f.get("alt_m", 0.0),
         "dist_home_m": f.get("dist_home_m", 0),      # Task 47：无起飞点/
         "dist_flown_m": f.get("dist_flown_m", 0),    # 从未解锁 → 0（显示 0m）
+        "home_bearing_deg": f.get("home_bearing_deg"),  # Task 55：None=从未解锁
         "vario_mps": f.get("vario_mps", 0.0),
         "attitude_deg": f.get("attitude_deg") or (0.0, 0.0, 0.0),
         "flight_time_s": f.get("flight_time_s", 0.0),
@@ -394,6 +440,8 @@ def build_frame(state: dict) -> dict:
     alt_m = state.get("alt_m", 0.0)
     dist_home = state.get("dist_home_m")     # None=缺键（裸 state 防御）→ 不画
     dist_flown = state.get("dist_flown_m")
+    home_bearing = state.get("home_bearing_deg")   # Task 55：None=从未解锁
+                                                   # （HOME_DIR '-' 哨兵）
     vario_mps = state.get("vario_mps", 0.0)
     att = state.get("attitude_deg") or (0.0, 0.0, 0.0)
     flight_time_s = max(0.0, state.get("flight_time_s", 0.0))
@@ -514,6 +562,10 @@ def build_frame(state: dict) -> dict:
             # 图标对+%2d；模拟器连 GPS 设备都无，只显示数值）
         elif elem_id == 15:       # ALTITUDE
             put_text(f"{alt_m:.0f}M", col, row)
+        elif elem_id == 19:       # POWER（Task 55）：固件 osdElementPower
+            put_text("   0W", col, row)   # "%4dW"（电流 cA×电压 cV/10000=瓦），
+            # 无电流计量模型 → 诚实零值（CURRENT_DRAW/WATT_HOURS 同语义，
+            # 公式注明防有电流域后误当占位遗留）
         elif elem_id == 21:       # WARNINGS（Task 49；Task 52 改实时条件）：
             # 有数据源的警告子集——ARMING DISABLED。原读 fc.arm_denied_once
             # 闩锁在放弃解锁后仍持续闪烁；固件 renderOsdWarning（osd_
@@ -532,6 +584,20 @@ def build_frame(state: dict) -> dict:
                 put(col, row, _battery_glyph(voltage_v, cells))  # AverageCell-
                 put_text(text, col + 1, row)               # Voltage）
                 put(col + 1 + len(text), row, GLYPH_VOLT)
+        elif elem_id in (23, 24):  # GPS_LON/GPS_LAT（Task 55）：逐字照抄固件
+            # 无 fix 输出——osdFormatCoordinate 在 GPS_FIX_EVER 不满足时
+            # gpsValue 恒 0，TYPE_1 默认变体输出 前导图标 + "%u.%07u" %
+            # (0, 0) = "0.0000000"（图标 SYM_LON=0x98/SYM_LAT=0x89）。
+            # 模拟器无 GPS 域（连接 GPS 设备都没有）→ 与真机「有 GPS 但
+            # 未定位」的上电初期画面一致（固件不渲染空而是显式 0 串）
+            glyph = GLYPH_LON if elem_id == 23 else GLYPH_LAT
+            put(col, row, glyph)
+            put_text("0.0000000", col + 1, row)
+        elif elem_id == 25:       # DEBUG（Task 55）：固件 osdElementDebug
+            put_text("DBG     0     0     0     0", col, row)
+            # "DBG %5d %5d %5d %5d"（debug[0..3]，27 字符）；仿真无
+            # debug 域（黑盒调试通道）→ 四零占位（诚实零值——真机四零
+            # 亦常见：debug_mode 未启用时 debug[] 恒 0）
         elif elem_id == 26:       # PITCH_ANGLE（att[1]）
             put_text(f"P{att[1]:+.0f}", col, row)
         elif elem_id == 27:       # ROLL_ANGLE（att[0]）
@@ -539,6 +605,30 @@ def build_frame(state: dict) -> dict:
         elif elem_id == 29:       # DISARMED（armed 或相位关 → 整元素不画）
             if not armed and int(now_s * 2) % 2 == 0:
                 put_text("DISARMED", col, row, blink=True)
+        elif elem_id == 30:       # HOME_DIR（Task 55）：固件 osdElementGps
+            # HomeDirection 三分支逐条对齐——① 无 home（STATE(GPS_FIX_
+            # HOME) 不满足）→ SYM_HYPHEN(0x2D，ASCII '-' 同码位)单字符；
+            # 仿真映射 home_bearing None=从未解锁（与 dist_home_m 缺省 0
+            # 不同键——0 会误判成「在 home 上」）。② 有 home 且
+            # distanceToHome==0 → SYM_OVER_HOME(0x05)。③ >0 → 箭头 =
+            # osdGetDirectionSymbolFromHeading(GPS_directionToHome − yaw)。
+            # directionToHome 为机→home 正向量罗盘角（gps.c GPS_distance_
+            # cm_bearing：bearing = 90° − atan2(dLat, dLon)，0=北、顺时针
+            # ——箭头指向 home 所在方位）。heading 符号链同 NUMERICAL_
+            # HEADING（heading = -att[2]，att[2] 正=机头左转）；固件变换
+            # k=discrete16(diff) 后 glyph = 0x60 + ((16-k+8)%16) = 0x60 +
+            # ((8-k)%16)（SOUTH 起顺时针族，十六方位字形 0x60-0x6F 位图
+            # 实测齐备——四主方向经旋转矩阵验证、斜向经镜像配对验证）
+            if home_bearing is None:
+                put(col, row, ord("-"))
+            elif dist_home is None:   # 缺键防御（HOME_DIST 惯例）：不画
+                pass
+            elif not dist_home:
+                put(col, row, GLYPH_OVER_HOME)
+            else:
+                diff = (int(home_bearing) - int(round(-att[2]))) % 360
+                k = (diff * 16 + 180) // 360 % 16
+                put(col, row, GLYPH_ARROW_SOUTH + (8 - k) % 16)
         elif elem_id == 31:       # HOME_DIST（Task 47）：到起飞点水平距离
             if dist_home is not None:   # int 米+'m'（小写映射大写字形）；
                 put_text(f"{int(dist_home)}m", col, row)  # 缺键跳过不抛
@@ -563,6 +653,17 @@ def build_frame(state: dict) -> dict:
             put(col, row, arrow)
             put_text(text, col + 1, row)
             put(col + 1 + len(text), row, GLYPH_MPS)
+        elif elem_id == 34:       # COMPASS_BAR（Task 55）：固件 osdElement
+            # CompassBar——memcpy(compassBar + heading16, 9) 环形窗口：
+            # 24 格表（W 起每 90° 一方位字母、间排 短-长-短 刻度）按
+            # heading16 = osdGetHeadingIntoDiscreteDirections(heading, 16)
+            # （半扇区偏置 (h*16+180)//360）取 9 格窗口，机头方位居中第
+            # 5 格（无中心指针——固件即无）。heading 符号链同 30/32 分支
+            # （heading = -att[2] 归一 0..359）；k∈0..15、k+8≤23 恒在
+            # 表内（_COMPASS_BAR 注释）
+            k = (int(round(-att[2])) % 360 * 16 + 180) // 360 % 16
+            for i, glyph in enumerate(_COMPASS_BAR[k:k + 9]):
+                put(col + i, row, glyph)
         elif elem_id == 38:       # RTC_DATETIME（Task 49）：rtc_text 由飞行
             if rtc_text:          # 层快照格式化传入（SET_RTC(246) 存 unix
                 put_text(rtc_text, col, row)  # 秒 → "%Y-%m-%d %H:%M:%S"

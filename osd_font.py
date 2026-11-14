@@ -74,6 +74,10 @@ GLYPH_BATT_EMPTY = 0x96            # 0x90-0x96 白段自下而上递减，分段
                                    # osdGetBatterySymbol 按平均芯压选取）
 GLYPH_MAIN_BATT = 0x97             # 电池告警图标（BATTERY_CRITICAL 用）
 GLYPH_MPS = 0x9F                   # m/s 单位字形（SYM_MPS，公制 vario 尾缀）
+GLYPH_OVER_HOME = 0x05             # 「在 home 点上」图标（SYM_OVER_HOME，
+                                     # Task 55 HOME_DIR 距离 0 分支；0x89/0x98
+GLYPH_LAT = 0x89                   # 为 GPS 坐标前导图标 SYM_LAT/SYM_LON——
+GLYPH_LON = 0x98                   # 三码位均经位图实测非空）
 
 # ---- 解析段（纯标准库） ----
 
