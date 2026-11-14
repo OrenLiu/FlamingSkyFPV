@@ -404,9 +404,15 @@ def build_frame(state: dict) -> dict:
             # round(roll_deg·x/60)——右滚（roll 正）→ 线右端上翘、左端
             # 下沉（固件 y = -roll·x/64 - pitch_scaled，rollAngle 单位
             # 0.1°：x=+4、45° 时右端上移 28 子格 ≈ 3 字符行；/60 为同构
-            # 比例约定，45° 两端各偏 3 行与固件一致）。基准行 = 锚点行 -
-            # round(pitch/10) 钳 ±5（Task 49 修复符号链：att[1] 为 bullet
-            # 语义 world.euler_deg 的 pitch——正=低头（=BF 惯例，固件
+            # 比例约定，45° 两端各偏 3 行与固件一致）。基准行 = 锚点行+4+
+            # 钳(-round(pitch/10), ±4)（Task 51 修锚点偏移：OSD 元素锚点=
+            # 元素区顶格，固件 osdElementArtificialHorizon 水平姿态 y=41 →
+            # 行偏 y/9=4、Configurator osd.ts preview 中线 j=4，双源一致——
+            # 水平中线画在锚点下方 4 行，原实现画在锚点行本身致飞行中线
+            # 比用户在 OSD tab 摆放的预期高 4 行；pitch 钳位由 ±5 收紧 ±4，
+            # 保证基准行恒落锚点起 9 行区界 [锚点+0, 锚点+8]（与固件区高
+            # 一致）。Task 49 修复符号链：att[1] 为 bullet 语义
+            # world.euler_deg 的 pitch——正=低头（=BF 惯例，固件
             # imu.c "negative is backwards"；euler_stick_deg 翻 y 的反义）；
             # 固件 AH 中 pitch 正（低头）→ 地平线线上移（行号减小）、
             # pitch 负（抬头）→ 线下移，与固件及 Configurator 姿态仪一致
@@ -414,9 +420,9 @@ def build_frame(state: dict) -> dict:
             # 字符网格简化仍用 '-'（侧倾主体表达由本元素阶梯承担，
             # HORIZON_SIDEBARS(4) 竖轨+水平箭头辅助）；逐格行号出界跳过
             # （put 越界忽略 = 文件头稀疏字形规则）
-            drow = min(5, max(-5, -round(att[1] / 10.0)))
+            drow = min(4, max(-4, -round(att[1] / 10.0)))
             for x in range(-4, 5):
-                put(col + x, row + drow - round(att[0] * x / 60.0), ord("-"))
+                put(col + x, row + 4 + drow - round(att[0] * x / 60.0), ord("-"))
         elif elem_id == 4:        # HORIZON_SIDEBARS：固件静态背景——±7 列
             # 竖轨（锚点行 ±3）+ ±6 列 AH_LEFT/AH_RIGHT 水平指示箭头；
             # 与姿态无关（roll 平移指示属 ARTIFICIAL_HORIZON(3)，Task 47
