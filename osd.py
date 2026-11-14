@@ -207,12 +207,11 @@ _STICK_H = 5
 _STICK_SPRITE_H = 3
 _STICK_VPOS = 15
 
-# FLYMODE/FLIP_ARROW 消费的 box id（与 physics.drone.BOX_ANGLE/BOX_
-# HORIZON/BOX_FLIP_OVER_AFTER_CRASH 同源；本模块不 import physics，
-# 保持依赖方向单向）
+# FLYMODE 消费的 box id（与 physics.drone.BOX_ANGLE/BOX_HORIZON 同源；
+# 本模块不 import physics，保持依赖方向单向。FLIP_ARROW Task 54 起改门
+# 控 state["flip_latched"]（fc 解锁锁存）——box21 实时值不再被本模块消费）
 _BOX_ANGLE = 1
 _BOX_HORIZON = 2
-_BOX_FLIP = 21
 
 # ---- Task 49 新元素常量（零 import：三角值以字面量钉死并注明来源） ----
 _SINE_25_DEG = 0.422618261740699        # 固件 osd_elements.c SINE_25_DEG 同值
@@ -332,7 +331,9 @@ def compose_state(params, flight, preset_id, now_s) -> dict:
     Task 52 增三键：total_flights（virtual 累计飞行次数，TOTAL_FLIGHTS
     元素）、stick_us（原始 4 通道 µs，RC_CHANNELS/摇杆叠层消费；None=
     缺键→两元素不渲染）、arming_blocked（实时解锁被拒条件，WARNINGS
-    消费——闩锁 arm_denied 键保留但渲染侧不再消费）。
+    消费——闩锁 arm_denied 键保留但渲染侧不再消费）。Task 54 增
+    flip_latched（反乌龟解锁锁存，FLIP_ARROW 门控消费——与实时 boxes
+    分离：锁存会话中途关开关箭头不消失）。
     """
     f = flight or {}
     return {
@@ -340,6 +341,7 @@ def compose_state(params, flight, preset_id, now_s) -> dict:
         "enabled": params.virtual.osd_enabled,
         "armed": bool(f.get("armed", False)),
         "boxes": f.get("boxes") or frozenset(),
+        "flip_latched": bool(f.get("flip_latched", False)),
         "throttle": f.get("throttle", 0.0),
         "voltage_v": params.battery_voltage,
         "cells": params.virtual.cells,
@@ -383,6 +385,7 @@ def build_frame(state: dict) -> dict:
     layout = _int_keyed(state.get("layout"))
     enabled = _int_keyed(state.get("enabled"))
     boxes = state.get("boxes") or frozenset()
+    flip_latched = state.get("flip_latched", False)   # Task 54：反乌龟解锁锁存
     armed = bool(state.get("armed", False))
     throttle = state.get("throttle", 0.0)
     voltage_v = state.get("voltage_v", 0.0)
@@ -567,16 +570,19 @@ def build_frame(state: dict) -> dict:
             # "%04u-%02u-%02u %02u:%02u:%02u" 同式——本表不格式化只画
             # 文本）。0=未设置空串。osd 本体零 import 纪律——time 属
             # 调用方职责；缺键/空串不渲染不抛
-        elif elem_id == 45:       # FLIP_ARROW（Task 49）：反乌龟激活（box
-            # 21）时按杆向显示箭头，指示打杆翻转方向。固件
-            # osdElementCrashFlipArrow 以姿态主导轴选箭头（|pitch|>|roll|
-            # 纵/横 + 2:1 对角带专用斜箭头，另有未解锁倒置分支）；我们按
+        elif elem_id == 45:       # FLIP_ARROW（Task 49；Task 54 门控锁存
+            # 化）：反乌龟解锁锁存（fc.flip_over_latched——固件
+            # osdElementCrashFlipArrow L874 门控消费 isFlipOverAfterCrash
+            # Active() 锁存标志而非实时开关；锁存会话中途关开关箭头不
+            # 消失，与接管/桨反转接线同源一致）时按杆向显示箭头，指示打
+            # 杆翻转方向。固件以姿态主导轴选箭头（|pitch|>|roll| 纵/横
+            # + 2:1 对角带专用斜箭头，另有未解锁倒置提示分支）；我们按
             # 简报实现杆向版：主导轴判据同固件（|p|>|r| 纵向、否则横向；
             # 2:1 对角带归并主导轴），杆死区内不画（阈值同 drone.
             # CRASHFLIP_IDLE_MIN 源值）。杆义：roll 右正、pitch 拉杆正
             # （channels.py）→ 前推=NORTH 上箭头、拉杆=SOUTH 下、右=
             # EAST、左=WEST（osd_font 十六方位大箭头字形族 0x60-0x6F）
-            if _BOX_FLIP in boxes:
+            if flip_latched:
                 roll_s, pitch_s = stick_rp
                 if max(abs(roll_s), abs(pitch_s)) > _FLIP_STICK_EPS:
                     if abs(pitch_s) > abs(roll_s):
