@@ -5,7 +5,9 @@ osd_elements.c：电压/RSSI/vario 补图标字形，十字线锚点=左段，�
 固件竖轨+水平箭头；Task 47 补人工地平线/返航距离/飞行里程三元素；
 Task 49 修 AH 俯仰方向（bullet 语义 pitch 正=低头 → 线上移）并扩充
 11 元素：电流/电量/GPS 星数诚实零值、警告、数值航向、RTC 日期时间、
-反乌龟箭头、三 profile 名、天顶天底参考点）。
+反乌龟箭头、三 profile 名、天顶天底参考点；Task 52 批二：RC 通道/
+累计飞行次数/瓦时/AUX 值四数值元素 + 双摇杆叠层（字形经 .mcm 位图
+实测齐备）+ WARNINGS 改实时条件 + RTC 走时（快照侧））。
 
 仅纯数据表与无依赖纯函数，不 import 项目模块（依赖方向单向：
 msp/handlers 与 screens 可 import 本表；改动需保持无 GL/pygame/imgui——
@@ -51,26 +53,37 @@ OSD_IMPLEMENTED: dict[int, str] = {
     38: "RTC_DATETIME",
     45: "FLIP_ARROW",
     47: "FLIGHT_DIST",
+    48: "STICK_OVERLAY_LEFT",
+    49: "STICK_OVERLAY_RIGHT",
     52: "RATE_PROFILE_NAME",
     53: "PID_PROFILE_NAME",
     54: "PROFILE_NAME",
+    56: "RC_CHANNELS",
+    59: "TOTAL_FLIGHTS",
     60: "UP_DOWN_REFERENCE",
+    62: "WATT_HOURS_DRAWN",
+    63: "AUX_VALUE",
 }
 
-# Task 49 跳过清单（有据不实现；id 均经 osd_items_e 逐项数出核对）：
+# Task 49 跳过清单（有据不实现；id 均经 osd_items_e 逐项数出核对；
+# Task 52 批二移出并实装：STICK_OVERLAY_LEFT/RIGHT(48/49)——字形经
+# assets/osd_betaflight.mcm 位图实测齐备（0x0B/0x16/0x17/0x08-0x0A，
+# 对照固件 drivers/osd_symbols.h 同码位，见 GLYPH_STICK_* 注释）；
+# RC_CHANNELS(56)/TOTAL_FLIGHTS(59)/WATT_HOURS_DRAWN(62)/AUX_VALUE(63)
+# ——数值元素，真值/诚实零值均有落点）：
 # - G_FORCE(42)：world 无加速度输出——RAW_IMU(102) 的 acc 为静态常量
 #   (0,0,2048)=1g 占位非真实数据，不许编造，待物理域有 acc 再接入
 # - 字形依赖（不可 ASCII 化）：VTX_CHANNEL(10)、COMPASS_BAR(34)、
-#   STICK_OVERLAY_LEFT/RIGHT(48/49)、CAMERA_FRAME(57)
+#   CAMERA_FRAME(57)
 # - 无容量/电流模型（诚实零值原则不够——依赖容量积分）：MAIN_BATT_
-#   USAGE(28)、REMAINING_TIME_ESTIMATE(37)、EFFICIENCY(58)、WATT_HOURS(62)
+#   USAGE(28)、REMAINING_TIME_ESTIMATE(37)、EFFICIENCY(58)
 # - 无 GPS 域：GPS_LON/LAT(23/24)、HOME_DIR(30)
 # - 无对应仿真域/简报未列：ROLL/PITCH/YAW_PIDS(16-18)、POWER(19)、
 #   PIDRATE_PROFILE(20)、DEBUG(25)、ESC_TMP/RPM/RPM_FREQ(35/36/51)、
 #   ADJUSTMENT_RANGE(39)、CORE_TEMPERATURE(40)、ANTI_GRAVITY(41)、
 #   MOTOR_DIAG(43)、LOG_STATUS(44)、LINK_QUALITY(46)、PILOT_NAME(50)、
-#   RSSI_DBM(55)、RC_CHANNELS(56)、TOTAL_FLIGHTS(59)、TX_UPLINK_POWER(61)、
-#   AUX_VALUE(63)、READY_MODE(64)、RSNR(65)、SYS_*(66-76)、GPS_LAP_*(77-79)
+#   RSSI_DBM(55)、TX_UPLINK_POWER(61)、READY_MODE(64)、RSNR(65)、
+#   SYS_*(66-76)、GPS_LAP_*(77-79)
 
 # 元素总数 = 固件 osd.h OSD_ITEM_COUNT（MSP_OSD_CONFIG 的 item_count 与
 # SET_OSD_CONFIG 元素 addr 上界）
@@ -111,10 +124,16 @@ DEFAULT_LAYOUT: dict[int, int] = {
     38: 0,     # RTC_DATETIME——Task 49 出厂未摆放（同 3 注释）
     45: 0,     # FLIP_ARROW——同上
     47: 0,     # FLIGHT_DIST——Task 47 出厂未摆放（同 3 注释）
+    48: 0,     # STICK_OVERLAY_LEFT——Task 52 出厂未摆放（同 3 注释）
+    49: 0,     # STICK_OVERLAY_RIGHT——同上
     52: 0,     # RATE_PROFILE_NAME——Task 49 出厂未摆放（同 3 注释）
     53: 0,     # PID_PROFILE_NAME——同上
     54: 0,     # PROFILE_NAME——同上
-    60: 0,     # UP_DOWN_REFERENCE——同上
+    56: 0,     # RC_CHANNELS——Task 52 出厂未摆放（同 3 注释）
+    59: 0,     # TOTAL_FLIGHTS——同上
+    60: 0,     # UP_DOWN_REFERENCE——Task 49 出厂未摆放（同 3 注释）
+    62: 0,     # WATT_HOURS_DRAWN——Task 52 出厂未摆放（同 3 注释）
+    63: 0,     # AUX_VALUE——同上
 }
 
 # 可见位掩码（osd_constants.ts VISIBLE=0x0800；固件单 OSD profile 的
@@ -163,11 +182,30 @@ GLYPH_BATT_FULL = 0x90               # 电池图标族·满格（SYM_BATT_FULL�
 GLYPH_BATT_EMPTY = 0x96              # 电池图标族·空（SYM_BATT_EMPTY；段数
                                      # = 0x96-图标，0..6 白段自下而上递增）
 GLYPH_MPS = 0x9F                     # m/s 单位字形（SYM_MPS，公制 vario 尾缀）
+GLYPH_STICK_SPRITE_HIGH = 0x08       # 摇杆叠层光标三片 sprite（SYM_STICK_
+                                     # OVERLAY_SPRITE_HIGH/MID/LOW=0x08/09/0A，
+GLYPH_STICK_SPRITE_MID = 0x09        # 固件 drivers/osd_symbols.h L157-159 同
+GLYPH_STICK_SPRITE_LOW = 0x0A        # 码；光标片号 = HIGH + cursorY%3）
+GLYPH_STICK_CENTER = 0x0B            # 叠层十字中心（SYM_STICK_OVERLAY_CENTER）
+GLYPH_STICK_VERTICAL = 0x16          # 叠层竖杆（SYM_STICK_OVERLAY_VERTICAL）
+GLYPH_STICK_HORIZONTAL = 0x17        # 叠层横杆（SYM_STICK_OVERLAY_HORIZONTAL）
+                                     # 以上五族字形经 assets/osd_betaflight.
+                                     # mcm 位图实测齐备（0x0B=十字、0x16=
+                                     # 竖线、0x17=横线、0x08-0x0A=上/中/
+                                     # 下三片光标点，'_' 0x5F 同款核对手法）
 
 # 固件侧边栏几何（osd_elements.c AH_SIDEBAR_WIDTH_POS/HEIGHT_POS）：
 # 锚点 ±7 列竖轨、锚点行 ±3 共 7 行，水平箭头在 ±(7-1) 列
 _AH_SIDEBAR_WIDTH_POS = 7
 _AH_SIDEBAR_HEIGHT_POS = 3
+
+# 固件摇杆叠层几何（osd_elements.c L181-184 OSD_STICK_OVERLAY_* 同值）：
+# 7×5 十字背景（竖杆在中央列、横杆在中央行、交叉格用十字中心字形），
+# 光标纵向 5 行 × 每行 3 片 sprite = 15 个子位（亚字形精度）
+_STICK_W = 7
+_STICK_H = 5
+_STICK_SPRITE_H = 3
+_STICK_VPOS = 15
 
 # FLYMODE/FLIP_ARROW 消费的 box id（与 physics.drone.BOX_ANGLE/BOX_
 # HORIZON/BOX_FLIP_OVER_AFTER_CRASH 同源；本模块不 import physics，
@@ -291,6 +329,10 @@ def compose_state(params, flight, preset_id, now_s) -> dict:
     （解锁拒绝闩锁）、rtc_text（SET_RTC 时间串，空=未设置）、stick_rp
     （归一杆量）、up_body（世界 +Z 机体坐标，None=无姿态数据→元素不渲染
     ——up_body 无诚实零值，(0,0,0) 会误判 UP_DOWN_REFERENCE 阈内）。
+    Task 52 增三键：total_flights（virtual 累计飞行次数，TOTAL_FLIGHTS
+    元素）、stick_us（原始 4 通道 µs，RC_CHANNELS/摇杆叠层消费；None=
+    缺键→两元素不渲染）、arming_blocked（实时解锁被拒条件，WARNINGS
+    消费——闩锁 arm_denied 键保留但渲染侧不再消费）。
     """
     f = flight or {}
     return {
@@ -314,6 +356,10 @@ def compose_state(params, flight, preset_id, now_s) -> dict:
         "rtc_text": f.get("rtc_text", ""),
         "stick_rp": _stick_rp(f.get("stick_us")),
         "up_body": f.get("up_body"),
+        "total_flights": getattr(getattr(params, "virtual", None),
+                                 "total_flights", 0),
+        "stick_us": f.get("stick_us"),
+        "arming_blocked": bool(f.get("arming_blocked", False)),
     }
 
 
@@ -350,10 +396,15 @@ def build_frame(state: dict) -> dict:
     flight_time_s = max(0.0, state.get("flight_time_s", 0.0))
     craft_name = state.get("craft_name", "")
     now_s = state.get("now_s", 0.0)
-    arm_denied = bool(state.get("arm_denied", False))
     rtc_text = state.get("rtc_text")         # None=缺键 → 不渲染（dist_home 惯例）
     stick_rp = state.get("stick_rp") or (0.0, 0.0)
     up_body = state.get("up_body")           # None=缺键/无姿态 → 不渲染
+    total_flights = state.get("total_flights", 0)
+    stick_us = state.get("stick_us")         # None=缺键 → RC_CHANNELS/叠层不渲染
+    arming_blocked = bool(state.get("arming_blocked", False))
+    # 注：state["arm_denied"]（Task 49 闩锁键，compose_state 恒填充）自
+    # Task 52 起 WARNINGS 改读实时 arming_blocked，不再消费——键保留供
+    # 快照层既有消费方（flight_snapshot 字段/单测）向后兼容
 
     frame = {}
 
@@ -460,13 +511,16 @@ def build_frame(state: dict) -> dict:
             # 图标对+%2d；模拟器连 GPS 设备都无，只显示数值）
         elif elem_id == 15:       # ALTITUDE
             put_text(f"{alt_m:.0f}M", col, row)
-        elif elem_id == 21:       # WARNINGS（Task 49）：有数据源的警告子集
-            # ——ARMING DISABLED（fc.arm_denied_once 闩锁：ARM 开关开且
-            # 油门过高被拒，成功解锁时复位），blink=True 2Hz 闪烁（与
-            # DISARMED 同相位源）。固件全量警告（osd_warnings.c：电池/
-            # FAILSAFE/CRASH FLIP/蜂鸣/温度/RSSI 等 19 项）无对应仿真域，
-            # 仅实现此一项
-            if arm_denied:
+        elif elem_id == 21:       # WARNINGS（Task 49；Task 52 改实时条件）：
+            # 有数据源的警告子集——ARMING DISABLED。原读 fc.arm_denied_once
+            # 闩锁在放弃解锁后仍持续闪烁；固件 renderOsdWarning（osd_
+            # warnings.c）按实时状态逐帧求值，故改读快照实时字段
+            # arming_blocked（ARM box 激活 ∧ 油门 ≥ ARM_THROTTLE_MAX ∧
+            # 未解锁，flight_snapshot 逐帧计算——drone.py 闩锁本体保留供
+            # UI 既有消费）。blink=True 2Hz 闪烁（与 DISARMED 同相位源）。
+            # 固件全量警告（osd_warnings.c：电池/FAILSAFE/CRASH FLIP/蜂鸣/
+            # 温度/RSSI 等 19 项）无对应仿真域，仅实现此一项
+            if arming_blocked:
                 put_text("ARMING DISABLED", col, row, blink=True)
         elif elem_id == 22:       # AVG_CELL_VOLTAGE：图标+2 位小数+V（cells
             if cells > 0:         # 非法则不画；数值段走 cV 整数整除路径
@@ -535,12 +589,67 @@ def build_frame(state: dict) -> dict:
         elif elem_id == 47:       # FLIGHT_DIST（Task 47）：本次解锁累计水平
             if dist_flown is not None:   # 里程（锁定后由 flight 层冻结）
                 put_text(f"{int(dist_flown)}m", col, row)
+        elif elem_id in (48, 49):  # STICK_OVERLAY_LEFT/RIGHT（Task 52）：
+            # 7×5 十字背景 + 杆位光标（固件 osdBackgroundStickOverlay/
+            # osdElementStickOverlay）。通道布局按 overlay_radio_mode（出厂
+            # 默认 2=美国手：左杆=油门/偏航、右杆=俯仰/横滚，radioModes 表
+            # osd_elements.c L204-209；模拟器无该 OSD 配置域也无持久化的
+            # 手型选择，固定按固件默认 Mode 2 布局）。光标纵向 15 子位（5
+            # 行×3 片 sprite）、横向 7 列，换算同固件 scaleRange 截断除。
+            # 油门例外：sim stick_us[3] 是 1500 中心 ±500 约定（MSP RC 线
+            # 上同款），固件 rcData[THROTTLE] 则为 1000-2000 单边——物理
+            # 油门杆零位在下端，故油门光标改由 state["throttle"]（0..1）
+            # 直接映射 1000+1000t（t=0=底行），其余三轴直读 µs。stick_us
+            # 缺键（裸 state）→ 整元素不渲染（up_body 惯例）
+            if stick_us is not None and len(stick_us) >= 4:
+                # 背景：中央列竖杆（跳过中央行）+ 央行横排（中央格十字）
+                mid_r = (_STICK_H - 1) // 2
+                for r2 in range(_STICK_H):
+                    if r2 != mid_r:
+                        put(col + (_STICK_W - 1) // 2, row + r2,
+                            GLYPH_STICK_VERTICAL)
+                for c2 in range(_STICK_W):
+                    put(col + c2, row + mid_r,
+                        GLYPH_STICK_CENTER if c2 == (_STICK_W - 1) // 2
+                        else GLYPH_STICK_HORIZONTAL)
+                # 光标（Mode 2：LEFT=油门/偏航、RIGHT=俯仰/横滚）——
+                # 后写覆盖背景同格（固件背景每帧重画、光标最后写同序）
+                if elem_id == 48:
+                    v_us = 1000.0 + 1000.0 * max(0.0, min(1.0, throttle))
+                    h_us = stick_us[2]
+                else:
+                    v_us = stick_us[1]
+                    h_us = stick_us[0]
+                cx = int((min(max(h_us, 1000.0), 1999.0) - 1000.0)
+                         * _STICK_W / 1000.0)
+                cy = _STICK_VPOS - 1 - int(
+                    (min(max(v_us, 1000.0), 1999.0) - 1000.0)
+                    * _STICK_VPOS / 1000.0)
+                put(col + cx, row + cy // _STICK_SPRITE_H,
+                    GLYPH_STICK_SPRITE_HIGH + cy % _STICK_SPRITE_H)
         elif elem_id == 52:       # RATE_PROFILE_NAME（Task 49）：固件
             put_text("RATE_1", col, row)  # osdElementRateProfileName 默认名
         elif elem_id == 53:       # "RATE_%u"（profileName 空 + index+1）；
             put_text("PID_1", col, row)   # PID_PROFILE_NAME 同款 "PID_%u"；
         elif elem_id == 54:       # PROFILE_NAME（OSD profile）"OSD_%u"——
             put_text("OSD_1", col, row)   # 模拟器单 profile 恒 1
+        elif elem_id == 56:       # RC_CHANNELS（Task 52）：4 主通道逐行
+            if stick_us is not None:   # %5d 右对齐（固件 osdElementRcChannels
+                for i, us in enumerate(stick_us[:4]):   # ：rcData 经
+                    # scaleRange(1000,2000,→-1000,1000)=2×µs−3000 整数刻度
+                    # （简报「µs−1500」标注系笔误——1500→0 两式同值，但
+                    # 2000→+1000 非 +500，以固件函数为准）、每通道一行纵向
+                    # 排列；固件 rcChannels[] 映射默认 -1 全不显示，模拟器
+                    # 无该配置域，固定显示 roll/pitch/yaw/throttle 四主通道
+                    # （行序=stick_us 序）。缺键 → 不渲染
+                    put_text(f"{int(round(us * 2.0 - 3000.0)):5d}",
+                             col, row + i)
+        elif elem_id == 59:       # TOTAL_FLIGHTS（Task 52）：固件
+            put_text(f"#{total_flights}", col, row)  # osdElementTotalFlights
+            # "#%d"（statsConfig()->stats_total_flights 持久统计；固件计数
+            # 时机 = 加锁沿且解锁时长 ≥ stats_min_armed_time_s——出厂
+            # STATS_OFF=-1 不计数，模拟器无 stats PG 配置域，按阈值 0 的
+            # 计数开启语义在 flight._track_flight_stats 解锁→加锁沿 +1）
         elif elem_id == 60:       # UP_DOWN_REFERENCE（Task 49）：天顶/天底
             # 参考点（固件 osdElementUpDownReference）。显示条件：世界 +Z
             # 单位向量在机体的 y/z 分量均 < sin25°（机头接近正上/正下
@@ -565,4 +674,12 @@ def build_frame(state: dict) -> dict:
                     put(col + round(psi_b * _UPDOWN_PSI_SCALE),
                         row + round(theta_b * _UPDOWN_THETA_SCALE),
                         ord(letter))
+        elif elem_id == 62:       # WATT_HOURS_DRAWN（Task 52）：无电流/容量
+            put_text(f"{0:3d}MWH", col, row)  # 模型 → 诚实零值（0Wh < 1 走
+            # 固件 osdElementWattHoursDrawn 毫瓦分支 "%3dMWH" = "  0MWH"
+            # 逐字对齐；CURRENT_DRAW/MAH_DRAWN 同语义零值）
+        elif elem_id == 63:       # AUX_VALUE（Task 52）：固件 "%c%d"（
+            put_text("A0", col, row)   # aux_symbol 出厂 'A'，osd.c PG 模板
+            # L411；数值段为 aux 通道缩放读数（osd.c L1271），模拟器无
+            # AUX 值域模型 → 诚实零值 A0
     return frame

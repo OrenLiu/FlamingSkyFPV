@@ -93,6 +93,7 @@ UI 依赖）与 config_store（数据层；EEPROM_WRITE 落盘消费其 DRONES_D
 save_preset——msp → config_store 方向允许，见设计依赖图）。
 """
 import struct
+import time
 from typing import Callable
 
 import osd
@@ -779,8 +780,11 @@ def _noop(payload: bytes, state: "dict | None" = None) -> bytes:
 
 
 def _set_rtc(payload: bytes, state: "dict | None" = None) -> bytes:
-    """MSP_SET_RTC(246)（Task 49）：u32 unix 秒 + u16 毫秒 →
-    virtual.rtc_unix_s = secs + millis/1000（0=未设置）。
+    """MSP_SET_RTC(246)（Task 49；Task 52 增走时锚点）：u32 unix 秒 + u16
+    毫秒 → virtual.rtc_unix_s = secs + millis/1000（0=未设置）+ 同帧记
+    virtual.rtc_recv_unix = time.time() 接收墙锚（OSD RTC_DATETIME 走时：
+    有效时间 = rtc_unix_s + (time.time() - rtc_recv_unix)，对应固件真实
+    走时 RTC）。
 
     载荷布局按 Configurator MSPHelper.ts L3126-3134 实读（push32(secs) +
     push16(millis)）；len<6 整体忽略。存/不存均空载荷 ack（保持原 _noop
@@ -794,6 +798,7 @@ def _set_rtc(payload: bytes, state: "dict | None" = None) -> bytes:
         return b""
     secs, millis = struct.unpack_from("<IH", payload)
     params.virtual.rtc_unix_s = secs + millis / 1000.0
+    params.virtual.rtc_recv_unix = time.time()
     return b""
 
 

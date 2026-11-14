@@ -94,6 +94,18 @@ class VirtualFCParams:
     # 为 "%Y-%m-%d %H:%M:%S" 全格式文本，固件同式）。additive 字段：旧
     # 预设缺键补默认 0.0，不升 schema（cells_auto 先例）
     rtc_unix_s: float = 0.0
+    # RTC 走时墙锚点（Task 52）：MSP_SET_RTC(246) 接收时刻的 time.time()
+    # 值，0=无锚点（Task 49 旧档——rtc_text 冻结在设置时刻的旧行为）。
+    # 有效 RTC 时间 = rtc_unix_s + (time.time() - rtc_recv_unix)，对应固件
+    # 真实走时 RTC（OSD 每秒刷新显示）。additive 字段同上不升 schema
+    rtc_recv_unix: float = 0.0
+    # 累计飞行次数（Task 52，OSD TOTAL_FLIGHTS）：固件 stats.c statsOnDisarm
+    # 语义——加锁沿且解锁时长 ≥ stats_min_armed_time_s 才 +1（出厂
+    # STATS_OFF=-1 不计数；pg/stats.c PG_RESET_TEMPLATE L33）。模拟器无
+    # stats PG 配置域，按阈值 0 的计数开启语义：每次解锁→加锁沿 +1
+    # （flight.py _track_flight_stats）。持久化走预设保存既有机制。
+    # additive 字段：旧预设缺键补默认 0，不升 schema
+    total_flights: int = 0
 
 def detect_cell_count(voltage_v: float) -> int:
     """按电池总电压自动识别电芯节数：int(V/4.30)+1 钳 [1,8]。

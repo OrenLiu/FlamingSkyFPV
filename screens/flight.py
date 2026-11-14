@@ -6,7 +6,8 @@ import pygame
 import soup3D
 from .base import Screen
 from input.joystick import JoystickInput
-from physics.drone import (BOX_FLIP_OVER_AFTER_CRASH, FlightController,
+from physics.drone import (ARM_THROTTLE_MAX, BOX_ARM,
+                           BOX_FLIP_OVER_AFTER_CRASH, FlightController,
                            eval_boxes)
 from physics.world import FlightWorld, bullet_to_render, compose_camera_quat
 from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
@@ -65,6 +66,10 @@ class FlightScreen(Screen):
         self._dist_flown_m = 0.0    # 本次解锁累计水平飞行里程
         self._dist_home_m = 0.0     # 当前到起飞点水平距离
         self._dist_armed_prev = False   # 距离跟踪的上一帧解锁态（上升沿检测）
+        # 飞行统计（Task 52，OSD TOTAL_FLIGHTS 数据源）：解锁时段起止锚点
+        # 与上升/下降沿检测（固件 stats.c statsOnArm/statsOnDisarm 语义）
+        self._arm_start_s = None        # 本次解锁起始 _flight_time_s（None=未解锁）
+        self._stats_armed_prev = False  # 统计跟踪的上一帧解锁态（沿检测）
         self._aux_us = []           # 本帧 AUX µs 缓存（快照消费；非 virtual_fc 恒空）
         self._boxes = frozenset()   # 本帧激活模式 box 缓存（同上）
         # OSD 图集（Task 28）：脏标记在帧边界（update 顶部，imgui 帧外）烘焙——
@@ -263,13 +268,22 @@ class FlightScreen(Screen):
         低头正 / yaw 机头左转正——杆义 euler_stick_deg 翻转 y/z 两轴，
         Task 49 更正原「pitch抬头/yaw右」误标），非杆义；vario_mps 取
         velocity[2]（正=上升）。Task 49 增三字段：arm_denied=fc.
-        arm_denied_once 闩锁（OSD WARNINGS）；rtc_text=params.virtual.
+        arm_denied_once 闩锁（Task 52 起 OSD WARNINGS 改读实时
+        arming_blocked，本键保留向后兼容）；rtc_text=params.virtual.
         rtc_unix_s（SET_RTC 246 存储）的 "%Y-%m-%d %H:%M:%S" 全格式化
         （0=未设置空串，OSD RTC_DATETIME——osd.py 零 import 纪律，
-        时间换算在本层）；
+        时间换算在本层）。Task 52 走时模型：MSP_SET_RTC 同帧记
+        rtc_recv_unix 墙锚（handlers 246），有效时间 = rtc_unix_s +
+        (time.time() − rtc_recv_unix)——对应固件真实走时 RTC（上电校时
+        后自由运行，OSD 每秒刷新）；无锚点（Task 49 旧档/旧预设缺键）
+        维持冻结显示旧行为；
         up_body=世界 +Z（上）单位向量在机体系坐标 (x,y,z)（euler_deg 推导：
         x=-sin(pitch)、y=sin(roll)cos(pitch)、z=cos(roll)cos(pitch)，与
-        yaw 无关；OSD UP_DOWN_REFERENCE 天顶/天底参考点消费）。"""
+        yaw 无关；OSD UP_DOWN_REFERENCE 天顶/天底参考点消费）。
+        Task 52 增 arming_blocked=实时解锁被拒条件（ARM box 激活 ∧ 油门
+        ≥ ARM_THROTTLE_MAX ∧ 未解锁，逐帧计算——与 drone.py 置
+        arm_denied_once 的条件同式但非闩锁；OSD WARNINGS 消费，对应固件
+        renderOsdWarning 按实时 armingDisableFlags 渲染的语义）。"""
         if (self.stage != "flying" or self._paused
                 or self._world is None or self._fc is None):
             return None
@@ -280,8 +294,12 @@ class FlightScreen(Screen):
         att = self._world.euler_deg
         roll_r, pitch_r = math.radians(att[0]), math.radians(att[1])
         # rtc 防御链：单测 fake app（SimpleNamespace）常缺 drone_params
-        params = getattr(self.app, "drone_params", None)
-        rtc = getattr(getattr(params, "virtual", None), "rtc_unix_s", 0.0)
+        virt = getattr(getattr(self.app, "drone_params", None),
+                       "virtual", None)
+        rtc = getattr(virt, "rtc_unix_s", 0.0)
+        recv = getattr(virt, "rtc_recv_unix", 0.0)
+        if rtc > 0 and recv > 0:
+            rtc += time.time() - recv       # 走时：设置时刻 + 流逝墙钟
         return {
             "armed": self._fc.armed,
             "boxes": self._boxes,
@@ -300,6 +318,9 @@ class FlightScreen(Screen):
             "vario_mps": v[2],
             "flight_time_s": self._flight_time_s,
             "arm_denied": bool(getattr(self._fc, "arm_denied_once", False)),
+            "arming_blocked": (not self._fc.armed
+                               and BOX_ARM in (self._boxes or frozenset())
+                               and ch.throttle >= ARM_THROTTLE_MAX),
             "rtc_text": (time.strftime("%Y-%m-%d %H:%M:%S",
                                        time.localtime(rtc))
                          if rtc > 0 else ""),
@@ -327,6 +348,28 @@ class FlightScreen(Screen):
             self._dist_home_m = math.hypot(cur[0] - self._home_xy[0],
                                            cur[1] - self._home_xy[1])
         self._dist_armed_prev = armed
+
+    def _track_flight_stats(self, armed: bool) -> None:
+        """OSD TOTAL_FLIGHTS 计数（Task 52，update 帧尾调用）：固件
+        stats.c statsOnDisarm 语义——解锁时长 ≥ stats_min_armed_time_s 才
+        stats_total_flights += 1（出厂 STATS_OFF=-1 不计数，pg/stats.c
+        PG_RESET_TEMPLATE L33；模拟器无 stats PG 配置域，按阈值 0 的计数
+        开启语义实现：每次解锁→加锁沿 +1，时长基准 _flight_time_s——
+        暂停不累计的飞行页时钟，与固件 millis() 差值口径同构）。
+        virtual.total_flights 就地递增（params 对象上 additive 字段），
+        持久化走既有预设保存机制（EEPROM_WRITE/参数页落盘）。防御链：
+        fake app 缺 drone_params（SimpleNamespace 桩）时静默跳过。"""
+        if armed and not self._stats_armed_prev:
+            self._arm_start_s = self._flight_time_s   # 解锁沿：记时段起点
+        elif (not armed and self._stats_armed_prev
+                and self._arm_start_s is not None):
+            # 加锁沿：固件按整秒下取整比对阈值；阈值 0 下任意时长均计数
+            virt = getattr(getattr(self.app, "drone_params", None),
+                           "virtual", None)
+            if virt is not None:
+                virt.total_flights = getattr(virt, "total_flights", 0) + 1
+            self._arm_start_s = None
+        self._stats_armed_prev = armed
 
     def update(self, dt: float):
         if self._osd_atlas_dirty:
@@ -386,6 +429,8 @@ class FlightScreen(Screen):
         # OSD 距离状态（Task 47）：world.step 后位置已就绪，armed 为 fc.update
         # 后的本帧值——解锁沿/累计/冻结判定见 _track_flight_distance
         self._track_flight_distance(self._world.pos, self._fc.armed)
+        # 飞行统计（Task 52）：同帧沿检测——解锁→加锁沿 total_flights +1
+        self._track_flight_stats(self._fc.armed)
         # 相机同步：位姿 + 机头对齐 + 摄像头仰角合成（纯函数在 physics.world）
         cam = compose_camera_quat(self._world.quat,
                                   self.app.drone_params.camera_angle_deg)
