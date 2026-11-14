@@ -141,13 +141,17 @@ class VfcServer:
 
     # ---- 启停 ----
 
-    def start(self, port: int = 5761) -> None:
+    def start(self, port: int = 5761, ws_port: int | None = None) -> None:
         """三传输开启（TCP+PTY+WS）：TCP 失败（端口占用）抛 OSError；
-        PTY/WS 失败降级（stderr 提示，仅其余传输可用，避免半启动态异常）"""
+        PTY/WS 失败降级（stderr 提示，仅其余传输可用，避免半启动态异常）。
+        ws_port：None=默认 5762（浏览器版 WS 约定端口，App 侧不传即此）；
+        0=内核分配（与 TCP port=0 同语义——测试端口隔离用，避免运行中
+        的模拟器实例占用 5762 造成假失败；绑定失败降级路径两分支同构）"""
         self.start_tcp(port)
         self.start_pty()
         try:
-            self.start_websocket()
+            self.start_websocket(_WS_PORT_DEFAULT if ws_port is None
+                                 else ws_port)
         except OSError as e:
             log.info("WebSocket 启动失败，仅 TCP/PTY 接入：%s", e)
 

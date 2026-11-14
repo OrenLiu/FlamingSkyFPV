@@ -208,6 +208,9 @@ GLYPH_STICK_HORIZONTAL = 0x17        # 叠层横杆（SYM_STICK_OVERLAY_HORIZONT
                                      # 竖线、0x17=横线、0x08-0x0A=上/中/
                                      # 下三片光标点，'_' 0x5F 同款核对手法）
 # ---- Task 55 批三字形（4.5.1 osd_symbols.h 同码位，位图实测齐备） ----
+# OVER_HOME/LAT/LON 为内容生成专用（渲染侧不直接消费），单源于本模块
+# 声明——osd_font 不重复定义（Task 52 GLYPH_STICK_* 族先例）；HEADING
+# 族两模块共享（osd_font 侧有具名历史声明），同值锁定测试防漂移
 GLYPH_OVER_HOME = 0x05               # 「在 home 点上」图标（SYM_OVER_HOME，
                                      # osdElementGpsHomeDirection 距离 0 分支）
 GLYPH_HEADING_N = 0x18               # 航向带方位字母（SYM_HEADING_N/S/E/W，
