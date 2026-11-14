@@ -12,14 +12,6 @@ DRAG_K = 1.2
 ANG_DAMP = 0.01      # 角阻尼 N·m·s（桨气动阻尼，防 PID 振荡；与线性阻力是两回事，
                      # 作用对象是角速度、维持 rate 跟踪稳定，不做用户可调）
 REACT_K = 0.02       # 桨反扭矩系数 N·m/N（5寸桨动量理论悬停 Q/T≈0.013，取整偏稳）
-# 机-地接触摩擦（Task 50）：bullet 默认 lateralFriction=0.5。无人机碰撞体是
-# ARM×ARM 大薄板盒，倒扣时板面与无限地面大面积贴合，默认摩擦的切向约束会把
-# 反乌龟翻转扭矩完全吃掉（倒扣从起翻不动、水平翻到 180° 板面贴地同因卡死——
-# 用户三轮复测主诉；真机能翻靠细机架+桨尖小面积打地滑动）→ crashflip 激活帧
-# 动态切换到低摩擦（等效桨尖打地）。0.05 为 headless 探针标定值（见
-# test_crashflip_physics.py 场景 A/B），默认值显式设置保证恢复值确定
-DEFAULT_FRICTION = 0.5
-GROUND_GRAB_FRICTION = 0.05
 
 # 电机臂位置（机体系：+X 前 / +Y 左 / +Z 上），顺序 [FL, FR, BL, BR]
 ARMS = [(ARM, ARM, 0), (ARM, -ARM, 0), (-ARM, ARM, 0), (-ARM, -ARM, 0)]
@@ -88,12 +80,11 @@ class FlightWorld:
         # 标定实测：bullet 默认 linearDamping/angularDamping=0.04 是隐藏阻尼（零外力
         # 20m/s 滑行 0.5s 衰减至 14m/s，不在 getDynamicsInfo 返回中），使 DRAG_K 失真
         # ~23% → 显式清零，线性/角阻尼全部由下方 DRAG_K/ANG_DAMP 显式承担
-        # lateralFriction 同步显式设置（Task 50）：bullet 默认 0.5，显式化保证
-        # set_ground_grab 恢复值确定；_friction 跟踪当前值供幂等切换
         p.changeDynamics(self._body, -1, linearDamping=0.0, angularDamping=0.0,
-                         lateralFriction=DEFAULT_FRICTION,
                          physicsClientId=self._cid)
-        self._friction = DEFAULT_FRICTION
+        # 桨反转标志（Task 50 v4）：False=正常飞行（推力沿机体 +Z）；True=反乌龟
+        # 双向 DShot 桨反转（推力沿机体 −Z，见 set_prop_reverse）——逐帧由接线层设置
+        self._prop_reverse = False
 
     def load_scene_mesh(self, obj_path: str, scale: float = 1.0):
         """场景 OBJ → 静态三角网格碰撞体（mass=0 → BVH 三角网格）"""
@@ -114,7 +105,10 @@ class FlightWorld:
         固定 1/240，不随 dt 变化，模拟时间会与真实时间脱钩）。
         线性空气阻力 N = drag_k × v（drag_k 单位 N·s/m，来源 self._params.drag_k，
         默认 1.2 = T13 标定值，用户可在参数页按机型调整）；角阻尼 ANG_DAMP 与线性
-        阻力是两回事（作用角速度、保 rate 跟踪稳定），不可调"""
+        阻力是两回事（作用角速度、保 rate 跟踪稳定），不可调。
+        桨反转（Task 50 v4）：set_prop_reverse(True) 时推力与桨反扭矩整体取反
+        （双向 DShot 反乌龟——推力沿机体 −Z）。实现为 sign 乘子（±1.0），
+        False 路径 1.0×x 与原实现 IEEE 逐位一致，零行为改动"""
         h = dt / SUBSTEPS
         drag_k = self._params.drag_k
         # setTimeStep 只在步长变化时设置（原每子步重复调用 PyBullet 包装，
@@ -122,6 +116,7 @@ class FlightWorld:
         if h != self._last_step_h:
             p.setTimeStep(h, physicsClientId=self._cid)
             self._last_step_h = h
+        sign = -1.0 if self._prop_reverse else 1.0   # 桨反转：推力/反扭矩取反
         for _ in range(SUBSTEPS):
             pos, quat = p.getBasePositionAndOrientation(
                 self._body, physicsClientId=self._cid)
@@ -129,11 +124,12 @@ class FlightWorld:
             up = rot * glm.vec3(0, 0, 1)                        # 机体 +Z 世界方向
             for arm, thrust, spin in zip(ARMS, motor_thrusts_N, PROP_SPIN):
                 world_pos = pos + rot * glm.vec3(*arm)          # 臂位置世界坐标
-                force = (up.x * thrust, up.y * thrust, up.z * thrust)
+                force = (sign * up.x * thrust, sign * up.y * thrust,
+                         sign * up.z * thrust)
                 p.applyExternalForce(self._body, -1, force,
                                      (world_pos.x, world_pos.y, world_pos.z),
                                      p.WORLD_FRAME, physicsClientId=self._cid)
-                tq = -spin * REACT_K * thrust                   # 桨反扭矩（机体 Z 向）
+                tq = -sign * spin * REACT_K * thrust            # 桨反扭矩（机体 Z 向）
                 p.applyExternalTorque(self._body, -1,
                                       (up.x * tq, up.y * tq, up.z * tq),
                                       p.WORLD_FRAME, physicsClientId=self._cid)
@@ -189,36 +185,26 @@ class FlightWorld:
         wb = inv * glm.vec3(*av)                  # 世界系→体系
         return (math.degrees(wb.x), -math.degrees(wb.y), -math.degrees(wb.z))
 
-    def set_ground_grab(self, active: bool) -> None:
-        """反乌龟接触摩擦切换（Task 50）：active=True 把机-地接触摩擦降到
-        GROUND_GRAB_FRICTION（等效真机桨尖小面积打地滑动——大薄板盒默认
-        摩擦的切向约束会吃掉翻转扭矩，倒扣大面积贴合时尤甚），False 恢复
-        默认 0.5。幂等：值未变化不调 bullet（防逐帧冗余 C 包装调用，同
-        step() 的 setTimeStep 惯例）。physics 层不感知调用方语义
-        （crashflip box/解锁态由 flight.py 裁定），只收 bool"""
-        target = GROUND_GRAB_FRICTION if active else DEFAULT_FRICTION
-        if target == self._friction:
-            return
-        p.changeDynamics(self._body, -1, lateralFriction=target,
-                         physicsClientId=self._cid)
-        self._friction = target
-
-    @property
-    def friction(self) -> float:
-        """当前接触摩擦系数（getDynamicsInfo 直读 bullet 权威值，非缓存——
-        测试断言/调试用）"""
-        return p.getDynamicsInfo(self._body, -1,
-                                 physicsClientId=self._cid)[1]
+    def set_prop_reverse(self, active: bool) -> None:
+        """桨反转标志设置（Task 50 v4，双向 DShot 反乌龟）：active=True 时
+        step() 的电机推力沿机体 −Z（桨反向旋转 → 推力向量取反）、桨反扭矩
+        同步取反。真机出处：Betaflight 反乌龟靠双向 DShot 反转螺旋桨——倒扣
+        时被驱动侧推力从「压向地面」变为「抬离地面」，翻面几何难题消解
+        （用户实机经验裁定）。physics 层不感知调用方语义（crashflip box/
+        解锁态由 flight.py 裁定），只收 bool；非激活路径经 IEEE 乘 1.0
+        与原实现逐位一致（见 step 注释）"""
+        self._prop_reverse = bool(active)
 
     def reset(self, spawn=(0, 0, 2), quat=(0, 0, 0, 1)):
         """重置：回出生点、指定姿态（quat 为 bullet (x,y,z,w)，默认水平；
-        倒扣注入等测试/复位场景用）、速度清零。接触摩擦一并回默认
-        （Task 50）：重置=全新起手，防低摩擦跨重置残留"""
+        倒扣姿态注入等测试/复位场景用）、速度清零。桨反转标志一并回
+        False（Task 50 v4 裁定复位点：重置=全新起手，防反转态跨重置残留；
+        正常路径接线层每帧 step 前都会重设，此处防御性兜底）"""
         p.resetBasePositionAndOrientation(
             self._body, spawn, quat, physicsClientId=self._cid)
         p.resetBaseVelocity(self._body, (0, 0, 0), (0, 0, 0),
                             physicsClientId=self._cid)
-        self.set_ground_grab(False)
+        self._prop_reverse = False
 
     def close(self):
         p.disconnect(physicsClientId=self._cid)

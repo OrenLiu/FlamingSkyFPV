@@ -246,11 +246,11 @@ class FlightScreen(Screen):
             self._esc_open = not self._esc_open   # Esc 菜单开关
             self._paused = self._esc_open
             if self._paused and self._world is not None:
-                # 暂停即恢复默认接触摩擦（Task 50）：暂停期无物理步，此处
-                # 防御性复位防低摩擦残留（恢复后首帧 update 会按反乌龟激活
-                # 态重设）；进入飞行页无需处理——_load_scene 新建
-                # FlightWorld 即默认摩擦，退出飞行页世界整体销毁
-                self._world.set_ground_grab(False)
+                # 暂停即恢复正常推力方向（Task 50 v4）：暂停期无物理步，
+                # 此处防御性复位防桨反转残留（恢复后首帧 update 会按反乌龟
+                # 激活态重设）；进入飞行页无需处理——_load_scene 新建
+                # FlightWorld 即正常推力，退出飞行页世界整体销毁
+                self._world.set_prop_reverse(False)
 
     # ---- 每帧 ----
     def flight_snapshot(self) -> "dict | None":
@@ -374,14 +374,13 @@ class FlightScreen(Screen):
             # 参数模式：一期三参调用形态，行为零修改
             motors = self._fc.update(ch, self._world.gyro_dps, dt)
             boxes = frozenset()
-        # 反乌龟接触摩擦动态切换（Task 50）：激活帧（box 21 + 解锁，与
-        # drone.py 反乌龟接管门槛同帧一致——angles_deg 恒非空由本层接线
-        # 保证）把机-地接触摩擦降到桨尖打地量级：无人机碰撞体是 ARM×ARM
-        # 大薄板盒，默认摩擦 0.5 的切向约束会显著吃掉地面滚转能量（倒扣
-        # 大面积贴合时尤甚）。每帧先于 step 设置（激活帧的电机与摩擦同帧
-        # 生效）；撤 box/加锁当帧即恢复默认。参数模式 boxes 恒空 → 恒 False
-        # （set_ground_grab 幂等，值不变不调 bullet）
-        self._world.set_ground_grab(
+        # 反乌龟桨反转接线（Task 50 v4）：激活帧（box 21 + 解锁，与 drone.py
+        # 反乌龟接管门槛同帧一致——angles_deg 恒非空由本层接线保证）置桨
+        # 反转：真机反乌龟靠双向 DShot 反转螺旋桨，推力沿机体 −Z——倒扣时
+        # 被驱动侧推力从压向地面变为抬离地面（用户实机经验裁定）。每帧
+        # 先于 step 设置（激活帧的电机与推力方向同帧生效）；撤 box/加锁
+        # 当帧即恢复正常推力。参数模式 boxes 恒空 → 恒 False
+        self._world.set_prop_reverse(
             BOX_FLIP_OVER_AFTER_CRASH in boxes and self._fc.armed)
         self._world.step(self._fc.motor_thrusts(motors), dt)
         # OSD 距离状态（Task 47）：world.step 后位置已就绪，armed 为 fc.update
