@@ -413,9 +413,15 @@ class DroneParamsScreen(Screen):
             b.capacity_mah = max(1, int(cap))
             _, cr = imgui.input_int("放电倍率 (C)", int(b.c_rating), 5, 50)
             b.c_rating = max(1, int(cr))
-            b.warning_cell_v = _input("警告单芯电压 (V)", b.warning_cell_v, 0.05, "%.2f")
-            b.min_cell_v = _input("最低单芯电压 (V)", b.min_cell_v, 0.05, "%.2f")
-            b.max_cell_v = _input("最高单芯电压 (V)", b.max_cell_v, 0.05, "%.2f")
+            if p.virtual_fc:
+                # 虚拟飞控模式：阈值调整域在地面站 Power & Battery 页
+                # （33 SET 写入），参数页只读展示（用户裁定）
+                imgui.text(f"告警阈值 警告/最低/最高单芯：{b.warning_cell_v:.2f} / "
+                           f"{b.min_cell_v:.2f} / {b.max_cell_v:.2f} V（地面站调整）")
+            else:
+                b.warning_cell_v = _input("警告单芯电压 (V)", b.warning_cell_v, 0.05, "%.2f")
+                b.min_cell_v = _input("最低单芯电压 (V)", b.min_cell_v, 0.05, "%.2f")
+                b.max_cell_v = _input("最高单芯电压 (V)", b.max_cell_v, 0.05, "%.2f")
             chem = CHEMS.get(b.chem, CHEMS["lipo"])
             i_full = max(1, b.capacity_mah) / 1000.0 * max(1, b.c_rating)
             imgui.text(f"满电 {chem['full'] * b.cells:.2f}V · 放空 {chem['empty'] * b.cells:.1f}V · 额定放电 {i_full:.0f}A")

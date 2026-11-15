@@ -16,19 +16,23 @@ from __future__ import annotations
 CHEMS = {
     "lipo": {
         "label": "LiPo", "full": 4.20, "empty": 3.50, "r_k": 0.75,
-        # (SoC, 单芯V) 锚点：满电段陡、中段缓、放空段陡
+        # (SoC, 单芯V) 锚点：满电段陡、中段缓、放空段陡；soc<0 为过放尾段
+        # （放干后继续放电电压继续下探，LAND NOW 可达——用户裁定）
         "curve": ((1.00, 4.20), (0.85, 4.05), (0.70, 3.95), (0.50, 3.86),
-                  (0.30, 3.78), (0.15, 3.70), (0.05, 3.60), (0.00, 3.50)),
+                  (0.30, 3.78), (0.15, 3.70), (0.05, 3.60), (0.00, 3.50),
+                  (-0.10, 3.00), (-0.25, 2.50)),
     },
     "lihv": {
         "label": "LiHV", "full": 4.35, "empty": 3.55, "r_k": 0.65,
         "curve": ((1.00, 4.35), (0.85, 4.15), (0.70, 4.00), (0.50, 3.88),
-                  (0.30, 3.79), (0.15, 3.72), (0.05, 3.62), (0.00, 3.55)),
+                  (0.30, 3.79), (0.15, 3.72), (0.05, 3.62), (0.00, 3.55),
+                  (-0.10, 3.05), (-0.25, 2.55)),
     },
     "liion": {
         "label": "Li-ion", "full": 4.20, "empty": 2.80, "r_k": 6.0,
         "curve": ((1.00, 4.20), (0.90, 4.02), (0.70, 3.85), (0.50, 3.68),
-                  (0.30, 3.52), (0.15, 3.30), (0.05, 3.00), (0.00, 2.80)),
+                  (0.30, 3.52), (0.15, 3.30), (0.05, 3.00), (0.00, 2.80),
+                  (-0.10, 2.50), (-0.25, 2.20)),
     },
 }
 
@@ -37,7 +41,7 @@ def ocv_cell(chem: str, soc: float) -> float:
     """单芯开路电压 V：SoC 在曲线上分段线性插值（soc 钳 [0,1]）。未知 chem
     （外部编辑/旧档脏值）回落 lipo，不抛异常"""
     c = CHEMS.get(chem, CHEMS["lipo"])
-    s = min(1.0, max(0.0, soc))
+    s = min(1.0, max(c["curve"][-1][0], soc))   # 下限=尾段端点（过放域）
     for (s1, v1), (s2, v2) in zip(c["curve"], c["curve"][1:]):
         if s >= s2:                     # 曲线 SoC 降序：s 落 [s2, s1] 段
             return v2 + (v1 - v2) * (s - s2) / (s1 - s2)
@@ -71,7 +75,7 @@ class BatterySim:
     def reset(self) -> None:
         """恢复满电（= 换新电池）：SoC/消耗/电流回初值"""
         chem = CHEMS.get(self._bp.chem, CHEMS["lipo"])
-        self._soc = 1.0
+        self._soc_raw = 1.0
         self._mah_drawn = 0.0
         self._i = 0.0                   # 平滑电流（A）
         self._v = max(1, self._bp.cells) * chem["full"]
@@ -95,7 +99,7 @@ class BatterySim:
         cells = max(1, b.cells)
         v_full = cells * chem["full"]
         mean3 = sum(m ** 3 for m in motors) / 4.0    # 电机输出³均值
-        v_oc = cells * ocv_cell(b.chem, self._soc)
+        v_oc = cells * ocv_cell(b.chem, self._soc_raw)
         # 电流需求锚定机体推重比（电池额定值只进内阻——额定放电电流是电池
         # 能力上限而非需求；需求侧若锚定容量/C 数，会出现同油门下高 C 电池
         # 耗电更快的悖论）。功率链：I ∝ V²（功率∝V³）
@@ -104,11 +108,15 @@ class BatterySim:
         k = min(1.0, dt / self.I_SMOOTH_TAU_S)       # 电流惯性（大 dt 一步到位）
         self._i += (i_target - self._i) * k
         sag = self._i * r_pack / cells    # 单芯压降 V
-        v_cell = max(chem["empty"], ocv_cell(b.chem, self._soc) - sag)
+        # 下限=曲线尾段端点（过放极限压），非放空线——放干后继续放电电压
+        # 继续下探（用户裁定：要能完全放干）
+        v_cell = max(chem["curve"][-1][1],
+                     ocv_cell(b.chem, self._soc_raw) - sag)
         self._v = cells * v_cell
-        # 电量积分：mAh = I(A)·dt(s)/3.6；SoC 钳 0（放电单向，不模拟充电）
+        # 电量积分：mAh = I(A)·dt(s)/3.6；SoC 原始值可负（过放域），对外
+        # 视图钳 0（soc 属性）
         self._mah_drawn += self._i * dt / 3.6
-        self._soc = max(0.0, 1.0 - self._mah_drawn / 1000.0 / cap_ah)
+        self._soc_raw = 1.0 - self._mah_drawn / 1000.0 / cap_ah
 
     # ---- 只读视图（flight_snapshot / 单测消费） ----
 
@@ -136,7 +144,7 @@ class BatterySim:
     @property
     def ocv_v(self) -> float:
         """当前 SoC 的开路电压 V（空载回弹目标）"""
-        return max(1, self._bp.cells) * ocv_cell(self._bp.chem, self._soc)
+        return max(1, self._bp.cells) * ocv_cell(self._bp.chem, self._soc_raw)
 
     @property
     def current_a(self) -> float:
@@ -145,8 +153,8 @@ class BatterySim:
 
     @property
     def soc(self) -> float:
-        """剩余电量 [0,1]"""
-        return self._soc
+        """剩余电量 [0,1]（过放域原始值为负，对外钳 0）"""
+        return max(0.0, self._soc_raw)
 
     @property
     def mah_drawn(self) -> int:
@@ -173,5 +181,5 @@ class BatterySim:
             "mah_drawn": self.mah_drawn,
             "amperage_a": self._i,
             "state": self.state,
-            "soc": self._soc,
+            "soc": self.soc,
         }
