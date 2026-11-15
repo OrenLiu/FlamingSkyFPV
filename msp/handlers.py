@@ -69,9 +69,10 @@ Task 36 组（Task 25 实测衍生：Receiver 页渲染中断）：42=MSP_MIXER_
 Task 41 组（用户实飞反馈衍生：Power & Battery 页 + 节数联动）：32=
 MSP_BATTERY_CONFIG（13B 固件默认参考值——**布局无 cells 字段**，固件
 4.5.1 msp.c 写序三方互证；节数载体为 94/95 offset 48 可写与 130 只读
-显示）、33=MSP_SET_BATTERY_CONFIG（no-op：mincell/capacity/计量源无
-仿真域）、130=MSP_BATTERY_STATE（state 感知：cellCount=virtual.cells、
-双标度 voltage=battery_voltage；容量/消耗/电流恒 0 理想静态电源）、
+显示）、33=MSP_SET_BATTERY_CONFIG（写告警阈值/容量——地面站 Power 页
+调整域，用户裁定）、130=MSP_BATTERY_STATE（state 感知：cellCount=
+virtual.cells、双标度 voltage=battery_voltage；sim 关闭容量/消耗/电流
+恒 0 诚实降级）、
 128/129=MSP_VOLTAGE/CURRENT_METERS（无计量表空载荷）、56/40=MSP_
 VOLTAGE/CURRENT_METER_CONFIG（count=0）、57/41 SET 同 33 降级。
 
@@ -950,9 +951,10 @@ assert len(_MIXER_CONFIG_PAYLOAD) == 2
 #   L463-472 解码 ↔ L2033-2045 crunch 三方一致）：3×u8 legacy ×10 段 +
 #   capacity u16 + 双计量源 u8×2 + 3×u16 cV 段；固件 PG 复位默认
 #   330/430/350 cV、capacity 0、双源 NONE（battery.c L106-118；
-#   (330+5)/10=33 四舍五入写法照抄固件）。模拟器无 batteryConfig 仿真
-#   域（mincell/maxcell/warning 不消费、容量无电量模型）→ GET 恒固件
-#   默认参考值、SET 忽略，与 RX_CONFIG stick 阈值同款诚实降级
+#   (330+5)/10=33 四舍五入写法照抄固件）。batteryConfig 域 =
+#   params.battery 配置：GET 读 min/max/warning 阈值与容量（sim 开启时
+#   容量实时），SET 写同域（用户裁定：地面站 Power 页为阈值调整域）；
+#   无参数源 GET 回落固件默认参考值常量
 # - API 1.46 下节数唯一可写载体 = 94/95 offset 48（autoProfileCellCount，
 #   Configurator PID 调参页 Misc Settings「Cell Count」——PidSubTab.vue
 #   L1016-1026；fix round 1 修正：Task 21 的 offset 46 系布局漏计
@@ -972,6 +974,50 @@ _BATTERY_CONFIG_PAYLOAD = (bytes([33, 43, 35])    # legacy ×10：(330+5)/10…
                            + bytes([0, 0])         # 电压/电流计量源 = NONE
                            + struct.pack("<3H", 330, 430, 350))
 assert len(_BATTERY_CONFIG_PAYLOAD) == 13
+
+
+def _battery_config_payload(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_BATTERY_CONFIG(32) 动态版：布局同上 13 字节，min/max/warning
+    阈值与容量取 params.battery 配置（地面站 Power 页 33 SET 可写回——
+    用户裁定的地面站调整域）。尾段 3×u16 cV 为权威字段（Configurator
+    解码以之覆盖 legacy u8 段）；legacy 段 = (cV+5)//10 四舍五入（固件
+    写法）。容量仅 sim 开启时回真实值（关闭回 0 诚实零值——batteryConfig
+    域静态模式无消费方）。无参数源 → 固件默认参考值常量。"""
+    params = (state or {}).get("params")
+    if params is None:
+        return _BATTERY_CONFIG_PAYLOAD
+    b = params.battery
+    cvs = [round(v * 100) for v in (b.min_cell_v, b.max_cell_v,
+                                    b.warning_cell_v)]
+    cap = min(65535, max(0, b.capacity_mah)) if b.sim_enabled else 0
+    return (bytes(_u8((cv + 5) // 10) for cv in cvs)
+            + struct.pack("<H", cap)
+            + bytes([0, 0])
+            + struct.pack("<3H", *(_u16(cv) for cv in cvs)))
+
+
+def _set_battery_config(payload: bytes, state: "dict | None" = None) -> bytes:
+    """MSP_SET_BATTERY_CONFIG(33)：写告警阈值与容量（地面站 Power &
+    Battery 页保存链首命令——用户裁定的阈值调整域）。布局 13 字节 =
+    Configurator sendBatteryConfig 编码（本地 betaflight-configurator
+    源码核实）：3×u8 legacy + capacity u16 + 计量源 u8×2 + 3×u16 cV
+    权威段（偏移 7，顺序 min/max/warning 与 32 GET 同序）。阈值钳
+    2.0-5.0V；capacity 0=不覆盖（固件「未设容量」语义）。计量源字段
+    忽略（恒 NONE）。成功后 _set_changed 声明变更（on_change → 飞行侧
+    即时生效）。无参数源/短载荷 no-op。"""
+    params = (state or {}).get("params")
+    if params is None or len(payload) < 13:
+        return b""
+    b = params.battery
+    cap = struct.unpack_from("<H", payload, 3)[0]
+    min_cv, max_cv, warn_cv = struct.unpack_from("<3H", payload, 7)
+    b.min_cell_v = min(5.0, max(2.0, min_cv / 100.0))
+    b.max_cell_v = min(5.0, max(2.0, max_cv / 100.0))
+    b.warning_cell_v = min(5.0, max(2.0, warn_cv / 100.0))
+    if cap:
+        b.capacity_mah = max(1, min(65535, cap))
+    _set_changed(state)
+    return b""
 
 # 计量表配置 count=0 应答（56/40 共用）：模拟器电池为模型参数
 # （battery_voltage/cells 直供仿真与 OSD），无 ADC/ESC 计量硬件——
@@ -1106,13 +1152,13 @@ def make_identity_handlers() -> dict[int, Callable[..., bytes]]:
         # mixer 不改仿真电机组，与 37/55/65 同款诚实降级）
         43: _noop,
         # ---- Task 41 组（电源电池配置，Power & Battery 页） ----
-        # 32 MSP_BATTERY_CONFIG：13 字节固件默认参考值（布局无 cells——
-        # 节数载体见 94/95 与 130；mincell/capacity/计量源无仿真域，
-        # 与 stick 阈值同款只读参考值）
-        32: lambda _payload, _state=None: _BATTERY_CONFIG_PAYLOAD,
-        # 33 MSP_SET_BATTERY_CONFIG：载荷整体忽略（同上诚实降级；固件
-        # 4.5.1 该命令亦无 cells 字段，Power 页保存链后续 250 照常落盘）
-        33: _noop,
+        # 32 MSP_BATTERY_CONFIG：min/max/warning 阈值+容量取 params.battery
+        # 配置（布局 13B 无 cells——节数载体见 94/95 与 130）；无参数源
+        # 回落固件默认参考值常量
+        32: _battery_config_payload,
+        # 33 MSP_SET_BATTERY_CONFIG：地面站 Power 页写告警阈值/容量
+        # （真实电池模拟阈值调整域，用户裁定）；无参数源/短载荷 no-op
+        33: _set_battery_config,
         # 130 MSP_BATTERY_STATE：cells/电压 state 感知（Power 页「已接
         # 电池 (XS)」+ OSD 共源；Poll 周期重读，95 改节数后即时反映）
         130: _battery_state_payload,
