@@ -72,6 +72,10 @@ class SettingsScreen(Screen):
         self._preset_id = preset_ids[preset_picked]
         if self.app.preset_fallback:
             imgui.text("画质预设无效，已回落性能优先")
+        # 底部按钮行：左「返回」右「保存并应用」
+        if imgui.button("返回", u(200), u(40)):
+            self.app.switch(_main_menu())
+        imgui.same_line()
         if imgui.button("保存并应用", u(200), u(40)):
             preset_changed = self._preset_id != self.app.settings.shader_preset
             if self._mode == "window":
@@ -93,9 +97,6 @@ class SettingsScreen(Screen):
                 # 画质变更走帧边界 reload（rebuild 分支会先清本标记：rebuild 尾部
                 # 已含 reload_shader_preset，两者同置位时只走 rebuild，spec 5.7）
                 self.app._pending_preset_reload = True
-        imgui.same_line()
-        if imgui.button("返回", u(200), u(40)):
-            self.app.switch(_main_menu())
         if self.app.restart_needed:
             imgui.text("窗口重建失败：设置将在下次启动生效")
         # 无效文件夹包：页面下方文字行列出（镜像 flight 场景选择，不进下拉）
