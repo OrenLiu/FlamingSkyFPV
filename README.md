@@ -50,3 +50,16 @@ python main.py
 soup3D（渲染）· PyBullet（物理）· pygame（窗口）· imgui（UI）
 
 一期范围与设计见 `docs/specs/`。
+
+## 打包与独立运行
+
+`build.py` 为 linux / macOS / Windows 打包(PyInstaller 无法交叉编译,须在目标系统上运行本脚本):
+
+```bash
+python build.py             # 标准构建:onedir 无控制台,随包携带本机 scene/* 作为种子场景
+python build.py --no-scene  # 不随包携带场景
+python build.py --console   # 控制台版(排障)
+python build.py --zip       # 构建后压缩 dist 产物
+```
+
+独立运行首启动自举(`bootstrap.py`):在数据根生成 `config/`(默认 settings/rc + 出厂无人机 **init_drone / virtual_FC**)与 `scene/`(包内种子场景拷入;此后 scene/ 归用户管理)。数据根规则:源码运行=仓库根;Windows/Linux 打包版=可执行文件目录(便携式),不可写时回退用户数据目录;macOS .app=用户数据目录。`FLAME_DATA_DIR` 环境变量可强制指定数据根(测试/便携盘)。中文字体优先用数据根 `fonts/` 下用户自置字体,其后各平台系统字体。PTY 串口通道仅 Linux/macOS(Windows 无 pty/tty,TCP 与 WebSocket 通道不受影响)。

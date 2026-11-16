@@ -1,19 +1,32 @@
-"""遥控通道设置：手动绑定 + 实时预览（向导在 Task 11 加入同一界面）"""
+"""遥控通道设置：按钮式通道映射 + AUX 同构行 + 配置向导（回中流程与摇杆演示图）"""
+import math
+
 import imgui
 import pygame
 from .base import Screen
 from config_store import AxisBinding
 from input.joystick import JoystickInput
-from input.wizard import AxisCapture, MODE_STICKS, DIRECTION, channel_inverted
+from input.wizard import (AxisCapture, MODE_STICKS, DIRECTION, STICK_AXIS,
+                          demo_motion, verify_offset, channel_inverted)
+from ui_scale import u
 
 CHANNELS = ["throttle", "yaw", "roll", "pitch"]
 CHANNEL_CN = {"throttle": "油门", "yaw": "偏航", "roll": "横滚", "pitch": "俯仰"}
 
 AUX_KEYS = ("aux1", "aux2", "aux3", "aux4")
-AUX_KINDS = ["none", "button", "axis3"]   # AuxBinding.kind 取值（与 config_store 对应）
-AUX_KIND_CN = {"none": "未绑定", "button": "手柄按钮", "axis3": "手柄轴三段"}
 # 键盘模式 AUX 拨动键提示（input/keyboard.py 的 F1/F2/F4 键位）
 AUX_KEYBOARD_HINT = "键盘模式 AUX 拨动键：F1 解锁 / F2 自稳 / F4 反乌龟"
+
+
+# 行列位与演示图几何常量（imgui 坐标系 y 向下；主通道行与 AUX 行共用列位）
+_COL_BTN = 90     # 第 2 列：主通道绑定按钮 / AUX 类型下拉 x 偏移
+_COL_PREV = 240   # 第 3 列：主通道预览 / AUX 编号按钮 x 偏移
+_COL_TAIL = 400   # 第 4 列：主通道反向 / AUX 预览 x 偏移
+_DEMO_SIZE = 100  # 演示图单框边长
+_DEMO_GAP = 46    # 两框间距
+_DEMO_REACH = 40  # 点最大位移
+_DEMO_DOT = 7     # 点半径
+_DEMO_PERIOD = 1.2  # 捕获步演示动画周期（秒）
 
 def joystick_devices():
     """枚举当前手柄 [(index, name)]"""
@@ -24,7 +37,7 @@ def joystick_devices():
 def _bar(label, value, lo, hi):
     """通道预览条"""
     imgui.text(f"{label}")
-    imgui.same_line(90)
+    imgui.same_line(u(90))
     # pyimgui 2.0 运行期调整：progress_bar 第二参为 size 元组而非 (size_x, size_y)，
     # brief 原式 0.0,18 传参报 TypeError，按 brief 注用仅 fraction 形式
     imgui.progress_bar((value - lo) / (hi - lo))
@@ -36,93 +49,120 @@ class RCSetupScreen(Screen):
         self._msg = ""
         self._dt = 0.0   # 最近一帧时长（update 缓存，预览条用）
         self._wizard = None   # 向导状态机（非 None 时 render_ui 改渲染向导界面）
+        self._listen = None      # 映射监听中的通道键（主通道或 auxN；None=未监听）
+        self._listen_kind = None # 监听类型："axis" 主通道拨杆 / "auto" AUX 自动识别
+        self._listen_cap = None  # 轴监听捕获器（auto/axis 共用）
+        self._listen_base = frozenset()   # 按钮基线：begin 时已按住的按钮（随松开收缩）
+        self._listen_exbtns = frozenset() # 永久排除按钮：其他 AUX 已绑按钮
+        self._anim_t = 0.0       # 向导演示动画时钟（update 累加）
 
     def update(self, dt: float):
         self._dt = dt   # 主循环在 render_ui 之前调用，同帧预览条可拿到真实 dt
+        self._anim_t += dt
 
     def handle_event(self, event):
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-            self._back()
+            if self._listen is not None:
+                self._cancel_listen()   # 监听中 ESC：先取消映射监听，不退屏
+            else:
+                self._back()
 
     def _back(self):
         from .main_menu import MainMenuScreen
         self.app.switch(MainMenuScreen())
 
     def render_ui(self):
-        if self._wizard is not None:   # 向导激活：改渲染向导弹窗（模态）
+        if self._wizard is not None:
             self._render_wizard()
             return
-        imgui.set_next_window_position(30, 30)
-        imgui.set_next_window_size(560, 0)
+        imgui.set_next_window_position(u(30), u(30))
+        imgui.set_next_window_size(u(560), 0)
         imgui.begin("遥控通道设置", flags=imgui.WINDOW_NO_COLLAPSE)
-
-        # 每帧只读一次输入（AUX 行与预览区共用）：KeyboardInput.read 有油门积分
-        # 副作用，多处各调一次会把油门加速 N 倍
+        # 每帧只读一次输入（顶部按钮区与各通道行预览共用）：KeyboardInput.read 有
+        # 油门积分副作用，多处各调一次会把油门加速 N 倍
         ch = self.app.rc_input.read(self._dt)
         mode = self.app.rc_config.mode
-        imgui.text(f"当前模式: {'手柄' if mode == 'joystick' else '键盘（兜底）'}")
+        devs = joystick_devices()
+        joy = self._safe_joystick()
+        if devs:
+            self._dev_index = min(self._dev_index, len(devs) - 1)
+        self._feed_listen(joy)   # 每帧推进映射监听（渲染接线）
+        mode_txt = "手柄" if mode == "joystick" else "键盘（兜底）"
+        imgui.text(f"当前模式: {mode_txt}")
         if getattr(self.app, "joystick_lost", False):
             imgui.text("⚠ 手柄已断开，已自动切回键盘")
         elif getattr(self.app, "joystick_recovered", False):
-            # Task 38 对称提示：拔出重插 / 启动后接入被自动拾取（清 lost 时置位）
             imgui.text("✓ 手柄已自动连接")
-
         imgui.separator()
-        devs = joystick_devices()
-        if devs:
-            # 拔柄/重排后陈旧索引越界钳位（台账 T10 minor）
-            self._dev_index = min(self._dev_index, len(devs) - 1)
-        joy = self._safe_joystick()
         if joy is None:
             imgui.text("未检测到手柄（插入后自动出现）")
-            imgui.text(AUX_KEYBOARD_HINT)   # 键盘模式 AUX 区替换为键位提示
-            # 无手柄：向导按钮保持不可用（裸按钮，无点击分支）
-            imgui.button("启动配置向导", 180, 40)
+            imgui.text(AUX_KEYBOARD_HINT)
+            # 设备行位置：无手柄时向导按钮保留在原位但不可用（点击给提示）
+            if imgui.button("启动配置向导", u(180), u(40)):
+                self._msg = "未检测到手柄，无法启动向导"
         else:
             labels = [f"{i}: {name}" for i, name in devs]
             _, self._dev_index = imgui.combo("设备", self._dev_index, labels,
                                              0 if len(labels) < 15 else len(labels))
-            imgui.separator()
-            imgui.text("手动绑定（轴 0 ~ N，-1 未绑定）")
-            axis_count = joy.get_numaxes()
+            # 向导独占一行：设备选择之下、所有通道设置行之上
+            if imgui.button("启动配置向导", u(180), u(40)):
+                self._wizard = self._wizard_new()
+        imgui.separator()
+        if joy is not None:
+            n_axis = joy.get_numaxes()
+            imgui.text("通道绑定（点按钮后拨动/按压对应控件自动识别）")
             for c in CHANNELS:
-                b = self.app.rc_config.mappings[c]
-                _, b.axis = imgui.slider_int(f"{CHANNEL_CN[c]} 轴",
-                                             b.axis, -1, axis_count - 1)
-                _, b.inverted = imgui.checkbox(f"{CHANNEL_CN[c]} 反向", b.inverted)
-
+                self._render_axis_row(c, ch, n_axis)
             imgui.separator()
-            imgui.text("AUX 开关绑定（模式开关等）")
+            imgui.text("AUX 开关绑定（模式开关等；右键绑定按钮清除）")
             if mode != "joystick":
-                # 插着手柄但当前仍键盘模式：键盘拨动键仍生效，键位提示一并给出
                 imgui.text(AUX_KEYBOARD_HINT)
             n_btn = joy.get_numbuttons()
             for i, key in enumerate(AUX_KEYS, start=1):
-                self._render_aux_row(i, key, n_btn, axis_count, ch)
-
-            if imgui.button("应用并保存", 180, 40):
+                self._render_aux_row(i, key, n_btn, n_axis, ch)
+        if self._msg:
+            imgui.text(self._msg)
+        # 底部按钮行：左「返回主菜单」右「应用并保存」
+        if imgui.button("返回主菜单", u(180), u(40)):
+            self._back()
+        imgui.same_line()
+        imgui.set_cursor_pos_x(u(364))   # 窗口宽 560：右缘对齐「应用并保存」
+        if imgui.button("应用并保存", u(180), u(40)):
+            if joy is not None and devs:
                 self.app.rc_config.mode = "joystick"
                 self.app.rc_config.device_name = devs[self._dev_index][1]
                 self.app.store.save("rc", self.app.rc_config)
                 self.app.rc_input = self._make_joystick_input()
                 self._msg = "已应用手柄绑定"
-            imgui.same_line()
-            if imgui.button("启动配置向导", 180, 40):   # _dev_index 已由设备下拉框写好
-                self._wizard = {"stage": "mode", "capture": None,
-                                "bound": {}, "inverted": {}, "mode": None}
-
-        imgui.separator()
-        imgui.text("通道实时预览")
-        _bar("油门", ch.throttle, 0, 1)
-        _bar("偏航", ch.yaw, -1, 1)
-        _bar("横滚", ch.roll, -1, 1)
-        _bar("俯仰", ch.pitch, -1, 1)
-        if self._msg:
-            imgui.text(self._msg)
-        if imgui.button("返回主菜单", 180, 40):
-            self._back()
+            else:
+                self._msg = "未检测到手柄，无可保存"
         imgui.end()
-
+    def _render_axis_row(self, key, ch, n_axis):
+        """主通道行：通道名 | 绑定按钮（点击进入监听，拨杆自动识别；越界警示
+        并入按钮文本）| 预览条 | 反向复选框。列位与 AUX 行对齐（_COL_*）。"""
+        b = self.app.rc_config.mappings[key]
+        imgui.push_id(key)
+        imgui.text(CHANNEL_CN[key])
+        imgui.same_line(u(_COL_BTN))
+        if self._listen == key:
+            if imgui.button("拨动摇杆…", u(140)):
+                self._cancel_listen()
+        else:
+            label = f"轴 {b.axis}" if b.axis >= 0 else "未绑定"
+            if b.axis >= n_axis:
+                label += " ⚠"   # 越界警示并入按钮文本（Task 45：警示不静默改配置）
+            if imgui.button(label, u(140)):
+                self._begin_listen(key, "axis", self._safe_joystick())
+        imgui.same_line(u(_COL_PREV))
+        self._preview_bar(key, ch)
+        imgui.same_line(u(_COL_TAIL))
+        _, b.inverted = imgui.checkbox("反向", b.inverted)
+        imgui.pop_id()
+    def _preview_bar(self, key, ch):
+        """通道预览条：油门 0..1、其余 −1..1 映射到进度比例，宽度 150 对齐各列"""
+        v = getattr(ch, key)
+        lo, hi = (0.0, 1.0) if key == "throttle" else (-1.0, 1.0)
+        imgui.progress_bar((v - lo) / (hi - lo), (u(150), 0))
     def _safe_joystick(self):
         """取当前设备手柄；断开/索引越界/构造异常返回 None（裸取会抛 pygame.error）"""
         if self._dev_index >= pygame.joystick.get_count():
@@ -134,40 +174,187 @@ class RCSetupScreen(Screen):
         except pygame.error:
             return None
 
-    def _render_aux_row(self, i: int, key: str, n_btn: int, n_axis: int, ch):
-        """单行 AUX 绑定：kind 下拉 + 编号滑条 + 实时预览条（读当帧缓存的 ch）"""
-        b = self.app.rc_config.mappings[key]   # AuxBinding（kind/index）
-        imgui.push_id(key)   # 四行同标签「类型/编号」，须隔离 ID 防状态串扰
-        kind_idx = AUX_KINDS.index(b.kind) if b.kind in AUX_KINDS else 0   # 坏值按未绑定
-        imgui.set_next_item_width(120)
-        changed, picked = imgui.combo("类型", kind_idx,
-                                      [AUX_KIND_CN[k] for k in AUX_KINDS])
-        if changed:
-            b.kind = AUX_KINDS[picked]
-            b.index = -1 if b.kind == "none" else 0   # 换类型重置编号，防 -1 残留
-        imgui.same_line()
-        if b.kind != "none":
-            n = n_btn if b.kind == "button" else n_axis
-            if n <= 0:
-                imgui.text("（设备无按钮）" if b.kind == "button" else "（设备无轴）")
-            elif b.index >= n:
-                # Task 45 越界警示：绑定编号超出当前设备轴/按钮数（换设备/
-                # 改配置残留）——JoystickInput 越界防御返回中位、模式永远
-                # 无法激活。不静默钳位自愈（否则警示一帧即逝且配置被篡改），
-                # 越界值保留使警示持续；重绑走「类型」下拉重选（既有换类型
-                # 重置编号为 0 的逻辑）。index<0（未绑定）不在此分支，不算越界
-                imgui.text("⚠ 越界：该设备无此编号")
-            else:
-                b.index = min(max(b.index, 0), n - 1)   # 换设备后编号越界自愈
-                imgui.set_next_item_width(140)
-                _, b.index = imgui.slider_int("编号", b.index, 0, n - 1)
-        imgui.same_line()
-        imgui.text(f"AUX{i}")
-        imgui.same_line()
-        # 预览条：aux ∈ {-1,0,1} → fraction ∈ [0,1]（同 _bar 手法）
-        imgui.progress_bar((ch.aux[i - 1] + 1.0) / 2.0)
-        imgui.pop_id()
+    # ---- 映射监听状态机（imgui 无关：UI 只负责点按钮/画状态，推进在此） ----
 
+    def _begin_listen(self, key, kind, joy):
+        """进入映射监听。kind："axis" 主通道（拨杆识别轴）/ "auto" AUX（按键与
+        拨杆同时盯：谁先动按谁绑定，控件类型自动判定）。
+        轴排除集=其他主通道与已绑 AUX 的轴（本通道自身轴可重绑）；按钮基线=
+        当帧已按住的按钮（防误绑），其他 AUX 已绑按钮永久排除（_listen_exbtns）。"""
+        self._listen = key
+        self._listen_kind = kind
+        self._listen_exbtns = frozenset()
+        exclude = set()
+        for o in CHANNELS:
+            if o != key:
+                a = self.app.rc_config.mappings[o].axis
+                if a >= 0:
+                    exclude.add(a)
+        if kind == "auto":
+            exbtns = set()
+            for k2 in AUX_KEYS:
+                if k2 != key:
+                    ab = self.app.rc_config.mappings[k2]
+                    if ab.kind == "axis3" and ab.index >= 0:
+                        exclude.add(ab.index)
+                    if ab.kind == "button" and ab.index >= 0:
+                        exbtns.add(ab.index)
+            self._listen_exbtns = frozenset(exbtns)
+            self._listen_base = frozenset(
+                i for i in range(joy.get_numbuttons()) if joy.get_button(i))
+        cap = AxisCapture(threshold=0.3, exclude=exclude)
+        cap.begin([joy.get_axis(j) for j in range(joy.get_numaxes())])
+        self._listen_cap = cap
+
+    def _cancel_listen(self):
+        """取消监听（再点同钮/ESC/手柄断开共用），配置不动"""
+        self._listen = None
+        self._listen_kind = None
+        self._listen_cap = None
+        self._listen_base = frozenset()
+        self._listen_exbtns = frozenset()
+
+    def _clear_aux(self, key):
+        """清除 AUX 绑定（回未绑定态）"""
+        b = self.app.rc_config.mappings[key]
+        b.kind = "none"
+        b.index = -1
+        self._msg = f"{key.upper()} 已清除绑定"
+
+    def _listen_label(self, key):
+        """监听提示里的通道显示名：主通道用中文名，AUX 用 AUXn"""
+        return CHANNEL_CN.get(key, key.upper())
+    def _finish_listen(self, target, kind_resolved):
+        """命中绑定：按监听对象写配置（主通道→axis；AUX→kind+index，类型由
+        自动识别判定）、提示、退出监听"""
+        key = self._listen
+        b = self.app.rc_config.mappings[key]
+        if key in CHANNELS:
+            b.axis = target
+        else:
+            b.kind = kind_resolved
+            b.index = target
+        unit = "按钮" if kind_resolved == "button" else "轴"
+        self._msg = f"{self._listen_label(key)} 已映射到{unit} {target}"
+        self._cancel_listen()
+
+    def _feed_listen(self, joy):
+        """监听帧推进（render 每帧调用，joy 可为 None=无手柄）：auto 监听按键
+        优先、其次轴位移；主通道监听只看轴位移。方向不在此判定——主通道方向
+        由「反向」复选框管，AUX 两/三档开关无方向概念。"""
+        if self._listen is None:
+            return
+        if joy is None:
+            self._cancel_listen()
+            self._msg = "手柄已断开，映射取消"
+            return
+        if self._listen_kind == "auto":
+            # 按键优先：基线随松开收缩；其他 AUX 已绑按钮永久排除
+            self._listen_base = frozenset(i for i in self._listen_base
+                                          if joy.get_button(i))
+            for i in range(joy.get_numbuttons()):
+                if joy.get_button(i) and i not in self._listen_base \
+                        and i not in self._listen_exbtns:
+                    self._finish_listen(i, "button")
+                    return
+            cap = self._listen_cap
+            n = joy.get_numaxes()
+            cap.feed([joy.get_axis(i) for i in range(n)])
+            found = cap.result(n)
+            if found is not None:
+                self._finish_listen(found[0], "axis3")
+            return
+        cap = self._listen_cap
+        n = joy.get_numaxes()
+        cap.feed([joy.get_axis(i) for i in range(n)])
+        found = cap.result(n)
+        if found is not None:
+            self._finish_listen(found[0], "axis")
+    # ---- 向导状态机（imgui 无关：回中 → 逐通道捕获 → 验证） ----
+
+    def _wizard_new(self, mode=None):
+        """向导状态（选类型/重来共用入口）：mode=None → 类型选择页；
+        否则进「回中」步（先回中再逐通道，方向判定共用一份基线）"""
+        return {"stage": "capture" if mode else "mode",
+                "phase": "center", "mode": mode,
+                "order": list(CHANNELS), "bound": {}, "inverted": {},
+                "capture": None, "baseline": None}
+
+    def _wizard_continue(self, wz, joy):
+        """「回中」步点「继续」：采样各轴基线并武装首通道捕获（基线=点继续
+        当帧的杆位，油门不回中也成立；后续各通道复用同一基线）"""
+        wz["baseline"] = [joy.get_axis(i) for i in range(joy.get_numaxes())]
+        wz["phase"] = "channel"
+        self._wizard_arm(wz)
+
+    def _wizard_arm(self, wz):
+        """为下一未绑定通道武装捕获（已绑定轴排除；基线复用回中采样）"""
+        cap = AxisCapture(threshold=0.25, exclude=set(wz["bound"].values()))
+        cap.begin(wz["baseline"])
+        wz["capture"] = cap
+
+    def _wizard_feed(self, wz, joy):
+        """捕获帧推进：喂轴值；命中 → 记录绑定（pitch 极性按 POLARITY_FLIP
+        翻转，见 input/wizard.channel_inverted），回「回中」步或转入验证页。
+        每通道之间强制重新回中：用户回杆的误触不污染下一通道方向判定"""
+        cap = wz["capture"]
+        if cap is None:   # 非捕获期（回中步）被误喂：忽略，不崩
+            return
+        n = joy.get_numaxes()
+        cap.feed([joy.get_axis(i) for i in range(n)])
+        found = cap.result(n)
+        if found is None:
+            return
+        axis, inverted = found
+        ch = wz["order"][len(wz["bound"])]
+        wz["bound"][ch] = axis
+        wz["inverted"][ch] = channel_inverted(ch, inverted)
+        wz["capture"] = None
+        if len(wz["bound"]) == 4:
+            wz["stage"] = "verify"
+        else:
+            # 回中步「继续」时重新采样基线，等效一次干净捕获的开场
+            wz["phase"] = "center"
+
+    def _wizard_finish(self, wz, joy):
+        """验证页「完成并保存」：绑定写入配置、持久化、重建输入源、关闭向导"""
+        for c, axis in wz["bound"].items():
+            self.app.rc_config.mappings[c] = AxisBinding(
+                axis=axis, inverted=wz["inverted"][c])
+        self.app.rc_config.mode = "joystick"
+        self.app.rc_config.device_name = joy.get_name()
+        self.app.store.save("rc", self.app.rc_config)
+        self.app.rc_input = self._make_joystick_input()
+        self._wizard = None
+
+    def _render_aux_row(self, i, key, n_btn, n_axis, ch):
+        """单行 AUX 绑定，四列与主通道行同构：绑定按钮（点击自动识别；右键清除）
+        | 预览条 | 反向复选框。列位完全同主通道行。"""
+        b = self.app.rc_config.mappings[key]
+        imgui.push_id(key)
+        imgui.text(f"AUX{i}")
+        imgui.same_line(u(_COL_BTN))
+        if self._listen == key:
+            if imgui.button("拨杆或按键…", u(140)):
+                self._cancel_listen()
+        elif b.kind == "none":
+            if imgui.button("点击映射", u(140)):
+                self._begin_listen(key, "auto", self._safe_joystick())
+        else:
+            unit = "按钮" if b.kind == "button" else "轴"
+            label = f"{unit} {b.index}"
+            n = n_btn if b.kind == "button" else n_axis
+            if b.index >= n:
+                label += " ⚠"
+            if imgui.button(label, u(140)):
+                self._begin_listen(key, "auto", self._safe_joystick())
+            if imgui.is_item_clicked(1):
+                self._clear_aux(key)   # 右键：清除绑定（独立清除按钮占列位，并入右键）
+        imgui.same_line(u(_COL_PREV))
+        imgui.progress_bar((ch.aux[i - 1] + 1.0) / 2.0, (u(150), 0))
+        imgui.same_line(u(_COL_TAIL))
+        _, b.inverted = imgui.checkbox("反向", b.inverted)
+        imgui.pop_id()
     def _make_joystick_input(self):
         joy = self._safe_joystick()
         if joy is None:
@@ -181,79 +368,124 @@ class RCSetupScreen(Screen):
                              num_axes=joy.get_numaxes(),
                              num_buttons=joy.get_numbuttons())
 
+    # ---- 向导（回中 → 逐通道捕获 → 验证，每步带摇杆演示图） ----
+
     def _render_wizard(self):
         wz = self._wizard
         joy = self._safe_joystick()
         if joy is None:
-            # 向导中手柄丢失：取消向导回落主界面（每帧裸取手柄会崩，须先于 begin 返回）
+            # 向导中手柄丢失：取消向导回落主界面（先于 begin 返回，防裸取崩溃）
             self._wizard = None
             self._msg = "手柄已断开，向导已取消"
             return
-        # 固定尺寸：方向文案（如「请将偏航向右打满（左杆左右）」16 全角字
-        # ≈ 24px×16）超出默认自动收缩宽度会右缘截断；高度须容纳 verify 阶段
-        # 全部预览条与按钮（高度 0 实测不再按内容自适应，会下缘裁切按钮）
-        imgui.set_next_window_size(480, 300)
+        # 固定尺寸容纳演示图与验证页全部控件（高度 0 自适应会裁切，见一期台账）。
+       # 验证页内容高（24px 字体下四条预览条各约 40px + 演示图 + 按钮区）实测
+       # 约 456px，380 不够、底部按钮被挤出窗口需滚轮——按阶段加高
+        win_h = u(600) if wz["stage"] == "verify" else u(380)
+        imgui.set_next_window_size(u(500), win_h)
         imgui.begin("配置向导", flags=imgui.WINDOW_NO_COLLAPSE)
-        n_axis = joy.get_numaxes()
-
-        if wz["stage"] == "mode":   # 第一步：遥控类型
+        if wz["stage"] == "mode":
             imgui.text("你的遥控是哪种模式？")
             for m in MODE_STICKS:
-                if imgui.button(m, 200, 40):
-                    wz["mode"] = m
-                    wz["stage"] = "capture"
-                    wz["order"] = ["throttle", "yaw", "roll", "pitch"]
-                    wz["bound"] = {}
-                    wz["inverted"] = {}
-                    wz["capture"] = None
-        elif wz["stage"] == "capture":   # 第二步：逐通道捕获
-            ch_name = wz["order"][len(wz["bound"])]
-            stick = MODE_STICKS[wz["mode"]][ch_name]
-            if wz["capture"] is None:
+                if imgui.button(m, u(200), u(40)):
+                    self._wizard = self._wizard_new(m)
+        elif wz["stage"] == "capture":
+            if wz["phase"] == "center":
+                imgui.text("请将所有摇杆回中")
+                imgui.text("回中用于记录各杆静止位，作方向判定基准")
+                self._draw_stick_demo((0.0, 0.0), (0.0, 0.0))
+                if imgui.button("继续", u(180), u(40)):
+                    self._wizard_continue(wz, joy)
+            elif wz["phase"] == "channel":
+                ch_name = wz["order"][len(wz["bound"])]
+                stick = MODE_STICKS[wz["mode"]][ch_name]
                 imgui.text(f"请将{CHANNEL_CN[ch_name]}{DIRECTION[ch_name]}打满（{stick}）")
-                if imgui.button("开始识别", 180, 40):
-                    wz["capture"] = AxisCapture(
-                        threshold=0.25, exclude=set(wz["bound"].values()))
-                    # 按下当帧采样基线（杆静止位；油门不回中也成立）
-                    wz["capture"].begin([joy.get_axis(i) for i in range(n_axis)])
-            else:
-                wz["capture"].feed([joy.get_axis(i) for i in range(n_axis)])
-                imgui.text(f"识别中…（{CHANNEL_CN[ch_name]} / {stick}）")
-                found = wz["capture"].result(n_axis)
-                if found is not None:
-                    axis, inverted = found
-                    wz["bound"][ch_name] = axis
-                    # 捕获判的是原始轴方向；pitch 正杆义与指令方向相反，须按
-                    # POLARITY_FLIP 翻转（否则飞行推杆=抬头，俯仰反向）
-                    wz["inverted"][ch_name] = channel_inverted(ch_name, inverted)
-                    wz["capture"] = None
-                    if len(wz["bound"]) == 4:
-                        wz["stage"] = "verify"
+                side, _, vec = demo_motion(wz["mode"], ch_name)
+                amount = math.sin(math.pi * ((self._anim_t % _DEMO_PERIOD) / _DEMO_PERIOD))
+                off = (vec[0] * amount, vec[1] * amount)
+                if side == "左":
+                    self._draw_stick_demo(off, (0.0, 0.0), active=(True, False))
                 else:
-                    imgui.text("等待更大的杆量…")
-        elif wz["stage"] == "verify":   # 第三步：验证
+                    self._draw_stick_demo((0.0, 0.0), off, active=(False, True))
+                if wz["capture"] is not None:
+                    self._wizard_feed(wz, joy)   # 每帧喂捕获（渲染接线）
+                    imgui.text(f"识别中…（{CHANNEL_CN[ch_name]} / {stick}）")
+        elif wz["stage"] == "verify":
             imgui.text("验证：推动各通道，确认预览方向正确")
-            # 预览用向导新绑定构造的临时输入源——app.rc_input 仍是旧配置，验证不了新绑定
+            # 预览用向导新绑定构造的临时输入源——app.rc_input 仍是旧配置
             tmp = JoystickInput(joy.get_axis,
                                 {c: AxisBinding(axis=a, inverted=wz["inverted"][c])
                                  for c, a in wz["bound"].items()})
-            ch = tmp.read(self._dt)
-            _bar("油门", ch.throttle, 0, 1); _bar("偏航", ch.yaw, -1, 1)
-            _bar("横滚", ch.roll, -1, 1); _bar("俯仰", ch.pitch, -1, 1)
+            tmp_ch = tmp.read(self._dt)
+            _bar("油门", tmp_ch.throttle, 0, 1)
+            _bar("偏航", tmp_ch.yaw, -1, 1)
+            _bar("横滚", tmp_ch.roll, -1, 1)
+            _bar("俯仰", tmp_ch.pitch, -1, 1)
             imgui.text("俯仰方向：推杆低头（−），拉杆抬头（+）")
-            if imgui.button("完成并保存", 200, 40):
-                for c, axis in wz["bound"].items():
-                    self.app.rc_config.mappings[c] = AxisBinding(
-                        axis=axis, inverted=wz["inverted"][c])
-                self.app.rc_config.mode = "joystick"
-                self.app.rc_config.device_name = joy.get_name()
-                self.app.store.save("rc", self.app.rc_config)
-                self.app.rc_input = self._make_joystick_input()
-                self._wizard = None
+            left, right = self._verify_demo_offsets(wz, tmp_ch)
+            self._draw_stick_demo(left, right, active=(True, True))
+            if imgui.button("完成并保存", u(200), u(40)):
+                self._wizard_finish(wz, joy)
             imgui.same_line()
-            if imgui.button("重来", 120, 40):
-                self._wizard = {"stage": "mode", "capture": None,
-                                "bound": {}, "inverted": {}, "mode": None}
-        if imgui.button("取消向导", 140, 30):
+            if imgui.button("重来", u(120), u(40)):
+                self._wizard = self._wizard_new()
+        if imgui.button("取消向导", u(140), u(30)):
             self._wizard = None
         imgui.end()
+
+    def _verify_demo_offsets(self, wz, tmp_ch):
+        """验证页演示点：按当前模式把四通道值映射到左右两点位移（imgui y 向下）"""
+        left = [0.0, 0.0]
+        right = [0.0, 0.0]
+        for ch_name in CHANNELS:
+            side, ax = STICK_AXIS[wz["mode"]][ch_name]
+            dx, dy = verify_offset(ch_name, getattr(tmp_ch, ch_name))
+            if side == "左":
+                if ax == "左右":
+                    left[0] += dx
+                else:
+                    left[1] += dy
+            else:
+                if ax == "左右":
+                    right[0] += dx
+                else:
+                    right[1] += dy
+        return tuple(left), tuple(right)
+
+    def _draw_stick_demo(self, left_off, right_off, active=(False, False)):
+        """窗口内绘制摇杆演示：左右两框（下方小字「左杆/右杆」）各含一点，
+        off=(dx,dy)∈[−1,1] 为单位杆量位移（imgui y 向下）。active 决定点色
+        （琥珀=本步动画或实时，灰=静止）。先画后 dummy 占位推进光标。"""
+        dl = imgui.get_window_draw_list()
+        x, y = imgui.get_cursor_screen_pos()
+        win_w = imgui.get_window_size()[0]
+        size = u(_DEMO_SIZE); gap = u(_DEMO_GAP)
+        total = 2 * size + gap
+        x0 = x + (win_w - total) / 2.0
+        y0 = y + u(6)
+        reach = u(_DEMO_REACH)
+        r = u(_DEMO_DOT)
+        col_border = imgui.get_color_u32_rgba(0.85, 0.85, 0.85, 0.55)
+        col_cross = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.12)
+        col_idle = imgui.get_color_u32_rgba(0.55, 0.55, 0.55, 1.0)
+        col_active = imgui.get_color_u32_rgba(1.0, 0.62, 0.15, 1.0)
+        col_label = imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.8)
+        boxes = [
+            ("左杆", x0, left_off, active[0]),
+            ("右杆", x0 + size + gap, right_off, active[1]),
+        ]
+        for label, bx, off, act in boxes:
+            cx = bx + size / 2.0
+            cy = y0 + size / 2.0
+            dl.add_rect(bx, y0, bx + size, y0 + size,
+                        col_border, thickness=2.0)
+            dl.add_line(bx + u(8), cy, bx + size - u(8), cy, col_cross, 1.0)
+            dl.add_line(cx, y0 + u(8), cx, y0 + size - u(8), col_cross, 1.0)
+            dx, dy = off
+            dl.add_circle_filled(cx + dx * reach, cy + dy * reach, r,
+                                 col_active if act else col_idle)
+        lx = x0 + size / 2.0 - u(12)
+        dl.add_text(lx, y0 + size + u(8), col_label, "左杆")
+        dl.add_text(lx + size + gap, y0 + size + u(8), col_label, "右杆")
+        # 预留高度须盖住标签行（顶距6+框高+24px行高≈28+余量），否则标签压到下方控件
+        imgui.dummy(total, size + u(44))

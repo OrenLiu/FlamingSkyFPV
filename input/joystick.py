@@ -37,8 +37,13 @@ class JoystickInput(RCInput):
         return max(-1.0, min(1.0, v))
 
     def _aux_channel(self, b) -> float:
-        """AUX 通道求值：none → 0.0；button 两档 ±1；axis3 三段（阈值 ±1/3）。
-        无按钮源 / index 无效或越界 → 0.0（防御，读不到的开关不乱跳）"""
+        """AUX 通道求值入口：none → 0.0；button 两档 ±1；axis3 三段（阈值 ±1/3）。
+        inverted 对结果整体取反（±1 互换、中位 0 不动）。无按钮源 / index 无效或
+        越界 → 0.0（防御，读不到的开关不乱跳）"""
+        return -self._aux_raw(b) if b.inverted else self._aux_raw(b)
+
+    def _aux_raw(self, b) -> float:
+        """AUX 原始求值（未反向）"""
         if b.kind == "button":
             if self._get_button is None:
                 return 0.0  # 无按钮源防御（旧构造）

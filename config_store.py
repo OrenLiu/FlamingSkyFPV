@@ -6,11 +6,22 @@ import os
 import shutil
 from dataclasses import dataclass, field
 
+# 显示模式合法值（app 窗口分支与设置页共用同一来源，防字面量漂移）
+DISPLAY_MODES = ("fullscreen", "fixed_window", "window")
+
 @dataclass
 class Settings:
-    """应用设置（设计文档：分辨率、全屏）"""
-    resolution: tuple = (1280, 720)   # (宽, 高)
-    fullscreen: bool = False
+    """应用设置（显示模式 / 分辨率 / 帧率 / 画质预设 / 当前机）"""
+    resolution: tuple = (1280, 720)   # (宽, 高)：全屏与固定大小窗口化的逻辑分辨率
+    # 显示模式："fullscreen" 全屏 / "fixed_window" 固定大小窗口化 / "window"
+    # 窗口化（可拖拽调窗口大小与最大化，分辨率跟随窗口）。additive 字段：旧档
+    # 缺失键时由 ConfigStore.load 按 legacy fullscreen bool 折算（True→fullscreen，
+    # False→fixed_window），不升 schema（fps_mode 先例）
+    display_mode: str = "fixed_window"
+    # 窗口化模式的窗口尺寸 (宽, 高)：拖拽/最大化随窗口实时更新（内存），
+    # 退出经 save_all 落盘，下次启动恢复窗口大小。additive 字段：旧档缺失键
+    # 补默认，不升 schema（fps_mode 先例）
+    window_size: tuple = (1280, 720)
     # 最大帧率模式："vsync"（垂直同步）/ "unlimited"（无限制）/ 具体数值字符串
     # （"30"~"240"）。app.py 双机制生效：vsync 走 GL_SWAP_CONTROL（重开窗口），
     # 数字走 clock.tick 限速（即时生效）。additive 字段：旧档缺失键加载时补默认
@@ -245,6 +256,7 @@ class AuxBinding:
     "axis3" 轴三段（阈值 ±1/3）"""
     kind: str = "none"
     index: int = -1                   # 按钮号或轴号，-1 表示未绑定
+    inverted: bool = False            # 开关方向取反（±1 互换、中位 0 不动）
 
 def _default_mappings() -> dict:
     """mappings 默认工厂：主四通道 AxisBinding + aux1..aux4 AuxBinding（均未绑定）"""
@@ -343,6 +355,22 @@ class ConfigStore:
         except (json.JSONDecodeError, TypeError, KeyError):
             shutil.copy2(path, path + ".bak")  # 备份损坏文件
             return cls()
+        # Settings 显示模式迁移/归一：legacy fullscreen bool → display_mode
+        # （缺键时折算：True→fullscreen，False→fixed_window）；display_mode
+        # 非法值归一 fixed_window；window_size 防御归一（非二元/非正数→默认）。
+        # 缺键判定查原始 JSON——_rebuild 对缺失键补 dataclass 默认值，会掩盖
+        # 「旧档缺键」事实（params_schema 迁移同款手法）
+        if cls is Settings:
+            if "display_mode" not in data:
+                obj.display_mode = ("fullscreen" if data.get("fullscreen")
+                                    else "fixed_window")
+            if obj.display_mode not in DISPLAY_MODES:
+                obj.display_mode = "fixed_window"
+            try:
+                ws = (int(obj.window_size[0]), int(obj.window_size[1]))
+                obj.window_size = ws if ws[0] > 0 and ws[1] > 0 else (1280, 720)
+            except (TypeError, ValueError, IndexError):
+                obj.window_size = (1280, 720)
         # 参数版本迁移（三档）：v4 档 additive——pid/rate 自调保留，仅升版本
         # （缺失的 virtual_fc/virtual 键 _rebuild 已补默认）；v3 档仅 PID 小刻度
         # 过时（rate 语义未变）→ 只重置 pid；缺失/更早版本量级/结构与现行不符
