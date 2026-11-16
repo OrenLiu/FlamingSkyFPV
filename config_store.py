@@ -272,7 +272,8 @@ class RCConfig:
     mappings: dict = field(default_factory=_default_mappings)
 
 def default_drone_params() -> DroneParams:
-    """出厂默认（参数页"恢复默认"用）"""
+    """出厂默认代码值；逐项回退/新建无人机的参考源是 init_drone 出厂预设，
+    仅当该预设缺失时回落到此"""
     return DroneParams()
 
 def default_rc_config() -> RCConfig:

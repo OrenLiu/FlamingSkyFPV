@@ -21,14 +21,78 @@ AXES = ["roll", "pitch", "yaw"]
 AXIS_CN = {"roll": "横滚", "pitch": "俯仰", "yaw": "偏航"}
 
 ROW_H = 36        # 列表行高（行内按钮同高对齐）
-ROW_BTN_W = 64    # 行内按钮宽（编辑/复制/删除）
+ROW_BTN_W = 64    # 行内按钮宽（编辑/复制/删除/回退）
 BTN_W = 180       # 编辑态底部常规按钮宽（一期尺寸）
 BTN_H = 40
 CONV_BTN_W = 220  # 转换/地面站按钮宽（7 字中文文案在 24px 字体下不溢出）
+EDIT_FOOTER_H = 64  # 编辑态固定底条高（返回/保存行，含内边距；子区域高度扣除用）
+ICON_W = 26       # 回退图标按钮宽（draw list 直绘 ↺，不占字体字形）
+ICON_H = 30       # 回退图标按钮高（与行内小按钮同高）
 
-def _input(label, v, step, fmt="%.5g"):
-    """数值输入框助手：pyimgui 2.0 返回 (changed, value)，changed=False 时回写幂等"""
-    _, nv = imgui.input_float(label, v, step, step * 10.0, fmt)
+_MISSING = object()   # 「无回退参考」哨兵（参考值可为 0.0/False，不能拿 None 当缺省）
+
+_MISSING = object()   # 「无回退参考」哨兵（参考值可为 0.0/False，不能拿 None 当缺省）
+
+def _revert_icon(default, cur):
+    """「回退」图标按钮：紧贴参数值右侧，invisible_button 承接点击 + draw
+    list 直绘 ↺ 逆时针弧箭头（零字体字形依赖——Noto Sans CJK 无 ↺/⟲/↶，
+    chinese_full 光栅化范围也不含箭头区段）。仅当前值≠参考值时有效（否则
+    图标置灰且点击无效）；参考源=init_drone 出厂预设。悬停 tooltip 保留
+    文字语义。返回是否生效"""
+    import math
+    changed = cur != default
+    clicked = imgui.invisible_button("##revert", u(ICON_W), u(ICON_H))
+    mn = imgui.get_item_rect_min()
+    mx = imgui.get_item_rect_max()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip("回退")
+    dl = imgui.get_window_draw_list()
+    cx = (mn.x + mx.x) / 2
+    cy = (mn.y + mx.y) / 2
+    r = u(6)
+    # y 向下坐标系：从圆顶 -90° 起递增扫 300°（PathArcTo 断言 a_min<=a_max，
+    # 只能递增绘制；旋转方向的视觉语义由箭头承担），几何上与 ↺ 同形；
+    # 置灰经颜色 alpha（draw list 直绘不吃 style alpha，显式给）
+    a0 = -math.pi / 2
+    a1 = a0 + math.radians(300)
+    col = imgui.get_color_u32_rgba(0.92, 0.92, 0.95, 1.0 if changed else 0.4)
+    dl.path_clear()
+    dl.path_arc_to(cx, cy, r, a0, a1, 20)
+    dl.path_stroke(col, 0, u(1.5))
+    # 箭头：位于圆顶、apex 指向左（逆时针行进方向）
+    tx, ty = cx, cy - r
+    dl.add_triangle_filled(
+        tx - u(5), ty,
+        tx + u(2), ty - u(3.5),
+        tx + u(2), ty + u(3.5),
+        col)
+    return clicked and changed
+
+def _input(label, v, step, fmt="%.5g", default=_MISSING):
+    """数值输入行：布局=[输入框][回退图标][标签]——图标紧贴参数值右侧
+    （用户裁定）；default 给出回退参考值（init_drone），点击写回参考值"""
+    imgui.push_id(label)
+    _, nv = imgui.input_float("##v", v, step, step * 10.0, fmt)
+    if default is not _MISSING:
+        imgui.same_line()
+        if _revert_icon(default, nv):
+            nv = default
+    imgui.pop_id()
+    imgui.same_line()
+    imgui.text(label)
+    return nv
+
+def _input_int_row(label, v, step, fast, default=_MISSING):
+    """整数输入行（同上布局，行内附回退图标）：input_int 返回 (changed, int)"""
+    imgui.push_id(label)
+    _, nv = imgui.input_int("##v", int(v), step, fast)
+    if default is not _MISSING:
+        imgui.same_line()
+        if _revert_icon(default, nv):
+            nv = default
+    imgui.pop_id()
+    imgui.same_line()
+    imgui.text(label)
     return nv
 
 def _clone_params(src: DroneParams) -> DroneParams:
@@ -63,7 +127,8 @@ class DroneParamsScreen(Screen):
         self._p = None            # 编辑态工作副本
         self._name_buf = ""       # 编辑态代号输入缓冲（进入编辑时置为当前 id）
         self._known_ids = set()   # 编辑态代号冲突检测缓存（进入编辑时重建）
-        self._conv_ask = False    # 「转换为虚拟飞控」确认弹窗开关
+        self._conv_ask = None     # 转换确认弹窗方向（None|"vfc"|"param"；有损动作先确认）
+        self._defaults = None     # 回退参考源：init_drone 出厂预设（_begin_edit 载入）
         self._gs_error = None     # 接入地面站的错误信息（None=无；连接提示框
                                   # 由 App 层常驻浮窗渲染，Task 43）
         self._copy_src = None     # 复制弹窗源 id（None=弹窗未开）
@@ -75,10 +140,10 @@ class DroneParamsScreen(Screen):
             if self._copy_src is not None or self._del_target is not None \
                     or self._conv_ask:
                 # 弹窗开时 Esc 只关弹窗：清标记后不再提交 begin_popup_modal，
-                # imgui 帧末回收未提交弹窗（flight.py Esc 关「暂停」同机制）
+                # imgui 帧末回收未提交转换弹窗（flight.py Esc 关「暂停」同机制）
                 self._copy_src = None
                 self._del_target = None
-                self._conv_ask = False
+                self._conv_ask = None
             elif self.stage == "edit":
                 self.stage = "list"
                 self._refresh_ids()
@@ -114,7 +179,13 @@ class DroneParamsScreen(Screen):
         for pid in self._ids:
             self._preset_row(pid, avail)
         imgui.separator()
-        if imgui.button("返回", 180, 40):
+        if imgui.button("+新建无人机", avail, u(BTN_H)):
+            # 新机参数=init_drone 出厂预设（用户裁定：默认参数参考源）；重名自动
+            # 追加 -2/-3 序号（copy_preset 语义）。init_drone 缺失时 load_preset
+            # 回落代码默认，仍可建机
+            copy_preset(DRONES_DIR, "init_drone", "新无人机")
+            self._refresh_ids()
+        if imgui.button("返回", u(BTN_W), u(BTN_H)):
             self._back()
         if self._gs_error:
             imgui.text(self._gs_error)   # 列表态错误可见（与编辑态同形态）
@@ -226,7 +297,10 @@ class DroneParamsScreen(Screen):
         # 冲突检测以目录实时状态为准（self._ids 为列表态缓存，上次编辑改名后
         # 可能过期——真实 UI 流返回列表时会刷新，此处不依赖该前提）
         self._known_ids = set(list_preset_ids(DRONES_DIR))
-        self._conv_ask = False
+        # 回退参考源：init_drone 出厂预设（用户裁定；文件缺失时 load_preset
+        # 回落代码默认 DroneParams()，行为仍自洽）
+        self._defaults = _clone_params(load_preset(DRONES_DIR, "init_drone"))
+        self._conv_ask = None
         self.stage = "edit"
 
     def _persist(self):
@@ -281,7 +355,9 @@ class DroneParamsScreen(Screen):
         # 高度固定理由同列表态：0=自适应会把底部按钮压出屏幕外
         imgui.set_next_window_size(u(620), io.display_size[1] - u(60))
         imgui.begin("无人机参数", flags=imgui.WINDOW_NO_COLLAPSE)
-
+        # 内容区滚动 + 底条固定：表单与转换/地面站按钮在子区域内随滚轮滚动；
+        # 保存/返回留在外层，不随滚轮移动（用户裁定：底部操作区常驻可达）
+        imgui.begin_child("参数区", height=-u(EDIT_FOOTER_H))
         # 代号（两模式共用）：保存时 sanitize 后与旧 id 比较；冲突即时提示
         _, self._name_buf = imgui.input_text("代号", self._name_buf, 64)
         new_id = sanitize_preset_id(self._name_buf)
@@ -290,55 +366,66 @@ class DroneParamsScreen(Screen):
             imgui.text("代号已存在")
         imgui.separator()
 
+        imgui.push_item_width(u(150))   # 行尾「回退」按钮列：输入框收窄防行溢出
         if self._p.virtual_fc:
-            self._render_vfc_form(self._p)
+            self._render_vfc_form(self._p, self._defaults)
         else:
-            self._render_param_form(self._p)
+            self._render_param_form(self._p, self._defaults)
+        imgui.pop_item_width()
 
         imgui.separator()
-        # 底部按钮：首行三常规按钮（一期布局），次行按模式分派转换/地面站
-        if imgui.button("保存", u(BTN_W), u(BTN_H)) and not name_conflict:
-            self._save_edit()
-        imgui.same_line()
-        if imgui.button("恢复默认", u(BTN_W), u(BTN_H)):
-            # 默认机即参数模式机：virtual_fc 一并回 False，表单随之切回
-            self._p = default_drone_params()
-        imgui.same_line()
-        if imgui.button("返回列表", u(BTN_W), u(BTN_H)):
-            self.stage = "list"
-            self._refresh_ids()
+        # 转换/地面站按钮组：内容区最底，随滚轮滚动；接入地面站在上、转换在下
         if self._p.virtual_fc:
             if imgui.button("接入地面站", u(CONV_BTN_W), u(BTN_H)):
                 self._gs_start()
-            imgui.same_line()
             if imgui.button("转换为参数模式", u(CONV_BTN_W), u(BTN_H)):
-                self._convert_to_param()
+                self._conv_ask = "param"   # 先确认（有损动作：调参域易手）
         else:
             if imgui.button("转换为虚拟飞控", u(CONV_BTN_W), u(BTN_H)):
-                self._conv_ask = True   # 先确认（有损动作：调参域易手）
+                self._conv_ask = "vfc"     # 先确认（有损动作：调参域易手）
         if self._gs_error:
             imgui.text(self._gs_error)
+        imgui.end_child()
+        # 固定底条（子区域外，不随滚轮）：左「返回」右「保存」
+        if imgui.button("返回", u(BTN_W), u(BTN_H)):
+            self.stage = "list"
+            self._refresh_ids()
+        imgui.same_line()
+        imgui.set_cursor_pos_x(u(424))   # 窗口宽 620：右缘对齐「保存」（rc_setup 同手法）
+        if imgui.button("保存", u(BTN_W), u(BTN_H)) and not name_conflict:
+            self._save_edit()
         imgui.end()
         # 弹窗在主窗口 end 之后、栈根处开（flight.py 同位置）；地面站连接
         # 提示框已上移 App 层常驻浮窗（Task 43），本页不再渲染
         self._render_convert_modal()
 
-    def _render_param_form(self, p):
-        """参数模式表单：一期全参数表单原样迁移（控件与布局零改动）"""
+    def _render_param_form(self, p, d):
+        """参数模式表单：一期全参数表单 + 逐项「回退」按钮（参考源 init_drone，
+        仅改动项有效，点击写回参考值）"""
         imgui.text("Rate（遥控曲线，三轴独立）")
         cur = RATE_TYPES.index(p.rate_type) if p.rate_type in RATE_TYPES else 0
-        _, picked = imgui.combo("Rate 类型", cur, RATE_TYPES)
+        imgui.push_id("Rate 类型")
+        _, picked = imgui.combo("##类型", cur, RATE_TYPES)
+        if _revert_icon(d.rate_type, RATE_TYPES[picked]):
+            picked = RATE_TYPES.index(d.rate_type)
+        imgui.pop_id()
+        imgui.same_line()
+        imgui.text("Rate 类型")
         p.rate_type = RATE_TYPES[picked]
         # push_id 使三轴可复用同一组标签（imgui 以 label 为控件 ID）
         for ax in AXES:
             r = p.rate[ax]
             imgui.push_id(ax)
             imgui.text(AXIS_CN[ax])
-            r.rc_rate = _input("RC Rate", r.rc_rate, 0.05)
-            r.super_rate = _input("Super Rate", r.super_rate, 0.01)
-            r.expo = _input("Expo", r.expo, 0.01)
+            r.rc_rate = _input("RC Rate", r.rc_rate, 0.05,
+                               default=d.rate[ax].rc_rate)
+            r.super_rate = _input("Super Rate", r.super_rate, 0.01,
+                                  default=d.rate[ax].super_rate)
+            r.expo = _input("Expo", r.expo, 0.01,
+                            default=d.rate[ax].expo)
             if p.rate_type == "linear":
-                r.linear_max_deg = _input("线性满杆°/s", r.linear_max_deg, 10.0)
+                r.linear_max_deg = _input("线性满杆°/s", r.linear_max_deg, 10.0,
+                                          default=d.rate[ax].linear_max_deg)
             imgui.pop_id()
         imgui.separator()
 
@@ -349,29 +436,31 @@ class DroneParamsScreen(Screen):
             g = p.pid[ax]
             imgui.push_id(ax)
             imgui.text(AXIS_CN[ax])
-            g.p = _input("P", g.p, 1.0)
-            g.i = _input("I", g.i, 1.0)
-            g.d = _input("D", g.d, 0.1)
+            g.p = _input("P", g.p, 1.0, default=d.pid[ax].p)
+            g.i = _input("I", g.i, 1.0, default=d.pid[ax].i)
+            g.d = _input("D", g.d, 0.1, default=d.pid[ax].d)
             imgui.pop_id()
         # TPA：油门 PID 衰减（高油门控制权限随推力²上升，补偿悬停标定 PID 越界，
         # 见 physics.drone.tpa_factor）；衰减 % step=1、断点 step=0.05
-        p.tpa_percent = _input("TPA 衰减 %", p.tpa_percent, 1.0)
-        p.tpa_breakpoint = _input("TPA 断点", p.tpa_breakpoint, 0.05)
+        p.tpa_percent = _input("TPA 衰减 %", p.tpa_percent, 1.0,
+                               default=d.tpa_percent)
+        p.tpa_breakpoint = _input("TPA 断点", p.tpa_breakpoint, 0.05,
+                                  default=d.tpa_breakpoint)
         imgui.separator()
 
         imgui.text("机体")
-        self._render_body_form(p)
+        self._render_body_form(p, d)
 
-    def _render_vfc_form(self, p):
+    def _render_vfc_form(self, p, d):
         """虚拟飞控模式表单：仅硬件参数（Rate/PID/TPA 已转入 virtual 域，
-        由地面站经 MSP 调整，参数页不再展示）"""
+        由地面站经 MSP 调整，参数页不再展示）+ 逐项「回退」"""
         imgui.text("虚拟飞控模式：调参请接入地面站调整")
         # F 键提示行（Task 8 deferred → M6 顺路批）：飞行页键盘 AUX 拨动键，
         # 键定义见 input/keyboard.py（F4 避开 F3 调试热键）
         imgui.text("开关通道：F1 解锁 / F2 自稳 / F4 反乌龟（仅键盘模式生效）")
         imgui.text("手柄模式：在「遥控通道设置」页核对 AUX1-4 实时条是否随手柄开关动作，再在地面站 Modes 页把模式区间画在该开关激活位")
         imgui.separator()
-        self._render_body_form(p)
+        self._render_body_form(p, d)
         imgui.separator()   # 机体段与电池节数分隔（Task 8 deferred 外观项 → M6 顺路批）
         # 电池节数（virtual 域，MSP 电池配置同源）：地面站电压计算基准。
         # 默认自动识别（Task 46：按电池电压 detect_cell_count，固件同款
@@ -383,36 +472,55 @@ class DroneParamsScreen(Screen):
             if imgui.button("手动指定", u(120), u(30)):
                 set_cells_manual(p, p.virtual.cells)  # 以当前识别值为起点转手动
         else:
-            _, cells = imgui.input_int("电池节数", int(p.virtual.cells), 1, 10)
+            cells = _input_int_row("电池节数", p.virtual.cells, 1, 10,
+                                   default=d.virtual.cells)
             set_cells_manual(p, max(1, int(cells)))
             imgui.same_line()
             if imgui.button("恢复自动", u(120), u(30)):
                 set_cells_auto(p)
 
-    def _render_body_form(self, p):
-        """机体硬件参数（两模式共用段，控件同一期）"""
-        p.weight_g = _input("重量 (g)", p.weight_g, 10.0)
+    def _render_body_form(self, p, d):
+        """机体硬件参数（两模式共用段）+ 逐项「回退」按钮（参考源 init_drone）"""
+        p.weight_g = _input("重量 (g)", p.weight_g, 10.0, default=d.weight_g)
         # input_int 返回 (changed, int)，与 input_float 同模式；step=50、快进 500
-        _, p.motor_kv = imgui.input_int("电机 KV", int(p.motor_kv), 50, 500)
+        p.motor_kv = _input_int_row("电机 KV", p.motor_kv, 50, 500,
+                                    default=d.motor_kv)
         p.motor_kv = int(p.motor_kv)
         imgui.text(f"KV 建议推重比: {p.motor_kv / 250.0:.1f}")
-        p.thrust_ratio = _input("推重比", p.thrust_ratio, 0.1)
+        p.thrust_ratio = _input("推重比", p.thrust_ratio, 0.1,
+                                default=d.thrust_ratio)
         # 真实电池模拟（physics/battery.py）：开启后电压输入替换为电池配置；
         # 容量/C数/告警阈值直连压降模型与 OSD 告警（阈值不写死，用户裁定）
         b = p.battery
-        _, b.sim_enabled = imgui.checkbox("真实电池模拟", b.sim_enabled)
+        db = d.battery
+        imgui.push_id("真实电池模拟")
+        _, b.sim_enabled = imgui.checkbox("##开关", b.sim_enabled)
+        if _revert_icon(db.sim_enabled, b.sim_enabled):
+            b.sim_enabled = db.sim_enabled
+        imgui.pop_id()
+        imgui.same_line()
+        imgui.text("真实电池模拟")
         if b.sim_enabled:
             choices = [("lipo", "LiPo"), ("lihv", "LiHV"), ("liion", "Li-ion")]
             cur = next((i for i, (k, _) in enumerate(choices) if k == b.chem), 0)
-            _, picked = imgui.combo("电池类型", cur, [lab for _, lab in choices])
+            imgui.push_id("电池类型")
+            _, picked = imgui.combo("##类型", cur, [lab for _, lab in choices])
+            if _revert_icon(db.chem, choices[picked][0]):
+                picked = next(i for i, (k, _) in enumerate(choices)
+                              if k == db.chem)
+            imgui.pop_id()
+            imgui.same_line()
+            imgui.text("电池类型")
             b.chem = choices[picked][0]
-            _, c = imgui.input_int("节数 (S)", int(b.cells), 1, 10)
-            b.cells = min(8, max(1, int(c)))
+            cells = _input_int_row("节数 (S)", b.cells, 1, 10, default=db.cells)
+            b.cells = min(8, max(1, int(cells)))
             if p.virtual.cells != b.cells:
                 p.virtual.cells = b.cells   # sim 模式节数源=电池配置（镜像）
-            _, cap = imgui.input_int("容量 (mAh)", int(b.capacity_mah), 50, 500)
+            cap = _input_int_row("容量 (mAh)", b.capacity_mah, 50, 500,
+                                 default=db.capacity_mah)
             b.capacity_mah = max(1, int(cap))
-            _, cr = imgui.input_int("放电倍率 (C)", int(b.c_rating), 5, 50)
+            cr = _input_int_row("放电倍率 (C)", b.c_rating, 5, 50,
+                                default=db.c_rating)
             b.c_rating = max(1, int(cr))
             if p.virtual_fc:
                 # 虚拟飞控模式：阈值调整域在地面站 Power & Battery 页
@@ -420,41 +528,59 @@ class DroneParamsScreen(Screen):
                 imgui.text(f"告警阈值 警告/最低/最高单芯：{b.warning_cell_v:.2f} / "
                            f"{b.min_cell_v:.2f} / {b.max_cell_v:.2f} V（地面站调整）")
             else:
-                b.warning_cell_v = _input("警告单芯电压 (V)", b.warning_cell_v, 0.05, "%.2f")
-                b.min_cell_v = _input("最低单芯电压 (V)", b.min_cell_v, 0.05, "%.2f")
-                b.max_cell_v = _input("最高单芯电压 (V)", b.max_cell_v, 0.05, "%.2f")
+                b.warning_cell_v = _input("警告单芯电压 (V)", b.warning_cell_v, 0.05,
+                                          "%.2f", default=db.warning_cell_v)
+                b.min_cell_v = _input("最低单芯电压 (V)", b.min_cell_v, 0.05,
+                                      "%.2f", default=db.min_cell_v)
+                b.max_cell_v = _input("最高单芯电压 (V)", b.max_cell_v, 0.05,
+                                      "%.2f", default=db.max_cell_v)
             chem = CHEMS.get(b.chem, CHEMS["lipo"])
             i_full = max(1, b.capacity_mah) / 1000.0 * max(1, b.c_rating)
             imgui.text(f"满电 {chem['full'] * b.cells:.2f}V · 放空 {chem['empty'] * b.cells:.1f}V · 额定放电 {i_full:.0f}A")
         else:
             # 电池电压 V：推力按 (V/14.8)² 缩放（参考 4S 标称；满电 4S=16.8、3S=11.1）
-            p.battery_voltage = _input("电池电压 (V)", p.battery_voltage, 0.1)
+            p.battery_voltage = _input("电池电压 (V)", p.battery_voltage, 0.1,
+                                       default=d.battery_voltage)
             # 自动识别态同帧重算节数（Task 46）：电压编辑即联动，_render_vfc_form
             # 的节数显示行同帧生效（重算在文本渲染前；非虚拟飞控模式同样维护
             # 派生值，转 vfc 时自洽）
             if p.virtual.cells_auto:
                 set_cells_auto(p)
         # 线性空气阻力 N·s/m：默认 1.2 为默认机标定值，轻量高推机按手感调低
-        p.drag_k = _input("空气阻力", p.drag_k, 0.1)
-        p.camera_angle_deg = _input("摄像头角度 (°)", p.camera_angle_deg, 1.0)
+        p.drag_k = _input("空气阻力", p.drag_k, 0.1, default=d.drag_k)
+        p.camera_angle_deg = _input("摄像头角度 (°)", p.camera_angle_deg, 1.0,
+                                    default=d.camera_angle_deg)
 
     def _render_convert_modal(self):
-        """「转换为虚拟飞控」确认弹窗（有损动作：调参域易手，先确认）"""
+        """「转换为虚拟飞控/参数模式」确认弹窗（有损动作：调参域易手，先确认；
+        两方向同一确认交互，仅文案不同——用户裁定参数模式转换同享提示框）"""
         if not self._conv_ask:
             return
-        if not imgui.is_popup_open("转换为虚拟飞控"):
-            imgui.open_popup("转换为虚拟飞控")
-        if imgui.begin_popup_modal("转换为虚拟飞控",
+        if self._conv_ask == "vfc":
+            title = "转换为虚拟飞控"
+            lines = ["是否转换为虚拟飞控？",
+                     "转换后，需要进入 Betaflight 地面站对无人机进行调整。"]
+        else:
+            title = "转换为参数模式"
+            lines = ["是否转换为参数模式？",
+                     "转换后，地面站调参成果写回参数页，后续调参以参数页为准。"]
+        if not imgui.is_popup_open(title):
+            imgui.open_popup(title)
+        if imgui.begin_popup_modal(title,
                                    flags=imgui.WINDOW_ALWAYS_AUTO_RESIZE)[0]:
-            imgui.text("是否转换为虚拟飞控？")
-            imgui.text("转换后，需要进入 Betaflight 地面站对无人机进行调整。")
+            for line in lines:
+                imgui.text(line)
             if imgui.button("确认", u(160), u(40)):
-                self._conv_ask = False
-                self._convert_to_vfc()
+                ask = self._conv_ask
+                self._conv_ask = None
+                if ask == "vfc":
+                    self._convert_to_vfc()
+                else:
+                    self._convert_to_param()
                 imgui.close_current_popup()
             imgui.same_line()
             if imgui.button("取消", u(160), u(40)):
-                self._conv_ask = False
+                self._conv_ask = None
                 imgui.close_current_popup()
             imgui.end_popup()
 
