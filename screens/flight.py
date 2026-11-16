@@ -13,8 +13,10 @@ from physics.world import (FlightWorld, bullet_to_render, compose_camera_quat,
 from cover_cache import (cover_uv_crop, load_cover_texture, free_cover_texture,
                          COVER_BOX_W, COVER_BOX_H)
 from osd import compose_state, build_frame, OSD_COLS, OSD_ROWS
+import bootstrap
 from osd_font import (parse_mcm, bake_atlas, free_atlas,
                       MAX7456_FORMAT, ATLAS_COLS)
+from ui_scale import u
 
 
 def _glyph_cell(display_w: float, display_h: float) -> tuple:
@@ -125,7 +127,7 @@ class FlightScreen(Screen):
         置 None 静默降级——OSD 为增强层，缺失仅无叠加信息，不影响飞行
         （HUD 仍按设计 §9 保持隐藏）。"""
         try:
-            chars = parse_mcm(self.OSD_FONT_PATH)
+            chars = parse_mcm(bootstrap.resource_path(self.OSD_FONT_PATH))
         except (OSError, ValueError):
             self._osd_atlas = None
             return
@@ -143,7 +145,7 @@ class FlightScreen(Screen):
         # 网格卡片：封面缩略图 + 名称按钮，按窗口宽度自动折行
         valid = [s for s in self.app.scenes if s.valid]
         avail = imgui.get_content_region_available_width()
-        cols = max(1, int((avail + self.CARD_GAP) // (COVER_BOX_W + self.CARD_GAP)))
+        cols = max(1, int((avail + u(self.CARD_GAP)) // (u(COVER_BOX_W) + u(self.CARD_GAP))))
         for i, s in enumerate(valid):
             self._scene_card(s)
             if (i + 1) % cols and i + 1 < len(valid):
@@ -153,14 +155,14 @@ class FlightScreen(Screen):
             if not s.valid:
                 imgui.text(f"{s.name}（无效：{s.error}）已跳过")
         imgui.separator()
-        if imgui.button("返回主菜单", 200, 40):
+        if imgui.button("返回主菜单", u(200), u(40)):
             self._back()
         imgui.end()
 
     def _scene_card(self, s):
         # 单卡片：invisible_button 承接整卡点击/悬停，draw list 直绘封面与标题
-        card_h = COVER_BOX_H + self.CARD_NAME_H
-        clicked = imgui.invisible_button(f"##card_{s.dir.name}", COVER_BOX_W, card_h)
+        card_h = u(COVER_BOX_H) + u(self.CARD_NAME_H)
+        clicked = imgui.invisible_button(f"##card_{s.dir.name}", u(COVER_BOX_W), card_h)
         hovered = imgui.is_item_hovered()
         p = imgui.get_item_rect_min()
         e = imgui.get_item_rect_max()
@@ -170,20 +172,20 @@ class FlightScreen(Screen):
         col_bg = imgui.get_color_u32_rgba(0.10, 0.10, 0.12, 1.0)
         col_border = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.7 if hovered else 0.25)
         dl.add_rect_filled(p.x, p.y, e.x, e.y, col_bg)
-        strip_top = p.y + COVER_BOX_H
+        strip_top = p.y + u(COVER_BOX_H)
         cover = self._get_cover(s)
         if cover:
             tid, w, h = cover
-            uv = cover_uv_crop(w, h, COVER_BOX_W, COVER_BOX_H)
-            dl.add_image(tid, (p.x, p.y), (p.x + COVER_BOX_W, strip_top),
+            uv = cover_uv_crop(w, h, u(COVER_BOX_W), u(COVER_BOX_H))
+            dl.add_image(tid, (p.x, p.y), (p.x + u(COVER_BOX_W), strip_top),
                          uv[:2], uv[2:])
         else:
-            dl.add_rect_filled(p.x, p.y, p.x + COVER_BOX_W, strip_top,
+            dl.add_rect_filled(p.x, p.y, p.x + u(COVER_BOX_W), strip_top,
                                imgui.get_color_u32_rgba(0.16, 0.16, 0.18, 1.0))
-            self._draw_centered_text(dl, p.x, p.y, COVER_BOX_W, COVER_BOX_H,
+            self._draw_centered_text(dl, p.x, p.y, u(COVER_BOX_W), u(COVER_BOX_H),
                                      col_dim, "无封面")
-        self._draw_centered_text(dl, p.x, strip_top, COVER_BOX_W,
-                                 self.CARD_NAME_H, col_text, s.name)
+        self._draw_centered_text(dl, p.x, strip_top, u(COVER_BOX_W),
+                                 u(self.CARD_NAME_H), col_text, s.name)
         dl.add_rect(p.x, p.y, e.x, e.y, col_border)
         if clicked:
             self._scene = s
@@ -538,15 +540,15 @@ class FlightScreen(Screen):
         if self.stage == "select":
             self.render_select()
             if self.error:
-                imgui.set_next_window_position(60, 60)
+                imgui.set_next_window_position(u(60), u(60))
                 imgui.begin("加载失败", flags=imgui.WINDOW_NO_COLLAPSE)
                 imgui.text(self.error)
-                if imgui.button("知道了", 140, 32):
+                if imgui.button("知道了", u(140), u(32)):
                     self.error = ""
                 imgui.end()
             return
         if self.stage == "loading":
-            imgui.set_next_window_position(60, 60)
+            imgui.set_next_window_position(u(60), u(60))
             imgui.begin("加载中", flags=imgui.WINDOW_NO_COLLAPSE)
             imgui.text(f"正在加载 {self._scene.name} …")
             imgui.end()
@@ -601,7 +603,7 @@ class FlightScreen(Screen):
         speed = math.sqrt(sum(x * x for x in v))
         alt = self._world.pos[2]
         roll, pitch, yaw = self._world.euler_deg
-        imgui.set_next_window_position(24, 24)
+        imgui.set_next_window_position(u(24), u(24))
         imgui.push_style_color(imgui.COLOR_WINDOW_BACKGROUND, 0, 0, 0, 0.35)
         imgui.begin("##hud", flags=imgui.WINDOW_NO_TITLE_BAR |
                     imgui.WINDOW_ALWAYS_AUTO_RESIZE)
@@ -636,10 +638,10 @@ class FlightScreen(Screen):
             return
         imgui.open_popup("暂停") if not imgui.is_popup_open("暂停") else None
         if imgui.begin_popup_modal("暂停", flags=imgui.WINDOW_ALWAYS_AUTO_RESIZE)[0]:
-            if imgui.button("继续飞行", 220, 44):
+            if imgui.button("继续飞行", u(220), u(44)):
                 self._esc_open = False; self._paused = False
                 imgui.close_current_popup()
-            if imgui.button("重置位置", 220, 44):
+            if imgui.button("重置位置", u(220), u(44)):
                 self._world.reset(self._scene.spawn)
                 self._fc.disarm()   # 位置重置联动加锁（Task 14）：重置后须重新解锁
                 br = getattr(self._fc, "battery_reset", None)
@@ -647,7 +649,7 @@ class FlightScreen(Screen):
                     br()            # 重置位置=换新电池（真实电池模拟满电恢复）
                 self._esc_open = False; self._paused = False
                 imgui.close_current_popup()
-            if imgui.button("返回主菜单", 220, 44):
+            if imgui.button("返回主菜单", u(220), u(44)):
                 imgui.close_current_popup()
                 self._back()
             imgui.end_popup()

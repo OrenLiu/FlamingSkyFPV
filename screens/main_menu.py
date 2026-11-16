@@ -1,6 +1,7 @@
 """主界面：标题居中 + 左侧按钮列（设计文档第 6 节）"""
 import imgui
 import pygame
+from ui_scale import u
 from .base import Screen
 
 class MainMenuScreen(Screen):
@@ -21,24 +22,24 @@ class MainMenuScreen(Screen):
                  imgui.WINDOW_NO_BACKGROUND)
         imgui.begin("##main", flags=flags)
 
-        imgui.set_cursor_pos((w / 2 - 120, h * 0.18))
+        imgui.set_cursor_pos((w / 2 - u(120), h * 0.18))
         imgui.text("FlamingSkyFPV")   # 标题居中
 
         imgui.set_cursor_pos((w * 0.08, h * 0.42))  # 选项居左
         imgui.begin_group()
-        if imgui.button("开始飞行", 220, 50):
+        if imgui.button("开始飞行", u(220), u(50)):
             from .flight import FlightScreen   # 延迟导入避免循环依赖
             self.app.switch(FlightScreen())
-        if imgui.button("设置", 220, 50):
+        if imgui.button("设置", u(220), u(50)):
             from .settings import SettingsScreen
             self.app.switch(SettingsScreen())
-        if imgui.button("无人机参数", 220, 50):
+        if imgui.button("无人机参数", u(220), u(50)):
             from .drone_params import DroneParamsScreen
             self.app.switch(DroneParamsScreen())
-        if imgui.button("遥控通道设置", 220, 50):
+        if imgui.button("遥控通道设置", u(220), u(50)):
             from .rc_setup import RCSetupScreen
             self.app.switch(RCSetupScreen())
-        if imgui.button("退出", 220, 50):
+        if imgui.button("退出", u(220), u(50)):
             pygame.event.post(pygame.event.Event(pygame.QUIT))
         imgui.end_group()
 

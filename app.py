@@ -1,12 +1,14 @@
 """App：pygame 主循环 + Screen 状态机 + AppContext（设计文档第 3 节）"""
 import os
+import sys
 import time
 import traceback
 import pygame
 import imgui
 from imgui.integrations.pygame import PygameRenderer
 from OpenGL.GL import (glActiveTexture, glClear, glClearColor, glViewport,
-                       glGetFloatv, GL_COLOR_BUFFER_BIT, GL_COLOR_CLEAR_VALUE,
+                       glGetFloatv, glDeleteTextures,
+                       GL_COLOR_BUFFER_BIT, GL_COLOR_CLEAR_VALUE,
                        GL_TEXTURE0)
 from soup3D.target import RenderTarget
 import soup3D
@@ -25,29 +27,61 @@ from msp.handlers import make_identity_handlers
 from msp.server import VfcServer
 from screens.flight import FlightScreen   # _msp_state 的 isinstance 判定（app → screens 单向合法）
 from debug_frame_log import FrameLogger, frame_log_enabled  # 卡顿记录仪（FLAME_STUTTER_LOG 门控）
+import ui_scale   # UI 等比缩放（布局像素换算 u()、字号档 font_px、样式表缩放）
 
-RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选
+RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选（全屏/固定窗口的逻辑分辨率；窗口化跟随窗口）
 # 配置根/预设目录常量在 config_store 定义（app 与 screens 同源引用，防漂移）
 
 # 手柄自动拾取退避间隔（秒）：构造失败（init 异常/设备名未出现）后的重试
 # 最小间隔，防插拔抖动下每帧重建 Joystick 对象的死循环（Task 38）
 JOYSTICK_PICKUP_RETRY_S = 2.0
 
-# 中文字体候选（spike 验证过的顺序）
-FONT_PATHS = [
+# 中文字体候选（跨平台）：运行时按平台合成（_font_candidates），数据根
+# fonts/ 目录的用户自置字体优先，其后平台系统字体——打包独立运行时
+# Linux 硬编码路径不存在，Windows/macOS 走各自预装 CJK 字体
+_FONT_PATHS_LINUX = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc",
     "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
 ]
+_FONT_PATHS_WINDOWS = [
+    r"C:\Windows\Fonts\msyh.ttc",     # 微软雅黑（Win10/11 预装）
+    r"C:\Windows\Fonts\simhei.ttf",   # 黑体
+    r"C:\Windows\Fonts\simsun.ttc",   # 宋体
+]
+_FONT_PATHS_MACOS = [
+    "/System/Library/Fonts/PingFang.ttc",          # 苹方
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",  # 冬青黑体
+    "/System/Library/Fonts/STHeiti Light.ttc",     # 黑体-简
+]
 
-def load_cjk_font():
-    """加载中文字体（24px，含常用汉字区），全部失败返回 None（UI 回落英文）"""
+def _font_candidates() -> list:
+    """合成字体候选：数据根 fonts/ 目录（*.ttf/*.ttc，最高优先）→ 平台系统
+    字体。全部缺失返回空（UI 回落英文）。"""
+    import glob
+    cands = sorted(glob.glob(os.path.join("fonts", "*.ttf"))
+                   + glob.glob(os.path.join("fonts", "*.ttc")))
+    if sys.platform == "win32":
+        cands += _FONT_PATHS_WINDOWS
+    elif sys.platform == "darwin":
+        cands += _FONT_PATHS_MACOS
+    else:
+        cands += _FONT_PATHS_LINUX
+    return cands
+
+def load_cjk_font(size_px: int = 24):
+    """加载中文字体（size_px 像素，含常用汉字区），全部失败返回 None（UI 回落英文）。
+    size_px 由窗口高度经 ui_scale.font_px 档位量化（720p→24、1080p→36、1440p→48）"""
     io = imgui.get_io()
-    for path in FONT_PATHS:
+    # 图集宽度钉死 8192（desired 是上限，实际打包常更小）：宽度自动选择在
+    # GL 上下文环境下会被翻倍（36px 档实测 32768 > GPU 纹理上限 → 上传失
+    # 败字符消失），显式 desired 后宽度恒 ≤8192（GPU 普适）
+    io.fonts.texture_desired_width = 8192
+    for path in _font_candidates():
         if os.path.exists(path):
             try:
                 return io.fonts.add_font_from_file_ttf(
-                    path, 24,
+                    path, size_px,
                     glyph_ranges=io.fonts.get_glyph_ranges_chinese_full())
             except Exception:
                 continue
@@ -95,11 +129,20 @@ class App:
         # 着色器预设：GL 上下文就绪后加载一次（帧渲染器的 RT/程序在此创建）；
         # _open_window 自身不调（避免与 rebuild 路径双重调用，spec 5.7）
         self.reload_shader_preset()
-        imgui.create_context()
+        self._imgui_ctx = imgui.create_context()
         self._impl = PygameRenderer()
         # spike 结论：pygame 集成不初始化 display_size，new_frame 会断言崩溃
-        imgui.get_io().display_size = pygame.display.get_surface().get_size()
-        self.font = load_cjk_font()
+        # 窗口尺寸权威值：GL RESIZABLE 窗口的 pygame surface 尺寸不随真实拖拽
+        # 更新（恒为 set_mode 初始值），display_size 与字号档一律以本值为准，
+        # 由 VIDEORESIZE 事件实时维护（run() 事件分支）
+        self._display_size = pygame.display.get_surface().get_size()
+        imgui.get_io().display_size = self._display_size
+        # UI 等比缩放：字号档按当前窗口高量化（720p→24px…，窗口化 resize 随
+        # 档去抖重建）；样式基准快照捕获一次，run() 每帧按缩放重设
+        self._pending_font_px = None    # 窗口化 resize 的待重建字号档（帧边界去抖执行）
+        self._last_window_resize = 0.0  # 最近 VIDEORESIZE 时刻（monotonic 秒，去抖基准）
+        self._capture_base_style()
+        self._reload_font(self._current_font_px())
         # spike 结论：自定义字体加载后必须重烘焙字体图集，否则中文花字
         if self.font:
             self._impl.refresh_font_texture()
@@ -138,7 +181,7 @@ class App:
         self._scale_rect = None
         w, h = self.settings.resolution
         pygame.display.set_caption("FlamingSkyFPV")
-        if self.settings.fullscreen:
+        if self.settings.display_mode == "fullscreen":
             flags |= pygame.FULLSCREEN
             dw, dh = pygame.display.get_desktop_sizes()[0]
             pygame.display.set_mode((dw, dh), flags)
@@ -149,7 +192,14 @@ class App:
                 scale = min(dw / w, dh / h)   # 等比取较小比例（16:9 进 16:10 高度受限）
                 sw, sh = int(w * scale), int(h * scale)
                 self._scale_rect = ((dw - sw) // 2, (dh - sh) // 2, sw, sh)  # 居中留黑边
+        elif self.settings.display_mode == "window":
+            # 窗口化: RESIZABLE, 尺寸=记忆的窗口大小, resize 事件驱动引擎跟随
+            flags |= pygame.RESIZABLE
+            w, h = self.settings.window_size
+            pygame.display.set_mode((w, h), flags)
+            soup3D.init(w, h, 75, (0.55, 0.75, 0.95), 0.1, 2048)
         else:
+            # 固定大小窗口化: 不可拖拽, 尺寸=设置的逻辑分辨率
             pygame.display.set_mode((w, h), flags)
             soup3D.init(w, h, 75, (0.55, 0.75, 0.95), 0.1, 2048)
 
@@ -216,16 +266,100 @@ class App:
             # 字体重载失败不置 None：旧字体对象结构完好（纹理最多次过期待下次
             # 重建），置 None 反而令主循环 push/pop 失衡 → render 断言崩溃；
             # 失败路径提示重启生效
-            new_font = load_cjk_font()
-            if new_font:
-                self.font = new_font
-                # 与 __init__ 对称：新字体加载后必须重烘焙图集，否则下一帧 imgui 断言崩溃
-                self._impl.refresh_font_texture()
+            font_ok = self._reload_font(self._current_font_px())
             if self.screen:
                 self.screen.reload()
-            self.restart_needed = new_font is None  # 字体重载失败 → 提示重启生效
+            self.restart_needed = not font_ok  # 字体重载失败 → 提示重启生效
         except Exception:
             self.restart_needed = True
+
+    # ---- UI 等比缩放 ----
+    # 样式表缩放白名单(值=元组按分量缩放; 对齐类 0..1 项不缩放)
+    _STYLE_SCALED_VARS = (
+        "window_padding", "frame_padding", "item_spacing", "item_inner_spacing",
+        "cell_padding", "touch_extra_padding", "display_safe_area_padding",
+        "display_window_padding", "window_min_size", "indent_spacing",
+        "scrollbar_size", "grab_min_size", "columns_min_spacing",
+        "log_slider_deadzone",
+        "window_rounding", "child_rounding", "frame_rounding", "popup_rounding",
+        "scrollbar_rounding", "grab_rounding", "tab_rounding",
+        "window_border_size", "child_border_size", "frame_border_size",
+        "popup_border_size", "tab_border_size",
+        "tab_min_width_for_close_button",
+    )
+    FONT_RELOAD_DEBOUNCE_S = 0.5   # 拖拽静止 0.5s 后一次重建(CJK 图集烘焙 ~0.5s/次)
+
+    def _current_font_px(self) -> int:
+        """按当前窗口像素高算字号档位(开窗/重建/resize 共用)"""
+        return ui_scale.font_px(self._display_size[1])
+
+    def _reload_font(self, px: int) -> bool:
+        """字号档重建唯一入口(开窗/设置保存/窗口化 resize 三路径共用)：销毁
+        重建 imgui 上下文与集成层，再加载当前档字体。
+
+        两个方案实测不可行：
+        - 反复 add_font：图集累积语义，5 份 CJK 达 32768 宽(512MB)超 GPU 纹
+          理上限，上传失败 → UI 字符整体消失(本 bug：最大化/还原两次即触发，
+          反复保存设置同样累积——一并根治)；
+        - io.fonts.clear_fonts 后二次烘焙：这版 imgui 的 rect packing 残留
+          断言 (src_tmp.DstIndex != -1) 稳定复现(alpha8/rgba32 皆炸)。
+        destroy+create 是全新图集，等效初次启动序列(生产实证安全)。旧集成
+        层唯一 GL 资源是字体纹理(_font_texture)，重建前显式删除防显存泄漏。
+        加载失败回落 font=None(UI 英文；空图集首烘自动垫默认字体，启动同款)。
+        调用时机：帧边界(run() new_frame 前)，禁止 imgui 帧中。"""
+        old_tex = getattr(self._impl, "_font_texture", None)
+        if old_tex:
+            glDeleteTextures([old_tex])
+        # pyimgui 绑定的 destroy 必须显式传 ctx 对象(无参恒抛 Context invalid)
+        imgui.destroy_context(self._imgui_ctx)
+        self._imgui_ctx = imgui.create_context()
+        self._impl = PygameRenderer()
+        # spike 结论同款坑：pygame 集成不初始化 display_size，重建后必须补设，
+        # 否则下一帧 new_frame 断言 Invalid DisplaySize 崩溃。必须用 _display_size
+        # 权威值——surface 尺寸不随真实拖拽更新，用它会把 io 拉回初始尺寸 → UI
+        # 回到原尺寸挤在左上（用户实测：缩放后 UI 先跟随、去抖重建瞬间回退）
+        imgui.get_io().display_size = self._display_size
+        new_font = load_cjk_font(px)
+        if new_font is not None:
+            self.font = new_font
+            self._font_px = px
+            self._impl.refresh_font_texture()   # 新字体必须重烘焙，否则下帧断言
+            return True
+        self.font = None
+        self._font_px = 0
+        self._impl.refresh_font_texture()   # 空图集首烘自动垫默认字体(启动同款)
+        return False
+
+    def _apply_pending_resized_font(self):
+        """窗口化 resize 的字号档重建(run() 帧边界调用, 去抖见常量)。
+
+        拖拽中只记录 pending, 静止后一次重建(GL 纹理上传在帧边界, imgui 帧
+        中禁字体图集操作——同 _pending_rebuild 机制); 字体重载失败保留旧字
+        体(rebuild_window 同款回落)。预设帧渲染器 RT 按 create 时的 proj 定
+        尺寸, resize 后过期, 一并重建(设置保存同一条 reload 路径, 回落链兜底)。"""
+        if time.monotonic() - self._last_window_resize < self.FONT_RELOAD_DEBOUNCE_S:
+            return
+        px = self._pending_font_px
+        self._pending_font_px = None
+        self._reload_font(px)
+        if self._frame_renderer is not None:
+            self.reload_shader_preset()
+
+    def _capture_base_style(self):
+        """捕获 imgui 默认样式基准(创建上下文后调用一次; 每帧按缩放重设,
+        避免在缩放后的值上二次放大)"""
+        s = imgui.get_style()
+        self._base_style = {n: getattr(s, n) for n in self._STYLE_SCALED_VARS}
+
+    def _apply_ui_style_scale(self):
+        """按当前 UI 缩放重设样式表(run() 每帧 new_frame 前调用)"""
+        sc = ui_scale.current_scale()
+        s = imgui.get_style()
+        for name, base in self._base_style.items():
+            if isinstance(base, tuple):
+                setattr(s, name, tuple(round(b * sc) for b in base))
+            else:
+                setattr(s, name, base * sc)
 
     # ---- 输入 ----
     def _make_rc_input(self):
@@ -330,11 +464,14 @@ class App:
                 # 用户实飞「保存并应用」触发过；故 UI 处理器只置标记，此处执行）
                 self._pending_rebuild = False
                 self._pending_preset_reload = False  # rebuild 尾部已 reload，避免二次执行
+                self._pending_font_px = None   # rebuild 已按当前窗口高重载字体
                 self.rebuild_window()
             elif self._pending_preset_reload:
                 # 帧边界执行预设重载：GL 资源创建禁止在 imgui 帧中进行（同 _pending_rebuild）
                 self._pending_preset_reload = False
                 self.reload_shader_preset()
+            if self._pending_font_px is not None:
+                self._apply_pending_resized_font()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return
@@ -348,6 +485,17 @@ class App:
                     # 字体图集已由 rebuild_window 自管，这里只同步 display_size
                     if event.w > 0 and event.h > 0:
                         imgui.get_io().display_size = (event.w, event.h)
+                        self._display_size = (int(event.w), int(event.h))   # 权威值同步
+                        if self.settings.display_mode == "window":
+                            # 拖拽/最大化: 引擎视口+投影跟随新窗口尺寸,
+                            # window_size 实时记忆(退出 save_all 落盘),
+                            # 字号档 pending 由帧边界去抖重建(烘焙~0.5s/次)
+                            soup3D.resize(event.w, event.h)
+                            self.settings.window_size = (int(event.w), int(event.h))
+                            self._last_window_resize = time.monotonic()
+                            px = ui_scale.font_px(event.h)
+                            if px != self._font_px:
+                                self._pending_font_px = px
                     continue
                 self._impl.process_event(event)
                 self.screen.handle_event(event)
@@ -407,6 +555,7 @@ class App:
             # 喂 imgui；clock.tick 整数毫秒在高帧率下可量化为 0ms，下限 1ms
             # 防 UI 时间冻结
             imgui.get_io().delta_time = dt if dt > 0.0 else 0.001
+            self._apply_ui_style_scale()
             imgui.new_frame()
             # push 前捕获：render_ui 处理器可能触发重建改动 self.font（帧中禁字体
             # 图集操作），pop 条件若再读 self.font 会与 push 时不一致 → 栈失衡
@@ -501,7 +650,7 @@ class App:
             return
         io = imgui.get_io()
         w, h = io.display_size
-        imgui.set_next_window_position(w - 240, 8)  # 固定右上角（宽 240 预留）
+        imgui.set_next_window_position(w - ui_scale.u(240), ui_scale.u(8))  # 固定右上角
         flags = (imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_ALWAYS_AUTO_RESIZE |
                  imgui.WINDOW_NO_MOVE)
         imgui.push_style_color(imgui.COLOR_WINDOW_BACKGROUND, 0, 0, 0, 0.5)  # 半透明底
@@ -565,8 +714,8 @@ class App:
         if not self._gs_window_spawned:
             # 仅 App 生命周期内首帧定位：每帧 set 会覆盖用户拖动后的位置
             io = imgui.get_io()
-            imgui.set_next_window_position(io.display_size.x - 440, 30)
-            imgui.set_next_window_size(420, 0)   # 宽固定高自适应（内容少不溢出）
+            imgui.set_next_window_position(io.display_size.x - ui_scale.u(440), ui_scale.u(30))
+            imgui.set_next_window_size(ui_scale.u(420), 0)   # 宽固定高自适应（内容少不溢出）
             self._gs_window_spawned = True
         # 默认标题栏（无 NO_MOVE/NO_TITLE_BAR）→ 可拖动；NO_COLLAPSE 防折叠丢地址
         imgui.begin("地面站连接", flags=imgui.WINDOW_NO_COLLAPSE)
@@ -575,7 +724,7 @@ class App:
             imgui.push_id(f"addr{i}")   # 同名「复制」按钮按行隔离
             imgui.text(line)
             imgui.same_line()
-            if imgui.button("复制", 72, 22):
+            if imgui.button("复制", ui_scale.u(72), ui_scale.u(22)):
                 if self.copy_text_to_clipboard(line):
                     self._gs_copy_fail = None
                 else:
@@ -585,7 +734,7 @@ class App:
             imgui.pop_id()
         if self._gs_error:
             imgui.text(self._gs_error)
-        if imgui.button("断开", 160, 40):
+        if imgui.button("断开", ui_scale.u(160), ui_scale.u(40)):
             try:
                 srv.stop()
             except OSError as e:

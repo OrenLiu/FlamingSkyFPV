@@ -5,6 +5,8 @@ def main():
     parser = argparse.ArgumentParser(description="FlamingSkyFPV 开源 FPV 穿越机模拟器")
     parser.add_argument("--frames", type=int, default=None, help="运行 N 帧后退出（冒烟测试）")
     args = parser.parse_args()
+    import bootstrap
+    bootstrap.ensure_user_files()  # 数据根 chdir + 缺失辅助文件生成(先于一切相对路径 IO)
     from app import App
     app = App()
     try:

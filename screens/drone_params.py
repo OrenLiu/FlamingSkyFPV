@@ -14,6 +14,7 @@ from config_store import (DRONES_DIR, DroneParams, PIDGains, RateParams,
                           list_preset_ids, load_preset, save_preset,
                           sanitize_preset_id, set_cells_auto, set_cells_manual)
 from physics.battery import CHEMS   # 真实电池模拟：化学体系标签/满电放空参考值
+from ui_scale import u
 
 RATE_TYPES = ["betaflight_actual", "linear"]
 AXES = ["roll", "pitch", "yaw"]
@@ -100,12 +101,12 @@ class DroneParamsScreen(Screen):
 
     # ---- 列表态 ----
     def _render_list(self):
-        imgui.set_next_window_position(30, 30)
+        imgui.set_next_window_position(u(30), u(30))
         io = imgui.get_io()
         # 高度必须固定为视口可用高度（上 30 + 下 30 边距）：0=自适应时 imgui
         # 把窗口钳到视口高减安全边距，顶部又偏移 30 → 底部永远压出屏幕外；
         # 固定高度后 imgui 自动为溢出内容出滚动条（一期参数窗口同做法）
-        imgui.set_next_window_size(620, io.display_size[1] - 60)
+        imgui.set_next_window_size(u(620), io.display_size[1] - u(60))
         imgui.begin("无人机参数", flags=imgui.WINDOW_NO_COLLAPSE)
         imgui.text("点击行选中当前无人机；复制可新建预设")
         imgui.separator()
@@ -127,10 +128,10 @@ class DroneParamsScreen(Screen):
         代号/标签（直绘不产生 imgui item，不与按钮抢点击；flight.py _scene_card
         同手法）；右段编辑/复制/删除三按钮。push_id 隔离各行同名控件"""
         gap = imgui.get_style().item_spacing.x
-        sel_w = max(80.0, avail - (ROW_BTN_W * 3 + gap * 3))
+        sel_w = max(u(80), avail - (u(ROW_BTN_W) * 3 + gap * 3))
         imgui.push_id(pid)
         is_cur = pid == self.app.settings.current_drone_id
-        clicked = imgui.invisible_button("##sel", sel_w, ROW_H)
+        clicked = imgui.invisible_button("##sel", sel_w, u(ROW_H))
         hovered = imgui.is_item_hovered()
         p = imgui.get_item_rect_min()
         e = imgui.get_item_rect_max()
@@ -147,22 +148,22 @@ class DroneParamsScreen(Screen):
         dl.add_rect(p.x, p.y, e.x, e.y, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, edge))
         # 代号 +「当前无人机」标签垂直居中
         name_size = imgui.calc_text_size(pid)
-        ty = p.y + (ROW_H - name_size.y) / 2
-        dl.add_text(p.x + 10, ty, imgui.get_color_u32_rgba(0.92, 0.92, 0.95, 1.0), pid)
+        ty = p.y + (u(ROW_H) - name_size.y) / 2
+        dl.add_text(p.x + u(10), ty, imgui.get_color_u32_rgba(0.92, 0.92, 0.95, 1.0), pid)
         if is_cur:
-            dl.add_text(p.x + 10 + name_size.x + 12, ty,
+            dl.add_text(p.x + u(10) + name_size.x + u(12), ty,
                         imgui.get_color_u32_rgba(0.45, 0.90, 0.55, 1.0), "当前无人机")
         if clicked and not is_cur:
             self.app.select_drone(pid)   # 换机 + current_drone_id 落盘（Task 3 接口）
         imgui.same_line()
-        if imgui.button("编辑", ROW_BTN_W, ROW_H):
+        if imgui.button("编辑", u(ROW_BTN_W), u(ROW_H)):
             self._begin_edit(pid)
         imgui.same_line()
-        if imgui.button("复制", ROW_BTN_W, ROW_H):
+        if imgui.button("复制", u(ROW_BTN_W), u(ROW_H)):
             self._copy_src = pid
             self._copy_buf = pid    # 预填源代号：直接确认即得 -2 序号新预设
         imgui.same_line()
-        if imgui.button("删除", ROW_BTN_W, ROW_H):
+        if imgui.button("删除", u(ROW_BTN_W), u(ROW_H)):
             self._del_target = pid
         imgui.pop_id()
 
@@ -178,13 +179,13 @@ class DroneParamsScreen(Screen):
             name_ok = bool(self._copy_buf.strip())
             if not name_ok:
                 imgui.text("代号不能为空")
-            if imgui.button("确认", 160, 40) and name_ok:
+            if imgui.button("确认", u(160), u(40)) and name_ok:
                 copy_preset(DRONES_DIR, self._copy_src, self._copy_buf)
                 self._refresh_ids()
                 self._copy_src = None
                 imgui.close_current_popup()
             imgui.same_line()
-            if imgui.button("取消", 160, 40):
+            if imgui.button("取消", u(160), u(40)):
                 self._copy_src = None
                 imgui.close_current_popup()
             imgui.end_popup()
@@ -196,7 +197,7 @@ class DroneParamsScreen(Screen):
             imgui.open_popup("删除无人机")
         if imgui.begin_popup_modal("删除无人机", flags=imgui.WINDOW_ALWAYS_AUTO_RESIZE)[0]:
             imgui.text(f"删除无人机：{self._del_target}？")
-            if imgui.button("确认删除", 160, 40):
+            if imgui.button("确认删除", u(160), u(40)):
                 pid = self._del_target
                 delete_preset(DRONES_DIR, pid)
                 if pid == self.app.settings.current_drone_id:
@@ -211,7 +212,7 @@ class DroneParamsScreen(Screen):
                 self._del_target = None
                 imgui.close_current_popup()
             imgui.same_line()
-            if imgui.button("取消", 160, 40):
+            if imgui.button("取消", u(160), u(40)):
                 self._del_target = None
                 imgui.close_current_popup()
             imgui.end_popup()
@@ -275,10 +276,10 @@ class DroneParamsScreen(Screen):
         self._persist()
 
     def _render_edit(self):
-        imgui.set_next_window_position(30, 30)
+        imgui.set_next_window_position(u(30), u(30))
         io = imgui.get_io()
         # 高度固定理由同列表态：0=自适应会把底部按钮压出屏幕外
-        imgui.set_next_window_size(620, io.display_size[1] - 60)
+        imgui.set_next_window_size(u(620), io.display_size[1] - u(60))
         imgui.begin("无人机参数", flags=imgui.WINDOW_NO_COLLAPSE)
 
         # 代号（两模式共用）：保存时 sanitize 后与旧 id 比较；冲突即时提示
@@ -296,24 +297,24 @@ class DroneParamsScreen(Screen):
 
         imgui.separator()
         # 底部按钮：首行三常规按钮（一期布局），次行按模式分派转换/地面站
-        if imgui.button("保存", BTN_W, BTN_H) and not name_conflict:
+        if imgui.button("保存", u(BTN_W), u(BTN_H)) and not name_conflict:
             self._save_edit()
         imgui.same_line()
-        if imgui.button("恢复默认", BTN_W, BTN_H):
+        if imgui.button("恢复默认", u(BTN_W), u(BTN_H)):
             # 默认机即参数模式机：virtual_fc 一并回 False，表单随之切回
             self._p = default_drone_params()
         imgui.same_line()
-        if imgui.button("返回列表", BTN_W, BTN_H):
+        if imgui.button("返回列表", u(BTN_W), u(BTN_H)):
             self.stage = "list"
             self._refresh_ids()
         if self._p.virtual_fc:
-            if imgui.button("接入地面站", CONV_BTN_W, BTN_H):
+            if imgui.button("接入地面站", u(CONV_BTN_W), u(BTN_H)):
                 self._gs_start()
             imgui.same_line()
-            if imgui.button("转换为参数模式", CONV_BTN_W, BTN_H):
+            if imgui.button("转换为参数模式", u(CONV_BTN_W), u(BTN_H)):
                 self._convert_to_param()
         else:
-            if imgui.button("转换为虚拟飞控", CONV_BTN_W, BTN_H):
+            if imgui.button("转换为虚拟飞控", u(CONV_BTN_W), u(BTN_H)):
                 self._conv_ask = True   # 先确认（有损动作：调参域易手）
         if self._gs_error:
             imgui.text(self._gs_error)
@@ -379,13 +380,13 @@ class DroneParamsScreen(Screen):
         # set_cells_manual/set_cells_auto 纯函数（与 MSP 95 同路径）
         if p.virtual.cells_auto:
             imgui.text(f"电池节数：自动识别 {p.virtual.cells}S（依据电池电压）")
-            if imgui.button("手动指定", 120, 30):
+            if imgui.button("手动指定", u(120), u(30)):
                 set_cells_manual(p, p.virtual.cells)  # 以当前识别值为起点转手动
         else:
             _, cells = imgui.input_int("电池节数", int(p.virtual.cells), 1, 10)
             set_cells_manual(p, max(1, int(cells)))
             imgui.same_line()
-            if imgui.button("恢复自动", 120, 30):
+            if imgui.button("恢复自动", u(120), u(30)):
                 set_cells_auto(p)
 
     def _render_body_form(self, p):
@@ -447,12 +448,12 @@ class DroneParamsScreen(Screen):
                                    flags=imgui.WINDOW_ALWAYS_AUTO_RESIZE)[0]:
             imgui.text("是否转换为虚拟飞控？")
             imgui.text("转换后，需要进入 Betaflight 地面站对无人机进行调整。")
-            if imgui.button("确认", 160, 40):
+            if imgui.button("确认", u(160), u(40)):
                 self._conv_ask = False
                 self._convert_to_vfc()
                 imgui.close_current_popup()
             imgui.same_line()
-            if imgui.button("取消", 160, 40):
+            if imgui.button("取消", u(160), u(40)):
                 self._conv_ask = False
                 imgui.close_current_popup()
             imgui.end_popup()

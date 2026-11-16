@@ -22,13 +22,20 @@ WebSocket（浏览器版 Configurator）：读线程内完成 RFC6455 握手后�
 """
 import logging
 import os
-import pty
 import queue
 import select
 import socket
 import threading
-import tty
 from typing import Callable
+
+# pty/tty 为 POSIX 专属模块(Windows 无):缺失时 PTY 传输停用,TCP/WS 不受
+# 影响——Windows 打包(VfcServer.start)由此不崩,start_pty 内降级提示
+try:
+    import pty
+    import tty
+    HAVE_PTY = True
+except ImportError:  # pragma: no cover - 仅 Windows 走此分支
+    HAVE_PTY = False
 
 from msp.cli import MspCliDemux
 from msp.protocol import MspRequest, build_v1_frame, build_v2_frame
@@ -176,6 +183,9 @@ class VfcServer:
         """PTY 传输：master 读线程持有收包；失败打印降级（仅 TCP）"""
         if self._master_fd is not None:
             return  # 幂等：已启动
+        if not HAVE_PTY:
+            log.info("当前平台无 pty/tty(Windows),PTY 通道停用,仅 TCP/WS 接入")
+            return
         try:
             master_fd, slave_fd = pty.openpty()
         except OSError as e:
