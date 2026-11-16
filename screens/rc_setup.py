@@ -122,12 +122,12 @@ class RCSetupScreen(Screen):
                 self._render_aux_row(i, key, n_btn, n_axis, ch)
         if self._msg:
             imgui.text(self._msg)
-        # 底部按钮行：左「返回主菜单」右「应用并保存」
-        if imgui.button("返回主菜单", u(180), u(40)):
+        # 底部按钮行：左「返回」右「保存并应用」
+        if imgui.button("返回", u(180), u(40)):
             self._back()
         imgui.same_line()
-        imgui.set_cursor_pos_x(u(364))   # 窗口宽 560：右缘对齐「应用并保存」
-        if imgui.button("应用并保存", u(180), u(40)):
+        imgui.set_cursor_pos_x(u(364))   # 窗口宽 560：右缘对齐「保存并应用」
+        if imgui.button("保存并应用", u(180), u(40)):
             if joy is not None and devs:
                 self.app.rc_config.mode = "joystick"
                 self.app.rc_config.device_name = devs[self._dev_index][1]
