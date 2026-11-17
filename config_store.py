@@ -148,11 +148,17 @@ class BatteryParams:
     max_cell_v: float = 4.3           # 单芯最高电压 V（OSD 图标段缩放上下限）
 
 
-# 参数 schema 版本：5 = 虚拟飞控域（DroneParams 新增 virtual_fc/virtual 字段，
-# additive 迁移：pid/rate 不重置）。4 = PID 刻度对齐 Betaflight 量级（P≈40，见
-# physics.drone.PID_MIX_SCALING）。3 = 三轴 rate + 小刻度 PID（仅 pid 过时）；
-# 缺失/更早 = 旧量级 PID 或全局单份 rate。加载时按版本迁移（见 ConfigStore.load）
-PARAMS_SCHEMA = 5
+# 参数 schema 版本：6 = 阻力二次化（drag_k 语义 线性 N·s/m → 二次 N·s²/m²，
+# 迁移换算 drag_k /= DRAG_REF_SPEED）。5 = 虚拟飞控域（DroneParams 新增
+# virtual_fc/virtual 字段，additive 迁移：pid/rate 不重置）。4 = PID 刻度对齐
+# Betaflight 量级（P≈40，见 physics.drone.PID_MIX_SCALING）。3 = 三轴 rate +
+# 小刻度 PID（仅 pid 过时）；缺失/更早 = 旧量级 PID 或全局单份 rate。加载时
+# 按版本迁移（见 ConfigStore.load）
+PARAMS_SCHEMA = 6
+
+# v6 迁移参考速度 m/s：线性阻力 T13 极速标定参考点（~30m/s）。旧线性值按
+# drag_k/DRAG_REF_SPEED 换算为二次系数，使 30m/s 处阻力大小不变、高速手感连续
+DRAG_REF_SPEED = 30.0
 
 @dataclass
 class DroneParams:
@@ -174,10 +180,12 @@ class DroneParams:
     # 不升 schema
     tpa_percent: float = 65.0          # 满油门衰减 %
     tpa_breakpoint: float = 0.30       # 断点油门比例（断点以下不衰减）
-    # 线性空气阻力 N·s/m（阻力 = drag_k×速度，physics.world.step 消费）。默认 1.2 =
-    # T13 标定值——默认机（550g/推重比 7）俯冲极速 ~30m/s；轻量高推机（如 240g/8.6）
-    # 按手感调低（0.4~0.6 → 极速 33~50m/s），0 = 无阻力。additive 字段不升 schema
-    drag_k: float = 1.2
+    # 二次空气阻力 N·s²/m²（阻力 = drag_k×速度²，方向沿速度反向；physics.
+    # world.step 消费）。默认 0.0415 = T13 极速标定换算——默认机（550g/推重比 7）
+    # 平飞极速 ~30m/s 不变；自由落体终端速度 = sqrt(m·g/drag_k)（如 240g/0.0167
+    # → ~12m/s ≈ 43km/h，修复线性模型 21km/h 天花板）。旧线性档迁移 /30
+    # （params_schema v6），0 = 无阻力
+    drag_k: float = 0.0415
     # 当前电池电压 V：电机转速 ∝ KV×V、推力 ∝ 转速² → 推力按 (V/14.8)² 缩放
     # （physics.drone.REF_VOLTAGE）。默认 14.8（4S 标称）保持既有行为；参考：满电
     # 4S = 16.8（推力 ×1.288）、3S = 11.1（×0.563）。additive 字段不升 schema
@@ -372,16 +380,21 @@ class ConfigStore:
                 obj.window_size = ws if ws[0] > 0 and ws[1] > 0 else (1280, 720)
             except (TypeError, ValueError, IndexError):
                 obj.window_size = (1280, 720)
-        # 参数版本迁移（三档）：v4 档 additive——pid/rate 自调保留，仅升版本
-        # （缺失的 virtual_fc/virtual 键 _rebuild 已补默认）；v3 档仅 PID 小刻度
-        # 过时（rate 语义未变）→ 只重置 pid；缺失/更早版本量级/结构与现行不符
-        # （PID 旧量级加载即 bang-bang、rate 为全局单份标量）→ pid 与 rate 整体
-        # 重置。其余字段均保留。
+        # 参数版本迁移（v6/5/4/更早四档）：v6 档仅 drag_k 语义换算（线性→二次，
+        # /DRAG_REF_SPEED）；v5/v4 档 additive——pid/rate 自调保留，仅 drag_k
+        # 换算+升版本（缺失的 virtual_fc/virtual 键 _rebuild 已补默认）；v3 档仅
+        # PID 小刻度过时（rate 语义未变）→ 只重置 pid；缺失/更早版本量级/结构
+        # 与现行不符（PID 旧量级加载即 bang-bang、rate 为全局单份标量）→ pid
+        # 与 rate 整体重置。其余字段均保留。
         # 注意须查原始 JSON：_rebuild 对缺失键会补 dataclass 默认值，查对象会漏掉旧档
         if cls is DroneParams and isinstance(data, dict) \
                 and data.get("params_schema") != PARAMS_SCHEMA:
             ver = data.get("params_schema")
-            if ver != 4:                    # 非 v4 档才重置（v4 档 additive：仅升版本，不重置任何字段）
+            # v6 阻力二次化：凡旧档 drag_k 一律 /DRAG_REF_SPEED——30m/s 参考速度
+            # 处阻力大小不变（线性 T13 极速标定参考点），高速手感连续；v4 及更早
+            # 档 drag_k 同为线性语义，一并换算
+            obj.drag_k = obj.drag_k / DRAG_REF_SPEED
+            if ver not in (4, 5):           # v4/v5 档 additive：pid/rate 自调保留不重置
                 d = default_drone_params()
                 obj.pid = d.pid
                 if ver != 3:                # v3 档仅 pid 过时，rate 语义未变
