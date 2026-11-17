@@ -546,8 +546,8 @@ class DroneParamsScreen(Screen):
             # 派生值，转 vfc 时自洽）
             if p.virtual.cells_auto:
                 set_cells_auto(p)
-        # 线性空气阻力 N·s/m：默认 1.2 为默认机标定值，轻量高推机按手感调低
-        p.drag_k = _input("空气阻力", p.drag_k, 0.1, default=d.drag_k)
+        # 二次空气阻力 N·s²/m²：默认 0.0415 为默认机极速标定换算，轻量高推机按手感调低
+        p.drag_k = _input("空气阻力", p.drag_k, 0.001, "%.3g", default=d.drag_k)
         p.camera_angle_deg = _input("摄像头角度 (°)", p.camera_angle_deg, 1.0,
                                     default=d.camera_angle_deg)
 
