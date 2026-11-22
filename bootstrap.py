@@ -14,11 +14,14 @@ chdir 到数据根使既有全部 cwd 相对路径(config/、scene/、shader_pac
 或 macOS 签名包回退用户数据目录) > 源码运行仓库根。
 """
 import json
+import logging
 import os
 import shutil
 import sys
 
 from config_store import CONFIG_DIR, DRONES_DIR, ConfigStore, RCConfig, Settings
+
+log = logging.getLogger(__name__)
 from factory_defaults import factory_drones
 
 _APP_DIRNAME = "FlamingSkyFPV"
@@ -89,6 +92,7 @@ def ensure_user_files(data_root=None, resource_root=None) -> str:
     显式传参供测试注入;正常入口无参调用。返回最终数据根。"""
     data_root = os.path.abspath(data_root or resolve_data_root())
     resource_root = os.path.abspath(resource_root or resolve_resource_root())
+    log.info("data root: %s (resource root: %s)", data_root, resource_root)
     if not _ensure_writable_dir(data_root):
         raise RuntimeError(f"数据目录不可写且无法创建: {data_root}")
     os.chdir(data_root)
@@ -101,13 +105,17 @@ def ensure_user_files(data_root=None, resource_root=None) -> str:
     # 用户的 settings/rc 永不被自举覆盖
     store = ConfigStore(CONFIG_DIR)
     if not os.path.exists(os.path.join(CONFIG_DIR, "settings.json")):
+        log.info("first launch: writing default settings.json")
         store.save("settings", Settings())
     if not os.path.exists(os.path.join(CONFIG_DIR, "rc.json")):
+        log.info("first launch: writing default rc.json")
         store.save("rc", RCConfig())
 
     # 出厂无人机:仅当预设目录一台都没有时播种(部分存在 = 用户已管理,
     # 缺台不补——删机是有意行为)
     if not [n for n in os.listdir(DRONES_DIR) if n.endswith(".json")]:
+        log.info("drones dir empty: seeding factory presets: %s",
+                 ", ".join(factory_drones().keys()))
         for preset_id, payload in factory_drones().items():
             path = os.path.join(DRONES_DIR, f"{preset_id}.json")
             with open(path, "w", encoding="utf-8") as f:
@@ -128,5 +136,6 @@ def ensure_user_files(data_root=None, resource_root=None) -> str:
                 src = os.path.join(seed_root, name)
                 dst = os.path.join("scene", name)
                 if os.path.isdir(src) and not os.path.exists(dst):
+                    log.info("copying seed scene: %s", name)
                     shutil.copytree(src, dst)
     return data_root

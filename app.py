@@ -1,4 +1,5 @@
 """App：pygame 主循环 + Screen 状态机 + AppContext（设计文档第 3 节）"""
+import logging
 import os
 import sys
 import time
@@ -28,6 +29,8 @@ from msp.server import VfcServer
 from screens.flight import FlightScreen   # _msp_state 的 isinstance 判定（app → screens 单向合法）
 from debug_frame_log import FrameLogger, frame_log_enabled  # 卡顿记录仪（FLAME_STUTTER_LOG 门控）
 import ui_scale   # UI 等比缩放（布局像素换算 u()、字号档 font_px、样式表缩放）
+
+log = logging.getLogger(__name__)
 
 RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]  # 设置页候选（全屏/固定窗口的逻辑分辨率；窗口化跟随窗口）
 # 配置根/预设目录常量在 config_store 定义（app 与 screens 同源引用，防漂移）
@@ -256,6 +259,9 @@ class App:
         """设置变更后的热重建：重开窗口 + soup3D 重初始化 + 字体/界面资源重载。
         GL 上下文重建失败时置 restart_needed=True（UI 提示重启生效）——Task 8 接线。"""
         try:
+            log.info("rebuild window: mode=%s res=%s fps=%s",
+                     self.settings.display_mode, self.settings.resolution,
+                     self.settings.fps_mode)
             # OPENGL 窗口 set_mode 同 flag 不改尺寸（pygame 2.6.1 实测）：
             # 先关窗销毁旧 GL 上下文，再按新尺寸/模式重开（__init__ 首开无需此步）
             pygame.display.set_mode((0, 0))
@@ -369,6 +375,7 @@ class App:
                     j = pygame.joystick.Joystick(i)
                     if j.get_name() == self.rc_config.device_name:
                         j.init()
+                        log.info("joystick connected: %s", j.get_name())
                         # 二期 AUX：按钮源 + 轴数/按钮数传入（越界防御换设备回中）
                         return JoystickInput(j.get_axis, self.rc_config.mappings,
                                              get_button_fn=j.get_button,
@@ -394,7 +401,8 @@ class App:
                 self.rc_input = KeyboardInput()
                 self.joystick_lost = True
                 self.joystick_recovered = False
-                print(f"[输入] 手柄已断开，回落键盘: {self.rc_config.device_name}")
+                log.info("joystick lost, fallback to keyboard: %s",
+                         self.rc_config.device_name)
             return
         # 出现方向：仅手柄配置参与自动拾取（键盘配置的手柄只作 UI 设备源）
         if self.rc_config.mode != "joystick" or not self.rc_config.device_name:
@@ -407,7 +415,7 @@ class App:
             self.rc_input = picked
             self.joystick_lost = False
             self.joystick_recovered = True
-            print(f"[输入] 手柄已自动连接: {self.rc_config.device_name}")
+            log.info("joystick auto-connected: %s", self.rc_config.device_name)
         else:
             self._joystick_pickup_after = now + JOYSTICK_PICKUP_RETRY_S
 
@@ -416,6 +424,7 @@ class App:
         if self.screen:
             self.screen.exit()
         self.screen = screen
+        log.info("enter screen: %s", type(screen).__name__)
         screen.enter(self)
 
     # ---- MSP 状态源（Task 19） ----
@@ -635,11 +644,17 @@ class App:
             self.preset = loaded
             self._frame_renderer = renderer
             self.preset_fallback = loaded.info.id != self.settings.shader_preset
+            if self.preset_fallback:
+                log.warning("shader preset fallback: requested '%s', applied '%s'",
+                            self.settings.shader_preset, loaded.info.id)
+            else:
+                log.info("shader preset applied: %s", loaded.info.id)
         except Exception:
             # 兜底：连性能优先包都加载失败（内置包损坏的异常情形）→ 空预设走默认
             # 管线；flight 注入点对 preset=None 会 AttributeError → 场景加载失败进
             # 错误弹窗，游戏本体仍可用（spec 6 错误表的最终降级）
             traceback.print_exc()
+            log.error("all shader packs failed, falling back to default pipeline")
             self.preset = None
             self._frame_renderer = None
             self.preset_fallback = True
@@ -747,6 +762,7 @@ class App:
     def select_drone(self, preset_id: str) -> None:
         """切换当前机：加载预设为新 DroneParams 对象（参数页编辑对象随之换） +
         current_drone_id 记忆即时落盘（仅 settings，整机参数由 save_all/save_preset）"""
+        log.info("select drone preset: %s", preset_id)
         self.drone_params = load_preset(DRONES_DIR, preset_id)
         self.settings.current_drone_id = preset_id
         self.store.save("settings", self.settings)
@@ -754,6 +770,8 @@ class App:
     def save_all(self):
         """退出/手动保存：settings + rc + 当前机预设（一期 store.save("drone")
         路径至此退役；参数页保存按钮的旧路径 Task 5 移除）"""
+        log.info("save all (exit): drone preset '%s'",
+                 self.settings.current_drone_id)
         self.store.save("settings", self.settings)
         save_preset(DRONES_DIR, self.settings.current_drone_id, self.drone_params)
         self.store.save("rc", self.rc_config)

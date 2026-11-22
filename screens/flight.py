@@ -1,5 +1,6 @@
 """飞行界面：场景选择 → 花式飞行（相机由 PyBullet 位姿驱动）+ HUD/OSD + Esc 菜单"""
 import json
+import logging
 import math
 import os
 import time
@@ -19,6 +20,8 @@ import bootstrap
 from osd_font import (parse_mcm, bake_atlas, free_atlas,
                       MAX7456_FORMAT, ATLAS_COLS)
 from ui_scale import u
+
+log = logging.getLogger(__name__)
 
 
 def _glyph_cell(display_w: float, display_h: float) -> tuple:
@@ -218,6 +221,9 @@ class FlightScreen(Screen):
     # ---- 场景加载/卸载 ----
     def _load_scene(self):
         s = self._scene
+        log.info("loading scene '%s': model=%s scale=%s spawn=%s",
+                 s.name, s.model, s.scale, s.spawn)
+        t0 = time.perf_counter()
         sky = s.sky   # 天空配置：太阳参数同时驱动方向光与画面优先包的天空盒
         obj = s.dir / s.model
         mtl = obj.with_suffix(".mtl")
@@ -245,8 +251,11 @@ class FlightScreen(Screen):
         self._world.reset(s.spawn)
         self._fc = FlightController(self.app.drone_params)
         self.stage = "flying"
+        log.info("scene loaded in %.2fs: %s", time.perf_counter() - t0, s.name)
 
     def _teardown_scene(self):
+        if self._scene is not None:
+            log.info("leaving scene: %s", self._scene.name)
         # 灯光必须 destroy()：Direct.__init__ 自登记进引擎全局 light_queue（强引用），
         # 弃引用不会注销——旧灯保持点亮，每次进场景叠加一盏方向光（场景越来越亮）。
         # 置 None 防双重 destroy（加载失败路径可能 teardown 两次，destroy 已删键再删会 KeyError）

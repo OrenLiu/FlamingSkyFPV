@@ -1,11 +1,15 @@
 """设置界面：显示模式（全屏/固定大小窗口化/窗口化）+ 分辨率/帧率/画质预设；
 保存即写盘并热重建（失败回落重启提示）"""
+import logging
+
 import imgui
 import pygame
 from .base import Screen
 from app import RESOLUTIONS
 from config_store import DISPLAY_MODES
 from ui_scale import u
+
+log = logging.getLogger(__name__)
 
 # 最大帧率下拉：标签（显示）↔ fps_mode 存档值（config_store.Settings）双向映射
 FPS_MODES = ["vsync", "30", "60", "120", "144", "165", "240", "unlimited"]
@@ -87,6 +91,10 @@ class SettingsScreen(Screen):
             self.app.settings.display_mode = self._mode
             self.app.settings.fps_mode = self._fps
             self.app.settings.shader_preset = self._preset_id
+            log.info("settings saved: mode=%s res=%s window=%s fps=%s preset=%s",
+                     self.app.settings.display_mode, self.app.settings.resolution,
+                     self.app.settings.window_size, self.app.settings.fps_mode,
+                     self.app.settings.shader_preset)
             self.app.store.save("settings", self.app.settings)
             # 不在此处直接 rebuild_window()：此刻处于 imgui 帧中间，字体图集操作
             # （load_cjk_font → add_font）帧中失败被吞 → font 置 None → 主循环

@@ -1,7 +1,10 @@
 """场景枚举与校验：scene/<名>/config.json（name/model 必填，scale/spawn 可选）"""
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 @dataclass
 class SceneInfo:
@@ -28,6 +31,7 @@ def list_scenes(scene_root: str = "scene") -> list:
         info = SceneInfo(dir=d)
         cfg = d / "config.json"
         try:
+            log.debug("reading scene config: %s", cfg)
             data = json.loads(cfg.read_text(encoding="utf-8"))
             info.name = str(data["name"])
             info.model = str(data["model"])
@@ -76,5 +80,8 @@ def list_scenes(scene_root: str = "scene") -> list:
             info.valid = False
             info.error = str(e)
             info.name = info.name or d.name
+            log.warning("invalid scene '%s': %s", d.name, e)
         out.append(info)
+    log.info("scene scan: %d found (%d valid) in %s",
+             len(out), sum(1 for i in out if i.valid), root)
     return out

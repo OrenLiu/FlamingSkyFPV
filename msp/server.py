@@ -160,7 +160,7 @@ class VfcServer:
             self.start_websocket(_WS_PORT_DEFAULT if ws_port is None
                                  else ws_port)
         except OSError as e:
-            log.info("WebSocket 启动失败，仅 TCP/PTY 接入：%s", e)
+            log.info("WebSocket start failed, TCP/PTY only: %s", e)
 
     def start_tcp(self, port: int = 5761) -> None:
         """TCP 传输：bind 127.0.0.1:port（port=0 内核分配）；占用抛 OSError"""
@@ -184,12 +184,12 @@ class VfcServer:
         if self._master_fd is not None:
             return  # 幂等：已启动
         if not HAVE_PTY:
-            log.info("当前平台无 pty/tty(Windows),PTY 通道停用,仅 TCP/WS 接入")
+            log.info("no pty/tty on this platform (Windows), PTY disabled, TCP/WS only")
             return
         try:
             master_fd, slave_fd = pty.openpty()
         except OSError as e:
-            log.info("PTY 创建失败，仅 TCP 接入：%s", e)
+            log.info("PTY creation failed, TCP only: %s", e)
             return
         # slave_fd 由服务器自持：外部地面站断开后 master 读不会陷入 EIO 忙转
         self._master_fd, self._slave_fd = master_fd, slave_fd
@@ -313,15 +313,15 @@ class VfcServer:
             try:
                 state = self._state_provider()
             except Exception as e:  # provider 故障不中断主循环（按无状态分派）
-                log.warning("state_provider 异常：%s", e)
+                log.warning("state_provider error: %s", e)
         if handler is None:
-            log.debug("未实现命令 %s，空载荷应答", req.cmd)
+            log.debug("unimplemented cmd %s, empty payload reply", req.cmd)
             payload = b""
         else:
             try:
                 payload = handler(req.payload, state)
             except Exception as e:  # handler 故障不得中断主循环
-                log.warning("命令 %s handler 异常：%s", req.cmd, e)
+                log.warning("cmd %s handler error: %s", req.cmd, e)
                 payload = b""
                 state = None   # 异常路径不产生变更信号（半途置 changed 亦无效）
         frame = (build_v2_frame(">", req.cmd, payload) if req.v2
@@ -330,7 +330,7 @@ class VfcServer:
             transport.send(frame)
         except OSError as e:
             # 对端已断：清死连接（读线程随后 recv 出错自行退出）
-            log.info("应答发送失败，清理连接：%s", e)
+            log.info("reply send failed, closing connection: %s", e)
             sock = transport.sock
             if sock is not None:
                 try:
@@ -449,7 +449,7 @@ class VfcServer:
                     closing = True
                 # OP_TEXT/OP_PONG：Configurator 二进制透传不用，忽略
             if error is not None:
-                log.info("%s，断开 WS 连接", error)
+                log.info("%s, disconnecting WS connection", error)
                 break
             if closing:
                 break
@@ -472,7 +472,7 @@ class VfcServer:
             if b"\r\n\r\n" in data:
                 break
             if len(data) > _WS_HANDSHAKE_MAX:
-                log.warning("WS 握手请求超限，拒绝")
+                log.warning("WS handshake request too large, rejected")
                 return None
             try:
                 chunk = sock.recv(_CHUNK)
@@ -490,7 +490,7 @@ class VfcServer:
             return None  # 停止时跳出循环无终止符
         resp = websocket_handshake(head)
         if resp is None:
-            log.warning("非法 WS 握手请求，拒绝连接")
+            log.warning("invalid WS handshake request, rejected")
             try:
                 sock.sendall(b"HTTP/1.1 400 Bad Request\r\n"
                              b"Connection: close\r\n\r\n")
