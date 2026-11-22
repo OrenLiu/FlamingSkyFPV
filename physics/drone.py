@@ -244,6 +244,9 @@ class FlightController:
         self.armed = False
         self.arm_denied_once = False
         self._flip_over_latched = False
+        # ARM_SWITCH 粘性禁飞位（core.c updateArmingStatus L415-423）：解锁被拒
+        # 且 ARM 保持 ON → 置位；撤 ARM 才清除（油门收回不解锁，须重新上锁再解锁）
+        self._arm_switch_latched = False
         # 真实电池模拟（physics/battery.py）：sim_enabled 才建 BatterySim。
         # set_params 重建时电池配置未变 → 保留 SoC/消耗（MSP 写参数≠换电池，
         # restore_after_rebuild 同语义家族）；配置变更 → 换新电池（满电重建）
@@ -280,7 +283,8 @@ class FlightController:
         if self._virtual_fc:
             if BOX_ARM in boxes:
                 if not self.armed:
-                    if ch.throttle < ARM_THROTTLE_MAX:
+                    if (ch.throttle < ARM_THROTTLE_MAX
+                            and not self._arm_switch_latched):
                         self.armed = True
                         self.arm_denied_once = False
                         # 反乌龟解锁锁存（Task 54，core.c tryArm L528-533）：
@@ -294,8 +298,14 @@ class FlightController:
                     else:
                         # 油门保护：高油门尝试解锁被拒（ latch 一次供 UI 提示）
                         self.arm_denied_once = True
+                        # ARM_SWITCH 粘性禁飞位（core.c updateArmingStatus
+                        # L415-423）：解锁被拒且 ARM 保持 ON 即置位——即使油门
+                        # 收回也不解锁，必须撤开关再重开（真机同款保护，防降
+                        # 油门瞬间电机意外起转）
+                        self._arm_switch_latched = True
             else:
                 self.armed = False    # 撤 ARM → 立即加锁
+                self._arm_switch_latched = False   # 同步清 ARM_SWITCH 禁飞位
             if not self.armed:
                 # 加锁期每帧重置（幂等）：解锁瞬间 = 干净初态——三轴 PID 积分/D
                 # 状态清零 + TPA 油门记忆回悬停初值 + 反乌龟解锁锁存清零
