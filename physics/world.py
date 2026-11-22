@@ -53,6 +53,16 @@ CCD_CPS_MIN = 0.002    # cps 浅嵌入防线：嵌入下限 m（<2mm 是静置 s
 CCD_CPS_MAX = 0.05     # cps 浅嵌入防线：嵌入上限 m（深穿透法线失真区不碰）
 CCD_MINI_STEP = 0.05   # 动态细分：逼近结构时每 mini 步最大位移 m（窗口覆盖保证）
 CCD_CONTACT_VMAX = 1.5  # 接触豁免的逼近速度上限 m/s（高速压面时接触正被突破，须拦）
+# 场景碰撞网格分块上限：pybullet createCollisionShape(GEOM_MESH) 数据走
+# 共享内存命令缓冲，有两条独立硬上限——顶点 ≈88k（二分实测 87616 OK /
+# 88209 FAIL）与索引 =524288=2^19（退化网格二分实测，524286 OK / 524289
+# FAIL；mctrk 缺陷取证 2026-11-22）。超限参数被截断、落入文件名加载路径
+# 报「createCollisionShape failed / Number of indices exceeds the maximum」。
+# 取安全余量 60k 顶点 / 480k 索引；超限网格按三角形贪心分块，各块独立建
+# 形状后以固定关节 link 合并进同一静态刚体（_mesh_body 单 id 语义不变，
+# CCD 三处归属判定零改动）
+MESH_CHUNK_VERTS = 60000
+MESH_CHUNK_IDX = 480000
 # 盒 8 角（机体系，HalfExtents 同碰撞盒）——投影半径计算用
 _HALF_CORNERS = [(sx * ARM, sy * ARM, sz * 0.04)
                  for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
@@ -146,14 +156,62 @@ class FlightWorld:
 
     def load_scene_mesh(self, obj_path: str, scale: float = 1.0):
         """场景 OBJ → 静态三角网格碰撞体（mass=0 → BVH 三角网格）。
-        mesh 刚体 id 记入 self._mesh_body（CCD 扫掠命中归属）"""
+        mesh 刚体 id 记入 self._mesh_body（CCD 扫掠命中归属）。
+        顶点超 MESH_CHUNK_VERTS 或索引超 MESH_CHUNK_IDX 时按三角形贪心分块
+        （mctrk 缺陷修复）：每块局部顶点重编号，独立 createCollisionShape
+        （单命令不超 pybullet 顶点/索引命令缓冲上限），再以固定关节 link
+        全部挂到同一 mass=0 静态刚体——rayTest/getClosestPoints 对 link
+        碰撞体天然归属同一 body id，下游 CCD 判定（== self._mesh_body）
+        无需感知分块"""
         verts, idx = parse_obj_collision(obj_path, scale)
-        log.info("collision mesh loaded: %s (%d tris)", obj_path, len(idx) // 3)
-        mesh = p.createCollisionShape(
-            p.GEOM_MESH, vertices=verts, indices=idx,
-            meshScale=(1, 1, 1), physicsClientId=self._cid)
-        self._mesh_body = p.createMultiBody(
-            0, mesh, basePosition=(0, 0, 0), physicsClientId=self._cid)
+        # 三角形贪心分块：块内顶点 ≤MESH_CHUNK_VERTS 且索引 ≤MESH_CHUNK_IDX
+        # （边界顶点跨块重复，总顶点略增无妨；按面序分块保空间局部性，有利
+        # BVH 查询）
+        chunks = []                       # [(局部顶点表, 局部索引表)]
+        cur_v, cur_i, remap = [], [], {}
+        for t in range(0, len(idx), 3):
+            tri = idx[t:t + 3]
+            n_new = sum(1 for v in tri if v not in remap)
+            if cur_i and (len(cur_v) + n_new > MESH_CHUNK_VERTS
+                          or len(cur_i) + 3 > MESH_CHUNK_IDX):
+                chunks.append((cur_v, cur_i))
+                cur_v, cur_i, remap = [], [], {}
+            local = []
+            for v in tri:
+                if v not in remap:
+                    remap[v] = len(cur_v)
+                    cur_v.append(verts[v])
+                local.append(remap[v])
+            cur_i.extend(local)
+        if cur_i:
+            chunks.append((cur_v, cur_i))
+        log.info("collision mesh loaded: %s (%d tris, %d chunk(s))",
+                 obj_path, len(idx) // 3, len(chunks))
+        shapes = [
+            p.createCollisionShape(
+                p.GEOM_MESH, vertices=cv, indices=ci,
+                meshScale=(1, 1, 1), physicsClientId=self._cid)
+            for cv, ci in chunks]
+        if len(shapes) == 1:
+            # 单块：原路径（既有场景行为逐位不变）
+            self._mesh_body = p.createMultiBody(
+                0, shapes[0], basePosition=(0, 0, 0),
+                physicsClientId=self._cid)
+        else:
+            # 多块：固定关节 link 合并为单静态刚体（base 无碰撞形状）
+            self._mesh_body = p.createMultiBody(
+                0, -1, basePosition=(0, 0, 0),
+                linkMasses=[0.0] * len(shapes),
+                linkCollisionShapeIndices=shapes,
+                linkVisualShapeIndices=[-1] * len(shapes),
+                linkPositions=[(0, 0, 0)] * len(shapes),
+                linkOrientations=[[0, 0, 0, 1]] * len(shapes),
+                linkInertialFramePositions=[(0, 0, 0)] * len(shapes),
+                linkInertialFrameOrientations=[[0, 0, 0, 1]] * len(shapes),
+                linkParentIndices=[0] * len(shapes),
+                linkJointTypes=[p.JOINT_FIXED] * len(shapes),
+                linkJointAxis=[[1, 0, 0]] * len(shapes),
+                physicsClientId=self._cid)
 
     def motor_thrusts_hover(self) -> list:
         """测试辅助：精确悬停单电机推力"""
