@@ -27,3 +27,4 @@ shader_packs/
 build/
 dist/
 *.spec
+flight_rec.jsonl

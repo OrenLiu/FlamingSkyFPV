@@ -18,6 +18,42 @@ ANG_DAMP = 0.01      # 角阻尼 N·m·s（桨气动阻尼，防 PID 振荡；�
                      # 作用对象是角速度、维持 rate 跟踪稳定，不做用户可调）
 REACT_K = 0.02       # 桨反扭矩系数 N·m/N（5寸桨动量理论悬停 Q/T≈0.013，取整偏稳）
 
+# --- 隧穿（tunneling）防护：速度向扫掠射线 CCD（常开 + 姿态投影半径 + 预穿带） ---
+# 根因（2026-11-19 两轮排查实证）：pybullet 离散接触检测对细分场景网格的检测
+# 窗口窄——高速时单子步位移（30m/s×1/240s=12.5cm）跳过窗口即整机穿墙；低速
+# 持续推力（满油压墙，~0.03m/s/子步重建）下原生接触顶不住则棘轮蠕穿。两轮
+# 结论：速度门控不可用——门控窗口内推力/重力自由重建速度照样磨穿任何薄面；
+# 唯一可靠阻挡 = 每子步沿速度方向 rayTestBatch 扫掠（射线走 BVH 精确几何查
+# 询，不依赖接触生成管线），命中即钳位到「盒前缘贴面前 CCD_MARGIN」+ 法向
+# 速度清零（非弹性）。
+# 防幽灵制动三设计（历史复杂方案被回退的主因，勿重蹈）：
+# 1. 投影半径姿态相关（CCD 不是固定球）：沿速度方向取盒 8 角最大投影——
+#    垂直起降时半径=0.04（薄向），侧向撞墙=0.115。落地钳到面+4.5cm（盒缘贴
+#    面 5mm），不是固定 0.13 悬空架高；悬停贴面时射线够不到面 → 零干预。
+# 2. 5mm 预穿带（CCD_MARGIN）：钳位目标不在面外远处，盒缘停在面前 5mm——
+#    原生接触可靠的面（大三角形）自然驻停接管；不可靠的面在带内锯齿稳定，
+#    不蠕穿（法向速度每子步清零，推力重建的毫米/子步级速度到不了穿透）。
+# 3. 只认场景 mesh 刚体（self._mesh_body）：无限地面 plane 原生接触可靠，
+#    不扫不钳——防贴地悬停收敛被高频清速破坏。
+# 已知限制与已证伪路线（第三轮排查，勿重试）：贴墙飞行+横向压墙分量时速度
+# 方向平行于墙，本射线对侧面的墙失明，存在 ~6cm 级侧向渗入稳态；「13 射线
+# 扇」（速度向+世界 6 轴向±）有离散方向洞（斜向三角形全打空）、「cps 全向
+# 最近点位置投影」在真实网格深穿透态 normalOnB 方向失真越推越穿（高速直撞
+# 30m/s 反而嵌 17~30cm）、「射线+cps 双防线」两法线源互相打架（侧压 -13cm）。
+# 注意：本 pybullet 构建（3.2.7）单发 p.rayTest 恒返回无命中（id=-1），必须用
+# p.rayTestBatch——探针实测 rayTest 对 plane/box 也全灭，非用法问题。
+# 性能：单射线 batch ~4µs × 240Hz 子步 ≈ 0.1% CPU，可常开。
+CCD_MARGIN = 0.005      # 盒前缘与命中面的安全间隙（预穿带宽度）m
+CCD_RESTITUTION = 0.25 # 撞击法向反弹系数（保撞击扭矩/翻滚物理，非全清）
+CCD_LANDING_VMAX = 6.0 # 起降豁免：朝上水平面逼近速度阈值 m/s（原生着陆物理）
+CCD_CPS_MIN = 0.002    # cps 浅嵌入防线：嵌入下限 m（<2mm 是静置 settle 量级）
+CCD_CPS_MAX = 0.05     # cps 浅嵌入防线：嵌入上限 m（深穿透法线失真区不碰）
+CCD_MINI_STEP = 0.05   # 动态细分：逼近结构时每 mini 步最大位移 m（窗口覆盖保证）
+CCD_CONTACT_VMAX = 1.5  # 接触豁免的逼近速度上限 m/s（高速压面时接触正被突破，须拦）
+# 盒 8 角（机体系，HalfExtents 同碰撞盒）——投影半径计算用
+_HALF_CORNERS = [(sx * ARM, sy * ARM, sz * 0.04)
+                 for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
+
 # 电机臂位置（机体系：+X 前 / +Y 左 / +Z 上），顺序 [FL, FR, BL, BR]
 ARMS = [(ARM, ARM, 0), (ARM, -ARM, 0), (-ARM, ARM, 0), (-ARM, -ARM, 0)]
 # 桨转向符号（绕机体 +Z 右手系）：FL/BR 逆时针、FR/BL 顺时针（对角同向、相邻反向，
@@ -100,17 +136,20 @@ class FlightWorld:
         # 桨反转标志（Task 50 v4）：False=正常飞行（推力沿机体 +Z）；True=反乌龟
         # 双向 DShot 桨反转（推力沿机体 −Z，见 set_prop_reverse）——逐帧由接线层设置
         self._prop_reverse = False
+        # 场景 mesh 刚体 id（CCD 扫掠命中归属用；None=未加载场景）
+        self._mesh_body = None
         # 渲染插值基准初始化（接线层 reset 前防御：body 初生位姿即基准）
         self._prev_pos, self._prev_quat = self._pose_snapshot()
 
     def load_scene_mesh(self, obj_path: str, scale: float = 1.0):
-        """场景 OBJ → 静态三角网格碰撞体（mass=0 → BVH 三角网格）"""
+        """场景 OBJ → 静态三角网格碰撞体（mass=0 → BVH 三角网格）。
+        mesh 刚体 id 记入 self._mesh_body（CCD 扫掠命中归属）"""
         verts, idx = parse_obj_collision(obj_path, scale)
         mesh = p.createCollisionShape(
             p.GEOM_MESH, vertices=verts, indices=idx,
             meshScale=(1, 1, 1), physicsClientId=self._cid)
-        p.createMultiBody(0, mesh, basePosition=(0, 0, 0),
-                          physicsClientId=self._cid)
+        self._mesh_body = p.createMultiBody(
+            0, mesh, basePosition=(0, 0, 0), physicsClientId=self._cid)
 
     def motor_thrusts_hover(self) -> list:
         """测试辅助：精确悬停单电机推力"""
@@ -130,7 +169,30 @@ class FlightWorld:
         # 渲染插值基准快照：prev = 本 tick 起点位姿（bullet 现值即 tick 末，
         # render_pose 在两态间插值；flight.py 每 tick 调 step → 插值窗恒 SIM_TICK）
         self._prev_pos, self._prev_quat = self._pose_snapshot()
-        h = dt / SUBSTEPS
+        # 动态子步细分（高速隧穿防线第三层）：单子步位移超过检测窗口宽度
+        # 时拦截依赖相位运气（用户取证：48m/s 撞墙 0.2m/子步，取证那次被
+        # 原生接触碰巧接住，回放相位偏 7cm 即穿）。仅在「高速 + 前方近距
+        # （本 tick 行程+30cm）有场景结构」时把子步细分到每 mini 步位移
+        # ≤CCD_MINI_STEP——自由飞行不细分，闭环对象动力学不变（TPA 标定
+        # 语义保持）。mini 步 ≤5cm 且 CCD 射线前瞻 ~0.3m，窗口覆盖有数学
+        # 保证（任何相位必有一个 mini 步落入检测窗）。
+        nsub = SUBSTEPS
+        if self._mesh_body is not None:
+            (lv0, _) = p.getBaseVelocity(self._body, physicsClientId=self._cid)
+            spd0 = math.sqrt(lv0[0]*lv0[0] + lv0[1]*lv0[1] + lv0[2]*lv0[2])
+            travel_tick = spd0 * dt
+            if travel_tick / SUBSTEPS > CCD_MINI_STEP and spd0 > 1e-6:
+                pos0 = self.pos
+                reach0 = travel_tick + 0.3
+                rs0 = p.rayTestBatch(
+                    [pos0],
+                    [(pos0[0] + lv0[0]/spd0 * reach0,
+                      pos0[1] + lv0[1]/spd0 * reach0,
+                      pos0[2] + lv0[2]/spd0 * reach0)],
+                    physicsClientId=self._cid)[0]
+                if rs0[0] == self._mesh_body and rs0[2] < 1.0:
+                    nsub = min(64, math.ceil(travel_tick / CCD_MINI_STEP))
+        h = dt / nsub
         drag_k = self._params.drag_k
         # setTimeStep 只在步长变化时设置（原每子步重复调用 PyBullet 包装，
         # 每帧 4 次冗余 C 包装调用与 tuple 分配；步长不变时 GL 不变）
@@ -138,7 +200,7 @@ class FlightWorld:
             p.setTimeStep(h, physicsClientId=self._cid)
             self._last_step_h = h
         sign = -1.0 if self._prop_reverse else 1.0   # 桨反转：推力/反扭矩取反
-        for _ in range(SUBSTEPS):
+        for _ in range(nsub):
             pos, quat = p.getBasePositionAndOrientation(
                 self._body, physicsClientId=self._cid)
             rot = glm.quat(quat[3], quat[0], quat[1], quat[2])  # bullet (x,y,z,w)→glm(w,x,y,z)
@@ -167,6 +229,116 @@ class FlightWorld:
             p.applyExternalTorque(self._body, -1,
                                   (-ANG_DAMP * av[0], -ANG_DAMP * av[1], -ANG_DAMP * av[2]),
                                   p.WORLD_FRAME, physicsClientId=self._cid)
+            # 隧穿防护（速度向扫掠射线，5cm/s 起扫）：命中 → 钳到盒前缘贴面
+            # 前 CCD_MARGIN（5mm 预穿带）+ 法向速度清零（非弹性）。阈值 0.05
+            # 避开静置 settle 噪声（mm/s 级微速扫掠会在 mesh 地板上与重力锯齿
+            # 抖动，Task 53 共面静置回归实证）。「很低速直撞」（用户实测 1~
+            # 3m/s 级）仍在覆盖内。见模块头注释。
+            # 已知限制：贴墙飞行+横向压墙分量时速度方向平行于墙，本射线对
+            # 侧面的墙失明，存在 ~6cm 级侧向渗入（真实场景实测稳态）；离散
+            # 射线扇/cps 全向投影两路线均已试败（方向洞/法线失真越推越穿），
+            # 勿在未取证的几何代理上再叠加防层。
+            if speed > 0.05 and self._mesh_body is not None:
+                travel = speed * h
+                # 速度向前缘投影半径（盒 8 角沿速度方向最大投影）
+                ux, uy, uz = lv[0] / speed, lv[1] / speed, lv[2] / speed
+                wc = [rot * glm.vec3(cx_, cy_, cz_)
+                      for cx_, cy_, cz_ in _HALF_CORNERS]
+                rmax = max(0.0, max(o.x * ux + o.y * uy + o.z * uz
+                                    for o in wc))
+                reach = travel + rmax + CCD_MARGIN
+                rs = p.rayTestBatch(
+                    [(pos[0], pos[1], pos[2])],
+                    [(pos[0] + ux * reach, pos[1] + uy * reach,
+                      pos[2] + uz * reach)],
+                    physicsClientId=self._cid)[0]
+                if rs[0] == self._mesh_body and rs[2] < 1.0:
+                    hit, n = rs[3], rs[4]
+                    # 法向几何（斜向命中正确）：间隙与钳位沿命中法线——沿射线
+                    # 回退在斜向时法向投影不足，角点仍过面（取证：质心只退到
+                    # 面外 3cm、角点嵌 8cm）。rmax_n = 盒 8 角沿法线最大投影。
+                    rmax_n = max(0.0, max(o.x * n[0] + o.y * n[1] + o.z * n[2]
+                                          for o in wc))
+                    gap = ((pos[0] - hit[0]) * n[0] + (pos[1] - hit[1]) * n[1]
+                           + (pos[2] - hit[2]) * n[2]) - rmax_n
+                    vn = lv[0] * n[0] + lv[1] * n[1] + lv[2] * n[2]
+                    # 起降豁免：低速落向朝上水平面（|nz|>0.7 且逼近速度 <6m/s）
+                    # 不拦截——水平大面接触生成可靠（bando 平台实测 10/10 落
+                    # 稳），原生撞击物理（翻滚/滑行/回弹手感）完整保留；CCD
+                    # 拦截会软化撞击（倾斜坠落翻滚 800→427°/s 实证）。高速
+                    # 俯冲（>6m/s）与竖直墙/斜面撞击不豁免（隧穿风险场景）。
+                    if n[2] > 0.7 and -vn < CCD_LANDING_VMAX:
+                        pass
+                    # 接触态豁免：接触管线正在工作（含地面 plane 接触）时绝不
+                    # 干预——正常接触压缩（bullet allowedPenetration 4cm 内）
+                    # 的任何清速/推挤都会破坏接触约束（crashflip 压地滚转失
+                    # 控 6567°、静置 jitter 教训）。撞墙后进入接触态的压制由
+                    # 本豁免+法向弹性自然平衡（MT 真值 6/6，勿再加"深嵌干预"
+                    # ——夹层结构会被推挤楔入，历史案例 #3 教训）。
+                    elif (not p.getContactPoints(
+                            bodyA=self._body, physicsClientId=self._cid)
+                          or -vn > CCD_CONTACT_VMAX) \
+                            and gap - travel < CCD_MARGIN:
+                        safe = rmax_n + CCD_MARGIN
+                        p.resetBasePositionAndOrientation(
+                            self._body,
+                            (hit[0] + n[0] * safe, hit[1] + n[1] * safe,
+                             hit[2] + n[2] * safe),
+                            quat, physicsClientId=self._cid)
+                        # 法向速度部分弹性（e=0.25）：非全清——全清会杀死撞击
+                        # 物理的接触扭矩（倾斜坠落翻滚 800→392°/s 回归实证），
+                        # 反弹 25% 保住「砰感」与翻滚；位置已钳带内不影响防穿。
+                        if vn < 0:
+                            k = 1.0 + CCD_RESTITUTION
+                            p.resetBaseVelocity(
+                                self._body,
+                                (lv[0] - k * vn * n[0], lv[1] - k * vn * n[1],
+                                 lv[2] - k * vn * n[2]),
+                                av, physicsClientId=self._cid)
+            # cps 浅嵌入防线（速度向射线盲区补漏，常开）：速度与面掠射角大
+            # 时（用户取证案例：撞墙弹跳后下沉中缓慢北移，78° 掠射——速度向
+            # 射线在 reach 内法向前进 3.6cm，打不到 3cm 外的墙）盒角浅嵌入
+            # 渐进推进直至整盒穿越（正确判据实测前倾满油 6/12 穿越一半）。
+            # cps 在浅嵌区（-CCD_CPS_MAX < gap < -CCD_CPS_MIN）翻回法线可信；
+            # 深穿透区（normalOnB 失真，历史「越推越穿」教训）与 <2mm 微嵌
+            # （静置 settle 量级）不碰。同样受起降/接触豁免约束（crashflip
+            # 压地浅嵌有接触 → 豁免；静置接触闪烁的无接触子步嵌入 <2mm →
+            # 不触发）。
+            if self._mesh_body is not None:
+                cps = p.getClosestPoints(self._body, self._mesh_body, 0.0,
+                                         physicsClientId=self._cid)
+                best = None               # 最深浅嵌点对
+                for cp in cps:
+                    g = cp[8]
+                    if -CCD_CPS_MAX < g < -CCD_CPS_MIN and \
+                            (best is None or g < best[0]):
+                        best = (g, cp)
+                if best is not None:
+                    g, cp = best
+                    n = cp[7]
+                    if g < 0:
+                        n = (-n[0], -n[1], -n[2])   # 穿透态翻回推离方向
+                    vn = lv[0] * n[0] + lv[1] * n[1] + lv[2] * n[2]
+                    if not (n[2] > 0.7 and -vn < CCD_LANDING_VMAX) and \
+                            (not p.getContactPoints(
+                                bodyA=self._body, physicsClientId=self._cid)
+                             or -vn > CCD_CONTACT_VMAX):
+                        pen = CCD_MARGIN - g
+                        cur = p.getBasePositionAndOrientation(
+                            self._body, physicsClientId=self._cid)[0]
+                        p.resetBasePositionAndOrientation(
+                            self._body,
+                            (cur[0] + n[0] * pen, cur[1] + n[1] * pen,
+                             cur[2] + n[2] * pen),
+                            quat, physicsClientId=self._cid)
+                        if vn < 0:
+                            k = 1.0 + CCD_RESTITUTION
+                            p.resetBaseVelocity(
+                                self._body,
+                                (lv[0] - k * vn * n[0],
+                                 lv[1] - k * vn * n[1],
+                                 lv[2] - k * vn * n[2]),
+                                av, physicsClientId=self._cid)
             p.stepSimulation(physicsClientId=self._cid)
 
     @property
