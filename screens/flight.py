@@ -1,5 +1,7 @@
 """飞行界面：场景选择 → 花式飞行（相机由 PyBullet 位姿驱动）+ HUD/OSD + Esc 菜单"""
+import json
 import math
+import os
 import time
 import imgui
 import pygame
@@ -64,6 +66,14 @@ class FlightScreen(Screen):
         self._sim_acc = 0.0
         self._esc_open = False
         self._flight_time_s = 0.0   # 飞行计时（MSP 快照/OSD 消费，暂停不累计）
+        # 飞行取证记录器（FLIGHT_REC=1 开启）：每 tick 追加位姿/速度/杆量到
+        # flight_rec.jsonl（相对 cwd），用于穿墙等缺陷的精确复现回放——用户
+        # 复现一次穿越后用该轨迹逐 tick 回放定位失效子步。默认关闭零开销
+        self._rec = None
+        if os.environ.get("FLIGHT_REC"):
+            self._rec = open("flight_rec.jsonl", "a", buffering=1)
+            self._rec.write(json.dumps({"event": "session",
+                                        "wall": time.time()}) + "\n")
         # OSD 距离状态（Task 47，HOME_DIST/FLIGHT_DIST 数据源）：水平面取
         # bullet (x,y)（z 为高度，与 alt_m 同源同单位惯例——米）；锁定后冻结
         self._home_xy = None        # 起飞点水平位置（None=从未解锁）
@@ -500,6 +510,20 @@ class FlightScreen(Screen):
             self._world.set_prop_reverse(
                 self._fc.flip_over_latched and self._fc.armed)
             self._world.step(self._fc.motor_thrusts(motors), SIM_TICK)
+            # 取证记录（FLIGHT_REC=1）：每 tick 位姿/速度/角速度/杆量
+            if self._rec is not None:
+                q = self._world.quat
+                self._rec.write(json.dumps({
+                    "t": round(self._flight_time_s, 4),
+                    "pos": [round(c, 4) for c in self._world.pos],
+                    "quat": [round(q.x, 5), round(q.y, 5),
+                             round(q.z, 5), round(q.w, 5)],
+                    "vel": [round(c, 3) for c in self._world.velocity],
+                    "gyro": [round(c, 1) for c in self._world.gyro_dps],
+                    "ch": [round(ch.throttle, 3), round(ch.yaw, 3),
+                           round(ch.roll, 3), round(ch.pitch, 3)],
+                    "armed": self._fc.armed,
+                }) + "\n")
         # OSD 距离状态（Task 47）：world.step 后位置已就绪，armed 为 fc.update
         # 后的本帧值——解锁沿/累计/冻结判定见 _track_flight_distance
         self._track_flight_distance(self._world.pos, self._fc.armed)
@@ -643,6 +667,8 @@ class FlightScreen(Screen):
                 imgui.close_current_popup()
             if imgui.button("重置位置", u(220), u(44)):
                 self._world.reset(self._scene.spawn)
+                if self._rec is not None:
+                    self._rec.write(json.dumps({"event": "reset"}) + "\n")
                 self._fc.disarm()   # 位置重置联动加锁（Task 14）：重置后须重新解锁
                 br = getattr(self._fc, "battery_reset", None)
                 if br is not None:
