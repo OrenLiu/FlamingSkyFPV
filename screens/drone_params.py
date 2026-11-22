@@ -5,6 +5,8 @@ snapshot_tune/sync_tune_to_ui 转入 virtual 域由地面站调整，转换语�
 单测覆盖）。保存一律落预设文件（save_preset），一期 store.save("drone")
 路径已退役。用户裁定（一期沿用）：PID 与 rate 三轴独立 + 全参数数值输入框
 （量级跨度大，滑条精度不足）。"""
+import logging
+
 import imgui
 import pygame
 from .base import Screen
@@ -15,6 +17,8 @@ from config_store import (DRONES_DIR, DroneParams, PIDGains, RateParams,
                           sanitize_preset_id, set_cells_auto, set_cells_manual)
 from physics.battery import CHEMS   # 真实电池模拟：化学体系标签/满电放空参考值
 from ui_scale import u
+
+log = logging.getLogger(__name__)
 
 RATE_TYPES = ["betaflight_actual", "linear"]
 AXES = ["roll", "pitch", "yaw"]
@@ -307,6 +311,7 @@ class DroneParamsScreen(Screen):
         """落盘工作副本到 _edit_id；编辑对象为当前机时同步运行对象——
         参数即时生效（一期语义），并防退出 save_all 把旧运行对象覆盖回
         预设文件（编辑非当前机时不碰运行对象，杜绝跨机串写）"""
+        log.info("drone params persisted: preset='%s'", self._edit_id)
         save_preset(DRONES_DIR, self._edit_id, self._p)
         if self._edit_id == self.app.settings.current_drone_id:
             self.app.drone_params = _clone_params(self._p)
@@ -323,6 +328,7 @@ class DroneParamsScreen(Screen):
         if new_id in self._known_ids:
             return
         # 先写新文件再删旧文件：中途异常时数据不丢
+        log.info("drone preset renamed: '%s' -> '%s'", old_id, new_id)
         save_preset(DRONES_DIR, new_id, self._p)
         delete_preset(DRONES_DIR, old_id)
         self._known_ids.discard(old_id)

@@ -1,10 +1,13 @@
 """配置持久化：dataclass ↔ JSON，损坏自动备份回默认（设计文档第 7 节）"""
 import dataclasses
 import json
+import logging
 import math
 import os
 import shutil
 from dataclasses import dataclass, field
+
+log = logging.getLogger(__name__)
 
 # 显示模式合法值（app 窗口分支与设置页共用同一来源，防字面量漂移）
 DISPLAY_MODES = ("fullscreen", "fixed_window", "window")
@@ -356,12 +359,15 @@ class ConfigStore:
         os.makedirs(self.config_dir, exist_ok=True)
         path = self._path(name)
         if not os.path.exists(path):
+            log.info("config missing, using defaults: %s", path)
             return cls()  # 无文件 → 默认值（首启动自动生成的效果由后续 save 达成）
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             obj = _rebuild(cls, data)
+            log.info("load config: %s", path)
         except (json.JSONDecodeError, TypeError, KeyError):
+            log.warning("config corrupt, backed up to .bak, using defaults: %s", path)
             shutil.copy2(path, path + ".bak")  # 备份损坏文件
             return cls()
         # Settings 显示模式迁移/归一：legacy fullscreen bool → display_mode
@@ -390,6 +396,7 @@ class ConfigStore:
         if cls is DroneParams and isinstance(data, dict) \
                 and data.get("params_schema") != PARAMS_SCHEMA:
             ver = data.get("params_schema")
+            log.info("params schema migrated: v%s -> v%s (%s)", ver, PARAMS_SCHEMA, path)
             # v6 阻力二次化：凡旧档 drag_k 一律 /DRAG_REF_SPEED——30m/s 参考速度
             # 处阻力大小不变（线性 T13 极速标定参考点），高速手感连续；v4 及更早
             # 档 drag_k 同为线性语义，一并换算
@@ -422,6 +429,7 @@ class ConfigStore:
                 json.dump(dataclasses.asdict(obj), f, ensure_ascii=False,
                           indent=2)
             os.replace(tmp, path)
+            log.info("save config: %s", path)
         except BaseException:
             try:
                 os.remove(tmp)
@@ -473,6 +481,7 @@ def delete_preset(drones_dir: str, preset_id: str) -> None:
     try:
         os.remove(os.path.join(
             drones_dir, f"{sanitize_preset_id(preset_id)}.json"))
+        log.info("delete preset: %s", preset_id)
     except FileNotFoundError:
         pass
 
@@ -487,6 +496,7 @@ def copy_preset(drones_dir: str, src_id: str, new_name: str) -> str:
         new_id = f"{base}-{n}"
         n += 1
     ConfigStore(drones_dir).save(new_id, params)
+    log.info("copy preset: %s -> %s", src_id, new_id)
     return new_id
 
 def migrate_legacy_drone(config_dir: str) -> None:

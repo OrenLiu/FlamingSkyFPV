@@ -137,16 +137,16 @@ class CliSession:
             self._send(line + b"\r\n" + _PROMPT)
             return
         if cmd == "exit":
-            log.debug("CLI 命令：exit")
+            log.debug("CLI command: exit")
             self._send(_EXIT_RESPONSE)
             self._on_exit()
             return
         out = bytearray(line + b"\r\n")  # 回显（sentinel 匹配依据）
         if cmd == "version":
-            log.debug("CLI 命令：version")
+            log.debug("CLI command: version")
             out += _version_line() + b"\r\n"
         elif cmd == "help":
-            log.debug("CLI 命令：help")
+            log.debug("CLI command: help")
             for help_line in _HELP_LINES:
                 out += help_line + b"\r\n"
         else:
@@ -192,7 +192,7 @@ class MspCliDemux:
         if self._pending_enter is not None:
             leftover = self._pending_enter
             self._pending_enter = None
-            log.info("CLI 进入序列命中，连接切换文本模式")
+            log.info("CLI entry sequence matched, connection switched to text mode")
             self._parser.reset()  # 丢弃滞留半帧，防污染 exit 后的 MSP 会话
             self._send(_BANNER)
             self._cli = CliSession(self._send, self._exit_cli)
@@ -212,6 +212,6 @@ class MspCliDemux:
 
     def _exit_cli(self) -> None:
         """CliSession exit 回调：恢复 MSP 模式（连接保持，供重连序列）"""
-        log.info("CLI exit，连接恢复 MSP 模式")
+        log.info("CLI exit, connection restored to MSP mode")
         self._cli = None
         self._parser.reset()

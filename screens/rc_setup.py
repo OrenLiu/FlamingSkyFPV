@@ -1,4 +1,5 @@
 """遥控通道设置：按钮式通道映射 + AUX 同构行 + 配置向导（回中流程与摇杆演示图）"""
+import logging
 import math
 
 import imgui
@@ -9,6 +10,8 @@ from input.joystick import JoystickInput
 from input.wizard import (AxisCapture, MODE_STICKS, DIRECTION, STICK_AXIS,
                           demo_motion, verify_offset, channel_inverted)
 from ui_scale import u
+
+log = logging.getLogger(__name__)
 
 CHANNELS = ["throttle", "yaw", "roll", "pitch"]
 CHANNEL_CN = {"throttle": "油门", "yaw": "偏航", "roll": "横滚", "pitch": "俯仰"}
@@ -131,6 +134,8 @@ class RCSetupScreen(Screen):
             if joy is not None and devs:
                 self.app.rc_config.mode = "joystick"
                 self.app.rc_config.device_name = devs[self._dev_index][1]
+                log.info("rc config saved: mode=joystick device='%s'",
+                         self.app.rc_config.device_name)
                 self.app.store.save("rc", self.app.rc_config)
                 self.app.rc_input = self._make_joystick_input()
                 self._msg = "已应用手柄绑定"
@@ -323,6 +328,8 @@ class RCSetupScreen(Screen):
                 axis=axis, inverted=wz["inverted"][c])
         self.app.rc_config.mode = "joystick"
         self.app.rc_config.device_name = joy.get_name()
+        log.info("rc wizard finished: device='%s' bound=%s inverted=%s",
+                 joy.get_name(), wz["bound"], wz["inverted"])
         self.app.store.save("rc", self.app.rc_config)
         self.app.rc_input = self._make_joystick_input()
         self._wizard = None

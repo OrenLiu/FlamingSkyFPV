@@ -1,7 +1,10 @@
 """PyBullet 物理世界：无人机刚体 + 场景碰撞网格 + bullet→render 坐标转换（设计文档第 4 节）"""
+import logging
 import math
 import glm
 import pybullet as p
+
+log = logging.getLogger(__name__)
 
 ARM = 0.115          # 电机臂长（米，5 寸机）
 # 固定飞控 tick（帧率解耦）：闭环控制频率与渲染帧率彻底解耦——设置页帧率
@@ -145,6 +148,7 @@ class FlightWorld:
         """场景 OBJ → 静态三角网格碰撞体（mass=0 → BVH 三角网格）。
         mesh 刚体 id 记入 self._mesh_body（CCD 扫掠命中归属）"""
         verts, idx = parse_obj_collision(obj_path, scale)
+        log.info("collision mesh loaded: %s (%d tris)", obj_path, len(idx) // 3)
         mesh = p.createCollisionShape(
             p.GEOM_MESH, vertices=verts, indices=idx,
             meshScale=(1, 1, 1), physicsClientId=self._cid)
