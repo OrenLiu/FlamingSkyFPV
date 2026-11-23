@@ -153,7 +153,6 @@ class FlightScreen(Screen):
         imgui.set_next_window_size(*io.display_size)
         imgui.begin("##select", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_BACKGROUND)
         imgui.text("花式飞行——选择场景")
-        imgui.text("( 竞速飞行将在二期开放 )")
         imgui.separator()
         # 网格卡片：封面缩略图 + 名称按钮，按窗口宽度自动折行
         valid = [s for s in self.app.scenes if s.valid]
