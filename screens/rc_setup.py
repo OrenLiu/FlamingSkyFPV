@@ -6,6 +6,7 @@ import imgui
 import pygame
 from .base import Screen
 from config_store import AxisBinding
+from input.channels import NullInput
 from input.joystick import JoystickInput
 from input.wizard import (AxisCapture, MODE_STICKS, DIRECTION, STICK_AXIS,
                           demo_motion, verify_offset, channel_inverted)
@@ -17,8 +18,6 @@ CHANNELS = ["throttle", "yaw", "roll", "pitch"]
 CHANNEL_CN = {"throttle": "油门", "yaw": "偏航", "roll": "横滚", "pitch": "俯仰"}
 
 AUX_KEYS = ("aux1", "aux2", "aux3", "aux4")
-# 键盘模式 AUX 拨动键提示（input/keyboard.py 的 F1/F2/F4 键位）
-AUX_KEYBOARD_HINT = "键盘模式 AUX 拨动键：F1 解锁 / F2 自稳 / F4 反乌龟"
 
 
 # 行列位与演示图几何常量（imgui 坐标系 y 向下；主通道行与 AUX 行共用列位）
@@ -81,25 +80,20 @@ class RCSetupScreen(Screen):
         imgui.set_next_window_position(u(30), u(30))
         imgui.set_next_window_size(u(560), 0)
         imgui.begin("遥控通道设置", flags=imgui.WINDOW_NO_COLLAPSE)
-        # 每帧只读一次输入（顶部按钮区与各通道行预览共用）：KeyboardInput.read 有
-        # 油门积分副作用，多处各调一次会把油门加速 N 倍
+        # 每帧只读一次输入（顶部提示区与各通道行预览共用）
         ch = self.app.rc_input.read(self._dt)
-        mode = self.app.rc_config.mode
         devs = joystick_devices()
         joy = self._safe_joystick()
         if devs:
             self._dev_index = min(self._dev_index, len(devs) - 1)
         self._feed_listen(joy)   # 每帧推进映射监听（渲染接线）
-        mode_txt = "手柄" if mode == "joystick" else "键盘（兜底）"
-        imgui.text(f"当前模式: {mode_txt}")
         if getattr(self.app, "joystick_lost", False):
-            imgui.text("⚠ 手柄已断开，已自动切回键盘")
+            imgui.text("⚠ 手柄已断开")
         elif getattr(self.app, "joystick_recovered", False):
             imgui.text("✓ 手柄已自动连接")
         imgui.separator()
         if joy is None:
             imgui.text("未检测到手柄（插入后自动出现）")
-            imgui.text(AUX_KEYBOARD_HINT)
             # 设备行位置：无手柄时向导按钮保留在原位但不可用（点击给提示）
             if imgui.button("启动配置向导", u(180), u(40)):
                 self._msg = "未检测到手柄，无法启动向导"
@@ -118,8 +112,6 @@ class RCSetupScreen(Screen):
                 self._render_axis_row(c, ch, n_axis)
             imgui.separator()
             imgui.text("AUX 开关绑定（模式开关等；右键绑定按钮清除）")
-            if mode != "joystick":
-                imgui.text(AUX_KEYBOARD_HINT)
             n_btn = joy.get_numbuttons()
             for i, key in enumerate(AUX_KEYS, start=1):
                 self._render_aux_row(i, key, n_btn, n_axis, ch)
@@ -132,10 +124,8 @@ class RCSetupScreen(Screen):
         imgui.set_cursor_pos_x(u(364))   # 窗口宽 560：右缘对齐「保存并应用」
         if imgui.button("保存并应用", u(180), u(40)):
             if joy is not None and devs:
-                self.app.rc_config.mode = "joystick"
                 self.app.rc_config.device_name = devs[self._dev_index][1]
-                log.info("rc config saved: mode=joystick device='%s'",
-                         self.app.rc_config.device_name)
+                log.info("rc config saved: device='%s'", self.app.rc_config.device_name)
                 self.app.store.save("rc", self.app.rc_config)
                 self.app.rc_input = self._make_joystick_input()
                 self._msg = "已应用手柄绑定"
@@ -326,7 +316,6 @@ class RCSetupScreen(Screen):
         for c, axis in wz["bound"].items():
             self.app.rc_config.mappings[c] = AxisBinding(
                 axis=axis, inverted=wz["inverted"][c])
-        self.app.rc_config.mode = "joystick"
         self.app.rc_config.device_name = joy.get_name()
         log.info("rc wizard finished: device='%s' bound=%s inverted=%s",
                  joy.get_name(), wz["bound"], wz["inverted"])
@@ -365,9 +354,8 @@ class RCSetupScreen(Screen):
     def _make_joystick_input(self):
         joy = self._safe_joystick()
         if joy is None:
-            # 同帧拔柄的极小概率兜底：回落键盘，避免 rc_input 悬空（同 App 层策略）
-            from input.keyboard import KeyboardInput
-            return KeyboardInput()
+            # 同帧拔柄的极小概率兜底：空输入，避免 rc_input 悬空（同 App 层策略）
+            return NullInput()
         # AUX 按钮源 + 轴数/按钮数必须传入（同 App._make_rc_input），旧两参
         # 构造下 button 绑定的 AUX 求值恒 0、无越界防御
         return JoystickInput(joy.get_axis, self.app.rc_config.mappings,

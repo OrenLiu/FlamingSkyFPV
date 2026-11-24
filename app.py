@@ -22,7 +22,7 @@ from scene_loader import list_scenes
 from shaderpacks import runtime
 from shaderpacks.loader import load_pack
 from shaderpacks.registry import list_packs
-from input.keyboard import KeyboardInput
+from input.channels import NullInput
 from input.joystick import JoystickInput
 from msp.handlers import make_identity_handlers
 from msp.server import VfcServer
@@ -154,8 +154,8 @@ class App:
         # run() 各打点全 if 守卫，行为与无记录仪时一致
         self._flog = FrameLogger(self) if frame_log_enabled else None
         self.rc_input = self._make_rc_input()
-        # 手柄热插拔状态（poll_joysticks 双向维护）：lost=配置手柄消失已回落
-        # 键盘（rc_setup 明示）；recovered=消失后自动拾取成功（对称提示）
+        # 手柄热插拔状态（poll_joysticks 双向维护）：lost=配置手柄消失已切到空输入
+        # NullInput（rc_setup 明示）；recovered=消失后自动拾取成功（对称提示）
         self.joystick_lost = False
         self.joystick_recovered = False
         self._joystick_pickup_after = 0.0  # 自动拾取退避到期时刻（monotonic 秒）
@@ -369,7 +369,7 @@ class App:
 
     # ---- 输入 ----
     def _make_rc_input(self):
-        if self.rc_config.mode == "joystick" and self.rc_config.device_name:
+        if self.rc_config.device_name:
             for i in range(pygame.joystick.get_count()):
                 try:
                     j = pygame.joystick.Joystick(i)
@@ -383,29 +383,29 @@ class App:
                                              num_buttons=j.get_numbuttons())
                 except Exception:
                     continue  # 构造/init 失败（热插拔窗口期设备半就绪）→ 试下一个
-        return KeyboardInput()  # 无手柄/未配置/全部失败 → 键盘兜底（UI 明示）
+        return NullInput()  # 无手柄/未配置/全部失败 → 空输入（UI 明示）
 
     def poll_joysticks(self):
         """手柄插拔双向检测（一期「消失回落」语义保持 + Task 38「出现拾取」）：
-        - 消失方向（一期）：当前 JoystickInput 且设备列表空 → 回落键盘 +
-          joystick_lost 标记（rc_setup 明示）+ 日志
-        - 出现方向（Task 38）：配置为手柄但当前 KeyboardInput（启动前未接 /
+        - 消失方向（一期）：当前 JoystickInput 且设备列表空 → 切到空输入
+          NullInput + joystick_lost 标记（rc_setup 明示）+ 日志
+        - 出现方向（Task 38）：配置为手柄但当前非 JoystickInput（启动前未接 /
           启动后接入 / 拔出后重插）→ _make_rc_input 重扫设备名命中即自动重建；
           成功清 lost、置 recovered（对称提示）+ 日志；失败（init 异常/名字
-          未出现）保持键盘，按 JOYSTICK_PICKUP_RETRY_S 退避重试防抖动死循环。
+          未出现）保持空输入，按 JOYSTICK_PICKUP_RETRY_S 退避重试防抖动死循环。
           热插拔发现依赖 SDL 事件泵——run() 每帧 event.get() 先于此调用"""
         self.joystick_lost = getattr(self, "joystick_lost", False)
         self.joystick_recovered = getattr(self, "joystick_recovered", False)
         if isinstance(self.rc_input, JoystickInput):
             if pygame.joystick.get_count() == 0:
-                self.rc_input = KeyboardInput()
+                self.rc_input = NullInput()
                 self.joystick_lost = True
                 self.joystick_recovered = False
-                log.info("joystick lost, fallback to keyboard: %s",
+                log.info("joystick lost, fallback to null input: %s",
                          self.rc_config.device_name)
             return
-        # 出现方向：仅手柄配置参与自动拾取（键盘配置的手柄只作 UI 设备源）
-        if self.rc_config.mode != "joystick" or not self.rc_config.device_name:
+        # 出现方向：仅已配置手柄参与自动拾取（未配置时手柄只作 rc_setup 页的设备源）
+        if not self.rc_config.device_name:
             return
         now = time.monotonic()
         if now < getattr(self, "_joystick_pickup_after", 0.0):
@@ -510,9 +510,6 @@ class App:
                 self.screen.handle_event(event)
             if self._flog: self._flog.mark("ev")
 
-            # 键盘输入喂给 RC 层（只传按下集合，避免 input 层依赖 pygame）
-            pressed = {i for i, on in enumerate(pygame.key.get_pressed()) if on}
-            self.rc_input.set_pressed(pressed)
             self.poll_joysticks()
 
             # MSP 请求分派（Task 16）：accept 新连接 + 取空队列应答；

@@ -17,5 +17,9 @@ class RCInput(ABC):
     @abstractmethod
     def read(self, dt: float) -> Channels:
         """返回当前四通道值；dt 为距上次 read 的秒数"""
-    def set_pressed(self, pressed: set):
-        """接收当前按下的按键集合（仅键盘实现需要，默认空操作）"""
+
+class NullInput(RCInput):
+    """空输入源：无手柄/未配置/手柄断开时的占位。四通道与 AUX 恒中位（油门 0），
+    飞机不响应任何输入（飞行页 HUD 会提示未连接手柄）"""
+    def read(self, dt: float) -> Channels:
+        return Channels()

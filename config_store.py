@@ -277,9 +277,10 @@ def _default_mappings() -> dict:
 
 @dataclass
 class RCConfig:
-    """遥控配置：键盘或手柄 + 四通道绑定 + 四路 AUX 绑定"""
-    mode: str = "keyboard"            # "keyboard" | "joystick"
-    device_name: str = ""
+    """遥控配置：手柄设备 + 四通道绑定 + 四路 AUX 绑定。键盘飞行输入已移除：
+    旧档的 mode 键（"keyboard"|"joystick"）加载时被 _rebuild 忽略（非字段键），
+    下次保存自然消失，无需迁移、不升 schema"""
+    device_name: str = ""            # 已配置手柄的设备名；空 = 未配置
     mappings: dict = field(default_factory=_default_mappings)
 
 def default_drone_params() -> DroneParams:

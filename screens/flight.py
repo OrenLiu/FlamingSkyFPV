@@ -644,22 +644,17 @@ class FlightScreen(Screen):
         imgui.text(f"横滚 {roll:5.0f}° 俯仰 {pitch:5.0f}° 偏航 {yaw:5.0f}°")
         if ch:
             imgui.text(f"油门 {ch.throttle * 100:3.0f}%")
-        # 输入来源徽标（一期遗留 minor）：键盘显示固定文案，手柄显示设备名；
-        # 主四通道有未绑定路数时追加计数提示（全绑定不显示）。Task 38 一致性
-        # 修正：配置为手柄但实际 rc_input 已回落键盘（拔出）时如实显示键盘
-        # 兜底——徽标跟随实际输入源，消除配置态/实际态不一致窗口期（自动
-        # 拾取成功后两者天然同步一致）
+        # 输入来源徽标：手柄显示设备名；未连接/已断开时如实提示。主四通道有未绑定
+        # 路数时追加计数提示（全绑定不显示）。徽标跟随实际输入源（rc_input）——
+        # 配置为手柄但已拔出（自动拾取前）时也如实反映断开态
         rc = self.app.rc_config
-        if rc.mode == "joystick" and not isinstance(self.app.rc_input, JoystickInput):
-            src = "键盘（手柄已断开）"
-        else:
-            src = "键盘" if rc.mode == "keyboard" else (rc.device_name or "手柄")
-        # 未绑定计数仅 joystick 模式显示（键盘模式无绑定概念，噪音抑制——
-        # Task 9 deferred → M6 顺路批收口）
         n = 0
-        if rc.mode == "joystick":
+        if isinstance(self.app.rc_input, JoystickInput):
+            src = rc.device_name or "手柄"
             n = sum(1 for c in ("throttle", "yaw", "roll", "pitch")
                     if rc.mappings[c].axis < 0)
+        else:
+            src = "手柄已断开" if getattr(self.app, "joystick_lost", False) else "未连接手柄"
         imgui.text(f"输入: {src}" + (f"（{n} 路未绑定）" if n else ""))
         imgui.text("Esc 暂停菜单")
         imgui.end()
