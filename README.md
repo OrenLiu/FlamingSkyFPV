@@ -1,65 +1,228 @@
 # FlamingSkyFPV
 
-开源 FPV 穿越机模拟器——一切皆可自定义：场景、赛道、障碍均可导入；参数全开放（Rate / PID / 重量 / KV / 摄像头角度），改了就飞。
+[English](README.md) | [简体中文](README_zh.md)
 
-## 运行
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-```bash
-pip install pybullet pygame imgui soup3D   # 其余依赖随发行包分发
-python main.py
+[![Rendering](https://img.shields.io/badge/Rendering-soup3D-E34F26)](https://pypi.org/project/soup3D/)
+[![Physics](https://img.shields.io/badge/Physics-PyBullet-76B900)](https://pybullet.org/)
+[![UI](https://img.shields.io/badge/UI-Dear%20ImGui-20B2AA)](https://github.com/ocornut/imgui)
+[![Window & Input](https://img.shields.io/badge/Window%20%26%20Input-pygame-6C5CE7)](https://www.pygame.org/)
+
+Open-source FPV drone simulator where everything is customizable: import your own scenes, tracks and obstacles; every parameter is open (Rate / PID / weight / KV / camera angle) — change it and fly.
+
+*The interface is currently Chinese-only. On-screen labels are given below in English, with the original Chinese in parentheses.*
+
+## Compatibility
+Supports 64-bit Windows, macOS and Linux.
+
+### Minimum
+- **CPU**  
+  Dual-core processor (Intel Core i3 / AMD Ryzen 3 class)
+- **GPU**  
+  Any graphics card with OpenGL 3.3 support; integrated graphics is enough
+- **Memory**  
+  4 GB
+- **Radio / gamepad**  
+  A radio transmitter or gamepad that supports the `HID` protocol
+
+### Recommended
+- **CPU**  
+  Quad-core processor or better (Intel Core i5 / AMD Ryzen 5 class)
+- **GPU**  
+  A dedicated graphics card, or a recent integrated one (the "Quality First" preset adds PBR, soft shadows and screen-space reflections, which is more demanding)
+- **Memory**  
+  8 GB
+- **Radio / gamepad**  
+  A radio transmitter or gamepad that supports the `HID` protocol
+
+## Running the App
+1. Download the file for your operating system from the project's `Releases` page
+2. Extract the downloaded file
+3. Run the executable (on Windows, for example, the executable is `FlamingSkyFPV.exe`)
+
+## Building from Source
+1. **Set up the environment**  
+   Install Python 3.10 or 3.11 (3.10 is the version used for development and packaging). Prebuilt wheels of the imgui 2.0.0 dependency exist only up to Python 3.11 and only for x86_64 macOS, so a newer Python or an Apple Silicon Mac means compiling it yourself. A clean virtual environment is recommended. Then install the dependencies from the repository root:
+   ```bash
+   pip install pybullet pygame imgui "soup3D>=7.1" Pillow
+   ```
+   soup3D is the rendering engine; installing it pulls in its own dependencies PyOpenGL, pyglm, numpy and imageio, and Pillow is used by the "Quality First" preset. PyInstaller does not need to be installed manually either — the build script installs it automatically if it is missing. Once the dependencies are installed, run `python main.py` from the repository root to start the app directly, without packaging it
+2. **Run the build script**  
+   Run `python build.py` to start building the executable  
+   Optional flags: `--console` (console build, useful for troubleshooting), `--no-scene` (do not bundle the scenes), `--zip` (compress the output to a zip after building)
+3. **Collect the output**  
+   The final output is placed in the `dist` folder
+   - Windows: `dist/FlamingSkyFPV/FlamingSkyFPV.exe`
+   - macOS: `dist/FlamingSkyFPV.app`
+   - Linux: `dist/FlamingSkyFPV/FlamingSkyFPV`
+
+   Note: PyInstaller cannot cross-compile, so the build has to run on the platform you want the executable for
+
+## Note: Set Up Your Radio / Gamepad Before First Use!
+1. Go to **RC Channel Setup**（遥控通道设置）and click **Start Setup Wizard**（启动配置向导）
+2. Choose your transmitter mode (美国手 is Mode 2, 日本手 is Mode 1 and 中国手 is Mode 3). Mode 2, with the throttle on the left stick, is the most common
+3. Follow the prompts and move the sticks as instructed
+4. When you are done, move the sticks and check that each channel moves in the correct direction
+
+## About the Simulator
+
+FlamingSkyFPV is an open-source FPV drone simulator built around one idea: everything is customizable. It simulates more than just flying. Scenes, tracks and obstacles can all be imported, and tuning is simulated too — the program can act as a "virtual flight controller", so you tune the simulated drone with a real Betaflight ground station.
+
+### Features
+
+- **Custom scenes**: scenes, tracks and obstacles are scene units organized as folders — drop one into `scene/` and restart the program, and it shows up in the flight list.
+- **Every parameter is open**: Rate, PID, TPA, camera angle, weight, motor KV, battery, air drag and more are all adjustable, and take effect as soon as you save. Multiple drone presets can be created, copied, renamed, deleted and switched at any time.
+- **Two ways to tune**: in "Parameter Mode"（参数模式）you tune directly in the app; in "Virtual FC Mode"（虚拟飞控模式）Rate / PID / TPA are handed over to the Betaflight ground station and take effect as soon as you save.
+- **Realistic battery simulation**: voltage sag and capacity drain are modeled from battery chemistry, cell count, capacity and C-rating, with OSD warnings when the voltage gets low.
+- **Betaflight-style OSD**: Virtual FC Mode displays an OSD on the MAX7456 character grid; which elements are shown and where are edited in the ground station.
+- **Radio transmitter / gamepad**: supports radios and gamepads using the HID protocol, with both a step-by-step setup wizard and manual channel binding, plus hot-plug support.
+- **Graphics presets and shader packs**: two built-in presets, "Performance First"（性能优先）and "Quality First"（画面优先）, and support for home-made shader packs.
+- **Cross-platform**: one code base runs on Windows, macOS and Linux; the release builds run straight after extracting, with no installation.
+
+### Main Menu
+
+| Menu | Description |
+| --- | --- |
+| Start Flying（开始飞行） | Pick a scene and fly. Freestyle is available now; racing is planned for a later release |
+| Settings（设置） | Display mode (Fullscreen / Fixed-size Window / Windowed), resolution, frame-rate limit, graphics preset |
+| Drone Parameters（无人机参数） | Manage drone presets, adjust flight parameters, connect a ground station |
+| RC Channel Setup（遥控通道设置） | Configure the channels of your radio / gamepad, or start the setup wizard |
+| Quit（退出） | Close the program |
+
+### Flight Controls
+
+- **`F3`**: show or hide debug info (frame rate and camera position) on any screen.
+- **`Esc`**: open the pause menu — "Resume"（继续飞行）, "Reset Position"（重置位置）, "Back to Main Menu"（返回主菜单）. "Reset Position" returns the drone to the spawn point, disarms it and recharges the battery to full.
+
+In **Parameter Mode** there is no arming step: throttle up and the drone flies. **Virtual FC Mode** works like a real drone: the ARM switch has to be on to arm, and the throttle must be below 10% when arming; if arming is refused because the throttle is too high, turn the ARM switch off and on again before retrying. The factory presets bind ARM to AUX1, flip-over-after-crash to AUX3 and ANGLE (self-level) to AUX4; these assignments can be changed on the Modes page of the ground station.
+
+The simulator does not detect crashes: after a crash the motors keep running, so disarm, flip the drone over or use "Reset Position" yourself.
+
+### Tuning
+
+The "Drone Parameters" page manages all drone presets as a list: click a row to make it the current drone; each row has "Edit"（编辑）, "Copy"（复制）and "Delete"（删除）buttons, and "+ New Drone"（+新建无人机）adds one. The adjustable parameters are:
+
+| Category | Parameters |
+| --- | --- |
+| Rate | Rate type: `betaflight_actual` (Betaflight Actual Rates) or `linear` (linear, with an extra "max deg/s at full stick" field); RC Rate, Super Rate and Expo for roll, pitch and yaw independently |
+| PID | P, I and D for each axis, on the Betaflight scale |
+| TPA | Attenuation percentage and breakpoint |
+| Frame | Weight, motor KV, thrust-to-weight ratio, air drag, camera angle |
+| Battery | With "Realistic Battery Simulation"（真实电池模拟）on: chemistry (LiPo / LiHV / Li-ion), cell count, capacity, C-rating, and the warning / minimum / maximum cell voltage; with it off, the battery voltage is set directly |
+
+Every drone has two tuning modes, switched at the bottom of the edit view:
+
+- **Parameter Mode**: all of the parameters above are adjusted directly in the app.
+- **Virtual FC Mode**: after you click "Convert to Virtual FC"（转换为虚拟飞控）and confirm, Rate / PID / TPA are handed over to the ground station and the form keeps only the hardware parameters such as frame and battery; "Convert to Parameter Mode"（转换为参数模式）writes the ground-station tuning back into the app. In this mode the warning / minimum / maximum cell voltage can only be changed on the Power & Battery page of the ground station. The factory preset `virtual_FC` is in this mode.
+
+With "Realistic Battery Simulation" enabled, thrust drops as the voltage sags, capacity is drained by integrating the current, and the battery can be run all the way down; the Virtual FC Mode OSD flashes LOW BATTERY when the cell voltage falls below the warning voltage and LAND NOW below the minimum voltage (the Parameter Mode HUD shows no battery information). Entering a flight or using "Reset Position" is the same as fitting a freshly charged battery.
+
+### Tuning with the Betaflight Ground Station
+
+1. On the "Drone Parameters" page select a drone and click "Edit"（编辑）; if it is not in Virtual FC Mode yet, click "Convert to Virtual FC"（转换为虚拟飞控） and confirm.
+2. Click "Connect Ground Station"（接入地面站）. A persistent "Ground Station Connection"（地面站连接）window appears listing the available addresses (there is no PTY serial entry on Windows); use any one of them:
+
+   | Transport | Address | Intended for |
+   | --- | --- | --- |
+   | TCP | `tcp://127.0.0.1:5761` | Betaflight Configurator desktop app |
+   | WebSocket | `ws://127.0.0.1:5762` | Betaflight Configurator in the browser |
+   | PTY serial | The path shown in the window (`/dev/pts/N` on Linux, `/dev/ttysNNN` on macOS) | Serial tools; Linux / macOS only |
+
+3. In the ground station enable **Expert Mode**, choose manual device selection, enter the address above and click Connect. The browser version auto-connects to its built-in demo flight controller by default, so make sure to select the address manually.
+4. You can now tune on the PID tuning, Rates, Modes, OSD and Power & Battery pages; saving takes effect in the simulator immediately. Click "Disconnect"（断开）in the window or quit the program to disconnect.
+
+The simulator identifies itself as a Betaflight 4.5.1 flight controller. While flying in Virtual FC Mode the Betaflight-style OSD is shown; which elements it displays and where are edited on the OSD page of the ground station.
+
+### Importing Scenes
+
+Each subfolder of `scene/` is one scene; drop one in and restart the program, and it appears in the scene list under "Start Flying"（开始飞行）:
+
+```
+scene/<scene name>/
+├── config.json      # scene configuration
+├── <model>.obj      # main model, used together with its .mtl material file
+├── <textures>       # referenced by the .mtl
+└── <cover image>    # optional, shown as the cover in the scene list
 ```
 
-无手柄时自动使用键盘兜底：W/S 油门（保持式）、A/D 偏航、↑↓ 俯仰、←→ 横滚。Esc 打开暂停菜单。
+Example `config.json`:
 
-已知限制：帧时长超过 1/30s 时物理步长会被钳位（防穿透），低帧率下表现为时间膨胀（动作比真实慢）——性能优化（缓存渲染、着色器预设，常规配置 60fps）已交付，见「着色器预设」节。
-
-## 虚拟飞控模式与地面站调参
-
-每台无人机在参数页有两种模式：「参数模式」为本程序 UI 直接调参（一期行为）；「虚拟飞控模式」把 Rate/PID/TPA 调参域移交地面站。参数页编辑态底部点「转换为虚拟飞控」并确认（调参字段快照进虚拟飞控域），此后表单只保留硬件参数（重量/KV/推重比/电池电压与节数/空气阻力/摄像头角度，两模式共享），Rate/PID/TPA 在 Betaflight 地面站中修改、保存后模拟器即时生效；「转换为参数模式」可随时换回（调参域回写 UI）。
-
-真实电池模拟（参数页勾选「真实电池模拟」开启）：不再直接设电压，改为电池类型（LiPo/LiHV/Li-ion）、节数、容量、放电倍率（C）。开启后模拟推油降压（电流×内阻，C 数越高内阻越低）、电量消耗（按电流积分，可完全放干——深放后电压继续下探至过放极限）与 OSD 告警（芯压低于警告电压闪 LOW BATTERY、低于最低电压闪 LAND NOW）；地面站 Power 页经 MSP 可见实时电压/电流/消耗。告警阈值（警告/最低/最高单芯电压，默认 3.5/3.3/4.3V）：参数模式在无人机参数页调整；虚拟飞控模式在地面站 Power & Battery 页调整（MSP 32/33 读写）。每次进入飞行页或「重置位置」= 换新电池满电；写参数不清电。
-
-接入地面站：虚拟飞控模式表单点「接入地面站」，提示框显示三个通道地址，任选其一在地面站连接（连接后在飞行界面保持，地面站可实时观察姿态）：
-
-| 通道 | 地址 | 适用形态 |
-|---|---|---|
-| TCP | `tcp://127.0.0.1:5761` | 桌面版（Tauri；验收锁定 2026.6.2） |
-| WebSocket | `ws://127.0.0.1:5762` | 浏览器/dev-server 形态 |
-| PTY 串口 | 提示框显示的路径（形如 `/dev/pts/N`，仅 Linux） | 旧版 Electron 形态或串口工具 |
-
-接入前提：地面站开启 **Expert Mode**，设备选择「手动选择」后填入上表地址再 Connect（浏览器形态默认自动连接内置 virtual 演示飞控，务必手动选择）。
-
-飞行键位（键盘兜底的 AUX 拨动键）：**F1 解锁 / F2 自稳 / F4 反乌龟**（分别拨动 AUX1/2/3；F3 为调试覆盖层热键故避开）。在地面站 Modes 页把 ARM / ANGLE / FLIP OVER AFTER CRASH 绑到对应 AUX 通道区间即可生效。虚拟飞控模式飞行界面显示 Betaflight 风格 OSD（MAX7456 字符网格，30×16），元素与布局可在地面站 OSD 页编辑。
-
-二期验收清单见 `docs/acceptance-phase2.md`。
-
-## 着色器预设
-
-设置页「画质预设」可切换着色器预设包：内置「性能优先」（默认管线）与「画面优先」（PBR + 太阳软阴影 + SSR 反射 + HDR/ACES 色调映射）。自制或下载的预设包放入 `shader_packs/<包名>/`（`pack.json` + `pack.py`），在设置页选择即可——详见 `docs/shader_packs.md`（注意：运行第三方包等于执行任意代码，只装可信来源）。
-
-## 场景格式
-
-`scene/<场景名>/` 目录：`config.json`（`name` 显示名、`model` OBJ 文件、可选 `scale` 缩放倍数、`spawn` 出生点 [x,y,z] 与 `sky` 天空配置）+ OBJ/MTL + 贴图。放入即出现在"开始飞行"列表中。
-
-`sky` 段（可选）：`sun_yaw`/`sun_pitch` 太阳角度（度，同时驱动方向光与画面优先模式的天空盒太阳）、`sun_color` [r,g,b] 太阳颜色、`panorama` 场景目录内等距圆柱全景图文件名（画面优先模式的天空盒；缺省程序生成蓝天渐变+云朵+太阳）。示例：`"sky": {"sun_yaw": 120, "sun_pitch": -30, "sun_color": [1.0, 0.6, 0.2]}`。
-
-顶层快捷字段（可选）：`sun_toward` [yaw, pitch, roll]（度，与引擎光源 toward 参数同语义，roll 对平行光方向无效）等价于 `sky` 段的 `sun_yaw`+`sun_pitch`；`sun_color` [r,g,b]、`ambient` [r,g,b] 分别是太阳颜色与环境光颜色的顶层写法。`sky` 段显式指定时优先于顶层字段。示例：`"sun_toward": [0, -15, 0], "ambient": [0.45, 0.45, 0.45]`。
-
-## 技术栈
-
-soup3D（渲染）· PyBullet（物理）· pygame（窗口）· imgui（UI）
-
-一期范围与设计见 `docs/specs/`。
-
-## 打包与独立运行
-
-`build.py` 为 linux / macOS / Windows 打包(PyInstaller 无法交叉编译,须在目标系统上运行本脚本):
-
-```bash
-python build.py             # 标准构建:onedir 无控制台,随包携带本机 scene/* 作为种子场景
-python build.py --no-scene  # 不随包携带场景
-python build.py --console   # 控制台版(排障)
-python build.py --zip       # 构建后压缩 dist 产物
+```json
+{
+  "name": "My Scene",
+  "model": "map.obj",
+  "cover": "cover.png",
+  "scale": 1.0,
+  "spawn": [0, 0, 2],
+  "sky": { "sun_yaw": 120, "sun_pitch": -30, "sun_color": [1.0, 0.6, 0.2] }
+}
 ```
 
-独立运行首启动自举(`bootstrap.py`):在数据根生成 `config/`(默认 settings/rc + 出厂无人机 **init_drone / virtual_FC**)与 `scene/`(包内种子场景拷入;此后 scene/ 归用户管理)。数据根规则:源码运行=仓库根;Windows/Linux 打包版=可执行文件目录(便携式),不可写时回退用户数据目录;macOS .app=用户数据目录。`FLAME_DATA_DIR` 环境变量可强制指定数据根(测试/便携盘)。中文字体优先用数据根 `fonts/` 下用户自置字体,其后各平台系统字体。PTY 串口通道仅 Linux/macOS(Windows 无 pty/tty,TCP 与 WebSocket 通道不受影响)。
+| Field | Required | Description |
+| --- | --- | --- |
+| `name` | Yes | Scene name shown in the list |
+| `model` | Yes | File name of the OBJ model inside the scene folder; used for both rendering and collision |
+| `cover` | No | Cover image file name, relative to the scene folder |
+| `scale` | No | Model scale factor, default `1.0` |
+| `spawn` | No | Spawn point `[x, y, z]` in meters, default `[0, 0, 2]` |
+| `sky` | No | `sun_yaw` and `sun_pitch` set the sun angles in degrees (default `30` and `-60`); `sun_color` is the sun color `[r, g, b]`; `panorama` is the file name of an equirectangular panorama inside the scene folder, used as the skybox by the "Quality First" preset (a procedural sky is generated when omitted) |
+| `sun_toward` | No | Top-level shorthand: sun direction `[yaw, pitch]` in degrees, equivalent to `sun_yaw` + `sun_pitch` in `sky`; an explicit `sky` entry wins |
+| `sun_color`, `ambient` | No | Top-level shorthand: sun color and ambient light color `[r, g, b]`, default `[0.8, 0.8, 0.75]` and `[0.45, 0.45, 0.45]` |
+
+Only OBJ + MTL models are supported at the moment. Scenes with an invalid `config.json` or a missing model file are marked "invalid"（无效）and skipped rather than disappearing from the list. See "Data Directory" below for where scenes are stored.
+
+### Graphics Presets and Shader Packs
+
+Switch shader preset packs in "Settings → Graphics Preset"（画质预设）:
+
+| Preset | Effect |
+| --- | --- |
+| Performance First (default) | The default rendering pipeline, with the best performance |
+| Quality First | PBR materials + soft sun shadows + SSR reflections + HDR/ACES tone mapping |
+
+To use a home-made or downloaded pack, put it in `shader_packs/<pack name>/` (containing `pack.json` and `pack.py`), restart the program and select it on the Settings page; it takes effect the next time you enter a flight scene. See the [shader pack author guide](docs/shader_packs.md) (in Chinese) for how to write one. Warning: running a third-party `pack.py` executes arbitrary code — there is no sandbox, so only install packs from trusted sources.
+
+### Data Directory
+
+Settings, drone presets, radio configuration, scenes, home-made shader packs and logs all live in the same data directory:
+
+| Path | Contents |
+| --- | --- |
+| `config/settings.json` | Settings |
+| `config/rc.json` | Radio channel configuration |
+| `config/drones/` | Drone presets |
+| `scene/` | Scenes |
+| `shader_packs/` | Home-made shader packs |
+| `logs/` | Run logs, one file per launch |
+
+Where that directory is: the repository root when running from source; the folder containing the executable for the Windows and Linux builds (or the user data directory if that folder is not writable); `~/Library/Application Support/FlamingSkyFPV/` on macOS. The `FLAME_DATA_DIR` environment variable overrides it.
+
+### Known Limitations
+
+- Racing is not implemented yet; only freestyle is available.
+- When a frame takes longer than 1/30 s the physics step is clamped to prevent tunneling, so at low frame rates the simulation runs slower than real time.
+- The PID simulation has no feedforward, D-Min or I-term relax, so changing those in the ground station has no effect.
+- The "Vertical Sync"（垂直同步）frame-rate option only takes effect on Linux (X11); on Windows and macOS selecting it behaves like "Unlimited"（无限制）.
+
+## License
+
+This project is open source under the [MIT License](LICENSE), Copyright (c) 2026 OrenLiu. You are free to use, copy, modify and distribute it and to use it commercially, provided that the copyright and permission notices are kept in all copies; the software is provided "as is", without warranty of any kind.
+
+This project is built on the following open-source projects:
+
+| Project | Used for | License |
+| --- | --- | --- |
+| [soup3D](https://pypi.org/project/soup3D/) | 3D rendering engine | MIT |
+| [PyBullet](https://pybullet.org/) | Physics engine | zlib |
+| [Dear ImGui](https://github.com/ocornut/imgui) / [pyimgui](https://github.com/pyimgui/pyimgui) | User interface | MIT / BSD-3-Clause |
+| [pygame](https://www.pygame.org/) | Window and input | LGPL-2.1 |
+| [NumPy](https://numpy.org/) | Numerical computing | BSD-3-Clause |
+| [PyOpenGL](https://pyopengl.sourceforge.io/) | OpenGL bindings | BSD |
+| [PyGLM](https://github.com/Zuzu-Typ/PyGLM) | Math library | zlib |
+| [imageio](https://imageio.github.io/) | Image reading | BSD-2-Clause |
+| [Pillow](https://python-pillow.org/) | Image processing | HPND |
+
+The release builds are packaged with [PyInstaller](https://pyinstaller.org/), whose bootloader is licensed under GPL-2.0-or-later with a special exception that allows it to be used for non-free programs.

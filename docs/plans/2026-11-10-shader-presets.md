@@ -3132,7 +3132,7 @@ PY
 - [ ] 5. 提交（docs + README + .gitignore）：
 
 ```bash
-cd /home/oren/project/codes/python/FlamingSkyFPV && git add docs/shader_packs.md README.md .gitignore && git commit -m $'docs: 着色器预设包作者指南与 README/.gitignore\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>'
+cd /home/oren/project/codes/python/FlamingSkyFPV && git add docs/shader_packs.md README_zh.md .gitignore && git commit -m $'docs: 着色器预设包作者指南与 README/.gitignore\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>'
 ```
 
 ---

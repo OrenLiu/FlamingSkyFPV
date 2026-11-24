@@ -39,7 +39,7 @@ def channel_inverted(channel: str, raw_inverted: bool) -> bool:
 def demo_motion(mode, channel):
     """向导演示动画参数 → (杆侧, 轴向, 屏幕方向单位向量 (dx, dy))。
     杆侧∈{"左","右"}，轴向∈{"上下","左右"}；向量 = 指令方向在屏幕上的指向
-    （imgui y 向下，"向上" = dy −1）。模式/通道不在表内返回 None（如键盘模式）。"""
+    （imgui y 向下，"向上" = dy −1）。模式/通道不在表内返回 None。"""
     entry = STICK_AXIS.get(mode, {}).get(channel)
     if entry is None:
         return None

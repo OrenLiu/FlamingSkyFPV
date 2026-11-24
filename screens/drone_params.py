@@ -177,7 +177,6 @@ class DroneParamsScreen(Screen):
         # 固定高度后 imgui 自动为溢出内容出滚动条（一期参数窗口同做法）
         imgui.set_next_window_size(u(620), io.display_size[1] - u(60))
         imgui.begin("无人机参数", flags=imgui.WINDOW_NO_COLLAPSE)
-        imgui.text("点击行选中当前无人机；复制可新建预设")
         imgui.separator()
         avail = imgui.get_content_region_available_width()
         for pid in self._ids:
@@ -461,10 +460,7 @@ class DroneParamsScreen(Screen):
         """虚拟飞控模式表单：仅硬件参数（Rate/PID/TPA 已转入 virtual 域，
         由地面站经 MSP 调整，参数页不再展示）+ 逐项「回退」"""
         imgui.text("虚拟飞控模式：调参请接入地面站调整")
-        # F 键提示行（Task 8 deferred → M6 顺路批）：飞行页键盘 AUX 拨动键，
-        # 键定义见 input/keyboard.py（F4 避开 F3 调试热键）
-        imgui.text("开关通道：F1 解锁 / F2 自稳 / F4 反乌龟（仅键盘模式生效）")
-        imgui.text("手柄模式：在「遥控通道设置」页核对 AUX1-4 实时条是否随手柄开关动作，再在地面站 Modes 页把模式区间画在该开关激活位")
+        imgui.text("开关通道：在「遥控通道设置」页核对 AUX1-4 实时条是否随手柄开关动作，再在地面站 Modes 页把模式区间画在该开关激活位")
         imgui.separator()
         self._render_body_form(p, d)
         imgui.separator()   # 机体段与电池节数分隔（Task 8 deferred 外观项 → M6 顺路批）
