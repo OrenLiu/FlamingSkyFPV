@@ -209,7 +209,7 @@ Where that directory is: the repository root when running from source; the folde
 
 ## License
 
-This project is open source under the [MIT License](LICENSE), Copyright (c) 2026 OrenLiu. You are free to use, copy, modify and distribute it and to use it commercially, provided that the copyright and permission notices are kept in all copies; the software is provided "as is", without warranty of any kind.
+This project is open source under the [MIT License](LICENSE), Copyright (c) 2026 刘申怿. You are free to use, copy, modify and distribute it and to use it commercially, provided that the copyright and permission notices are kept in all copies; the software is provided "as is", without warranty of any kind.
 
 This project is built on the following open-source projects:
 
