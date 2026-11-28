@@ -53,6 +53,11 @@ CCD_CPS_MIN = 0.002    # cps 浅嵌入防线：嵌入下限 m（<2mm 是静置 s
 CCD_CPS_MAX = 0.05     # cps 浅嵌入防线：嵌入上限 m（深穿透法线失真区不碰）
 CCD_MINI_STEP = 0.05   # 动态细分：逼近结构时每 mini 步最大位移 m（窗口覆盖保证）
 CCD_CONTACT_VMAX = 1.5  # 接触豁免的逼近速度上限 m/s（高速压面时接触正被突破，须拦）
+# 接触豁免的嵌入深度守卫 m（2026-11-28 慢速压穿取证）：有接触但嵌入已超
+# 此深度＝接触约束正被持续推力压败（倒扣满油贴面滑行实测嵌入 1.9→5.9cm
+# 全程被接触豁免放行，越过 cps 5cm 窗口后全盲坠穿）——此时必须推离，不能
+# 再信任接触管线。2cm 在 bullet 接触压缩稳态（~1cm 量级）之上、cps 窗口内
+CCD_CPS_UNEXEMPT_DEPTH = 0.02
 # 场景碰撞网格分块上限：pybullet createCollisionShape(GEOM_MESH) 数据走
 # 共享内存命令缓冲，有两条独立硬上限——顶点 ≈88k（二分实测 87616 OK /
 # 88209 FAIL）与索引 =524288=2^19（退化网格二分实测，524286 OK / 524289
@@ -329,7 +334,11 @@ class FlightWorld:
                     # 稳），原生撞击物理（翻滚/滑行/回弹手感）完整保留；CCD
                     # 拦截会软化撞击（倾斜坠落翻滚 800→427°/s 实证）。高速
                     # 俯冲（>6m/s）与竖直墙/斜面撞击不豁免（隧穿风险场景）。
-                    if n[2] > 0.7 and -vn < CCD_LANDING_VMAX:
+                    # 姿态门（2026-11-28 取证）：倒扣（up.z<0）不可能在「降落」
+                    # ——倒扣满油压地（用户机 16.6× 悬停）曾被豁免放行全部
+                    # <6m/s 下沉段，原生接触顶不住 → 棘轮沉穿 0.4m 地块悬在
+                    # 视觉地面之下。倒扣态交给 CCD 钳位（与满油压墙同机制）。
+                    if n[2] > 0.7 and -vn < CCD_LANDING_VMAX and up.z > 0.0:
                         pass
                     # 接触态豁免：接触管线正在工作（含地面 plane 接触）时绝不
                     # 干预——正常接触压缩（bullet allowedPenetration 4cm 内）
@@ -350,18 +359,25 @@ class FlightWorld:
                         # 法向速度部分弹性（e=0.25）：非全清——全清会杀死撞击
                         # 物理的接触扭矩（倾斜坠落翻滚 800→392°/s 回归实证），
                         # 反弹 25% 保住「砰感」与翻滚；位置已钳带内不影响防穿。
+                        # ⚠️本构建 resetBasePositionAndOrientation 会隐式清零
+                        # 线/角速度（2026-11-28 实测：仅改位置 (8,2,0)→全零），
+                        # 故速度必须无条件整体回写——vn≥0（掠射/擦面）时原样
+                        # 恢复，否则整机被隐形刹停、翻滚瞬间死掉
                         if vn < 0:
                             k = 1.0 + CCD_RESTITUTION
-                            p.resetBaseVelocity(
-                                self._body,
-                                (lv[0] - k * vn * n[0], lv[1] - k * vn * n[1],
-                                 lv[2] - k * vn * n[2]),
-                                av, physicsClientId=self._cid)
+                            newv = (lv[0] - k * vn * n[0],
+                                    lv[1] - k * vn * n[1],
+                                    lv[2] - k * vn * n[2])
+                        else:
+                            newv = lv
+                        p.resetBaseVelocity(
+                            self._body, newv, av, physicsClientId=self._cid)
             # cps 浅嵌入防线（速度向射线盲区补漏，常开）：速度与面掠射角大
             # 时（用户取证案例：撞墙弹跳后下沉中缓慢北移，78° 掠射——速度向
             # 射线在 reach 内法向前进 3.6cm，打不到 3cm 外的墙）盒角浅嵌入
             # 渐进推进直至整盒穿越（正确判据实测前倾满油 6/12 穿越一半）。
-            # cps 在浅嵌区（-CCD_CPS_MAX < gap < -CCD_CPS_MIN）翻回法线可信；
+            # cps 在浅嵌区（-CCD_CPS_MAX < gap < -CCD_CPS_MIN）法线可信
+            # （穿透态 cp[7] 恒指推离方向，勿翻转——历史翻转致推深+弹向异常）；
             # 深穿透区（normalOnB 失真，历史「越推越穿」教训）与 <2mm 微嵌
             # （静置 settle 量级）不碰。同样受起降/接触豁免约束（crashflip
             # 压地浅嵌有接触 → 豁免；静置接触闪烁的无接触子步嵌入 <2mm →
@@ -377,14 +393,30 @@ class FlightWorld:
                         best = (g, cp)
                 if best is not None:
                     g, cp = best
+                    # 穿透态 cp[7] 恒指 EPA 最小分离方向（多数侧）＝推离方向
+                    # （2026-11-28 双侧嵌入实测），直接用。勿做「反速度定向」
+                    # 或「机心侧翻转」：跨面态与进近侧嵌入的机心距面同构
+                    # （h−|g|），几何不可分；速度定向在重叠薄面簇（seam 状态
+                    # 3/5/10 历史事故锚点）会把机盒推穿背后的另一薄面
+                    # （实证 0.41m），簇内平行薄面法线一致也无法门控——已
+                    # 两轮证伪，勿重试。已知残余：无接触稀疏网格的骑跨态
+                    # raw 指穿出侧（理论洞，暂无真实复现路径——贴面蠕变由
+                    # 接触豁免+原生接触稳住，实测不穿）。
                     n = cp[7]
-                    if g < 0:
-                        n = (-n[0], -n[1], -n[2])   # 穿透态翻回推离方向
+                    # 射线防线本子步可能已改写速度：重读最新值（沿用子步开头
+                    # 快照 lv 会把反弹前速度覆写回去——同子步双防线竞写）
+                    lv, av = p.getBaseVelocity(
+                        self._body, physicsClientId=self._cid)
                     vn = lv[0] * n[0] + lv[1] * n[1] + lv[2] * n[2]
-                    if not (n[2] > 0.7 and -vn < CCD_LANDING_VMAX) and \
+                    # 起降豁免含同款姿态门（up.z>0，见上方射线防线注释）；
+                    # 接触豁免加嵌入深度守卫（g < -CCD_CPS_UNEXEMPT_DEPTH
+                    # ＝接触被压败，2026-11-28 慢速压穿取证，见常量注释）
+                    if not (n[2] > 0.7 and -vn < CCD_LANDING_VMAX
+                            and up.z > 0.0) and \
                             (not p.getContactPoints(
                                 bodyA=self._body, physicsClientId=self._cid)
-                             or -vn > CCD_CONTACT_VMAX):
+                             or -vn > CCD_CONTACT_VMAX
+                             or g < -CCD_CPS_UNEXEMPT_DEPTH):
                         pen = CCD_MARGIN - g
                         cur = p.getBasePositionAndOrientation(
                             self._body, physicsClientId=self._cid)[0]
@@ -393,14 +425,18 @@ class FlightWorld:
                             (cur[0] + n[0] * pen, cur[1] + n[1] * pen,
                              cur[2] + n[2] * pen),
                             quat, physicsClientId=self._cid)
+                        # ⚠️同上：位置 reset 隐式清零线/角速度，必须无条件
+                        # 整体回写——vn<0 沿法线弹性反射、vn≥0 原样恢复
+                        # （历史只写反射分支 → 贴面切向滑行 8m/s 被灭到 1.1）
                         if vn < 0:
                             k = 1.0 + CCD_RESTITUTION
-                            p.resetBaseVelocity(
-                                self._body,
-                                (lv[0] - k * vn * n[0],
-                                 lv[1] - k * vn * n[1],
-                                 lv[2] - k * vn * n[2]),
-                                av, physicsClientId=self._cid)
+                            newv = (lv[0] - k * vn * n[0],
+                                    lv[1] - k * vn * n[1],
+                                    lv[2] - k * vn * n[2])
+                        else:
+                            newv = lv
+                        p.resetBaseVelocity(
+                            self._body, newv, av, physicsClientId=self._cid)
             p.stepSimulation(physicsClientId=self._cid)
 
     @property
