@@ -319,9 +319,11 @@ void main()
                             / (SSR_MAX_DIST * SSR_MAX_DIST), 0.0, 1.0);
             } else if (skyEnabled == 1) {
                 // 屏内未命中：按反射方向回退采样天空盒——出屏反射也有天空、
-                // 云朵与太阳（画面优先需求：天空中的东西出现在镜面反射中）
+                // 云朵与太阳（画面优先需求：天空中的东西出现在镜面反射中）。
+                // textureLod 同 _SKY_FS：反射方向的 atan 分支-cut 同样会因
+                // 隐式导数跳 mip 出竖线，且循环内导数本就非一致（未定义）
                 vec3 worldR = (viewInv * vec4(R, 0.0)).xyz;
-                refl = texture(skySampler, sky_uv(normalize(worldR))).rgb;
+                refl = textureLod(skySampler, sky_uv(normalize(worldR)), 0.0).rgb;
                 k = smoothness * smoothness
                     * (SSR_BASE + fresnel * SSR_STRENGTH);
             } else {
@@ -357,7 +359,11 @@ void main()
 {
     vec4 far_pt = invViewProj * vec4(UV * 2.0 - 1.0, 1.0, 1.0);
     vec3 dir = normalize(far_pt.xyz / far_pt.w - camPos);
-    FragColor = vec4(texture(skySampler, sky_uv(dir)).rgb, 1.0);
+    // textureLod 显式 LOD0：atan 的 ±π 分支-cut 经线上 u 从 1 跳回 0，
+    // 隐式导数 dFdx(u)≈1 → GPU 直选最粗 mip（≈全图平均色）→ 贯穿天顶-
+    // 天底的竖线。天空盒按屏幕分辨率绘制、1024×512 纹理恒处放大/1:1
+    // 区间（全帧本就 LOD=0），显式取 0 无画质损失且根除导数依赖。
+    FragColor = vec4(textureLod(skySampler, sky_uv(dir), 0.0).rgb, 1.0);
 }
 """
 
